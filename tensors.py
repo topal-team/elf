@@ -6,7 +6,9 @@ if __name__ == "__main__":
     world_size = int(os.environ["WORLD_SIZE"])
     rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
-    
+
+    torch.cuda.set_device(rank)
+
     # Processes send to next rank and receive from previous one
     src = (global_rank - 1) % world_size
     dst = (global_rank + 1) % world_size
@@ -34,4 +36,6 @@ if __name__ == "__main__":
     status.wait()
     print(f'[GPU {global_rank}] - Received {y} asynchronously')
 
-    dist.destroy_process_group()
+    dist.barrier()
+    if dist.is_initialized():
+        dist.destroy_process_group()
