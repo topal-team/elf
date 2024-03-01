@@ -8,9 +8,9 @@ def main(world_size, rank, global_rank):
     src = (global_rank - 1) % world_size
     dst = (global_rank + 1) % world_size
 
-
     # Synchronous
     x = torch.randint(0, 10, (3,)).to(rank)
+
     for r in range(world_size):
         if r == global_rank:
             print(f'[GPU {global_rank}] - Sending {x} synchronously')
