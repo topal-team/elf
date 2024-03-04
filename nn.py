@@ -81,32 +81,29 @@ def async_pipelined_forward(layer, sample):
 def pipelined_backward(layers, loss):
     loss.backward() # compute for last block
     layer = layers[global_rank] # should already be on right device
-    grads = layer.inputs[-1].grad.data
     splits = iter(grads.split(1, dim=0))
 
     for i, x in enumerate(splits):
-        for d in reversed(range(world_size - 1)):
-            # Compute gradients for current block
-            if d == global_rank:
-                dist.recv(loss, d + 1)
-                layer.activations[i].grad.data = loss
-                print(f'[GPU {global_rank}] - Received gradients from rank {d + 1}')
-                layer.activations[i].sum().backward()
-                grads = layer.inputs[i].grad.data
-                if d == 0:
-                    print(f'[GPU {global_rank}] - Finished backward pass !')
-                    return grads # finished
-                    # Send gradients to previous block
-            elif d == global_rank - 1:
-                print(f'[GPU {global_rank}] - Sending gradients to rank {d}')
-                dist.send(grads, d)
-        
+        # Compute gradients for current block
+        if global_rank != world_size - 1:
+            dist.recv(loss, d + 1)
+            print(f'[GPU {global_rank}] - Received gradients from rank {d + 1}')
+            layer.activations[i].grad.data = loss
+            layer.activations[i].sum().backward()
+        grads = layer.inputs[i].grad.data
+        if global_rank == 0:
+            print(f'[GPU {global_rank}] - Finished backward pass !')
+            return grads # finished
+        # Send gradients to previous block
+        print(f'[GPU {global_rank}] - Sending gradients to rank {d}')
+        dist.send(grads, global_rank - 1)
 
 if __name__ == "__main__":
     torch.cuda.set_device(rank) # set before initiating pg otherwise cuda detects multiple processes using same device
     dist.init_process_group(backend="nccl", world_size=world_size)
 
     layer = LinearBlock(3, 3).to(rank)
+    print(f'[GPU {global_rank}] : Layer parameters = {list(layer.layer.parameters())}')
 
     # Send full model to last gpu for comparison later
     states = [None] * world_size if global_rank == world_size - 1 else None
@@ -114,8 +111,9 @@ if __name__ == "__main__":
 
     sample = torch.randn((4, 3)).to(rank) # first layer is on rank 0
     dist.broadcast(sample, 0) # synchronize samples for comparison later
+    print(f'[GPU {global_rank}] - Sample = {sample}')
 
-    result = async_pipelined_forward(layer, sample)
+    result = pipelined_forward(layer, sample)
 
     # Only the last rank has the result ; the others can stop
     if global_rank == world_size - 1:
@@ -134,8 +132,9 @@ if __name__ == "__main__":
             model[i].load_state_dict(state)
 
         model = model.to(rank)
+        print(f'[GPU {global_rank}] : Reconstructed model = {list(model.parameters())}')
         result_full = model(sample)
-        assert torch.allclose(result, result_full), f'Results are different for full and pipelined mode : {result_full} vs {result}'
+        assert torch.allclose(result, result_full), f'Results are different for full and pipelined models : {result_full} vs {result}'
 
         '''
         loss = F.mse_loss(result_full, target)
