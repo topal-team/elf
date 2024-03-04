@@ -18,10 +18,13 @@ class LinearBlock(nn.Module):
 
     def forward(self, x):
         # save for backward
+        x = x.detach()
+        x.requires_grad = True
+        x.retain_grad()
         self.inputs.append(x)
         self.activations.append(self.layer(x))
+        self.activations[-1].retain_grad() # not a leaf node but we need its grad for backward pass 
         return self.activations[-1]
-
 
 def pipelined_forward(layer, sample):
     splits = iter(sample.split(1, dim=0))
@@ -78,24 +81,45 @@ def async_pipelined_forward(layer, sample):
     else:
         return []
         
-def pipelined_backward(layers, loss):
-    loss.backward() # compute for last block
-    layer = layers[global_rank] # should already be on right device
-    splits = iter(grads.split(1, dim=0))
+
+def interleaved_pipelined_forward(layers, sample):
+    assert sample.size(0) % world_size == 0, "# Of micro-batches should be a multiple of the number of gpus"
+    n_waves = sample.size(0) // world_size
+    assert n_waves == len(layers), "Each device should have as many layers as the number of waves"
+    splits = iter(sample.split(1, dim=0))
+    ret = []
 
     for i, x in enumerate(splits):
+        for wave in range(n_waves):
+            if global_rank != 0 and wave != 0:
+                dist.recv(x, (i - 1) % world_size)
+            y = layers[wave](x)
+            if global_rank == world_size - 1 and wave == n_waves - 1:
+                ret.append(y)
+            else:
+                dist.send(y, (i + 1) % world_size)
+
+    dist.barrier()
+    if result:
+        return torch.cat(ret, dim=0)
+    else:
+        return []
+
+def pipelined_backward(layer):
+    for i in range(len(layer.activations)):
         # Compute gradients for current block
+        # Last layer has already been computed by call to loss.backward()
         if global_rank != world_size - 1:
-            dist.recv(loss, d + 1)
-            print(f'[GPU {global_rank}] - Received gradients from rank {d + 1}')
-            layer.activations[i].grad.data = loss
+            layer.activations[i].grad = torch.empty_like(layer.activations[i])
+            dist.recv(layer.activations[i].grad.data, global_rank + 1)
+            print(f'[GPU {global_rank}] - Received gradients from rank {global_rank + 1}')
             layer.activations[i].sum().backward()
         grads = layer.inputs[i].grad.data
         if global_rank == 0:
             print(f'[GPU {global_rank}] - Finished backward pass !')
             return grads # finished
         # Send gradients to previous block
-        print(f'[GPU {global_rank}] - Sending gradients to rank {d}')
+        print(f'[GPU {global_rank}] - Sending gradients to rank {global_rank - 1}')
         dist.send(grads, global_rank - 1)
 
 if __name__ == "__main__":
@@ -118,12 +142,6 @@ if __name__ == "__main__":
     if global_rank == world_size - 1:
         assert result.shape == sample.shape, f'Error : expected result to have shape {sample.shape}, got {result.shape}'
         
-        '''
-        target = torch.randn_like(result)
-        loss = F.mse_loss(result, target)
-        grads = pipelined_backward(layers, loss)
-        '''
-
         # Normal computation for comparison
         # Reconstruct full model on last GPU
         model = nn.Sequential(*[LinearBlock(3, 3) for _ in range(world_size)])
@@ -132,17 +150,26 @@ if __name__ == "__main__":
 
         model = model.to(rank)
      
-        result_full = model(sample)
+        sample_full = sample.clone().detach()
+        result_full = model(sample_full)
 
         assert torch.allclose(result, result_full), f'Results are different for full and pipelined models : {result_full} vs {result}'
-
-        '''
-        loss = F.mse_loss(result_full, target)
+        
+        target = torch.randn_like(result)
+        loss = F.mse_loss(result, target)
         loss.backward()
-        grads_full = sample.grad.data
+        loss_full = F.mse_loss(result_full, target)
+        loss_full.backward()
+        dist.isend(result_full.grad.data, 0) # For comparison on device 0
+
+    grads = pipelined_backward(layer)
+
+    if global_rank == 0:
+        grads_full = torch.zeros_like(sample)
+        status = dist.irecv(grads_full, world_size - 1)
+        status.wait()
         assert torch.allclose(grads, grads_full), f'Gradients are different for full and pipelined model : {grads_full} vs {grads}'
-        '''
-    
+
     dist.barrier()
     if dist.is_initialized():
         dist.destroy_process_group()
