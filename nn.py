@@ -103,17 +103,16 @@ if __name__ == "__main__":
     dist.init_process_group(backend="nccl", world_size=world_size)
 
     layer = LinearBlock(3, 3).to(rank)
-    print(f'[GPU {global_rank}] : Layer parameters = {list(layer.layer.parameters())}')
 
     # Send full model to last gpu for comparison later
     states = [None] * world_size if global_rank == world_size - 1 else None
     dist.gather_object(layer.state_dict(), states, dst=world_size - 1)
 
     sample = torch.randn((4, 3)).to(rank) # first layer is on rank 0
-    dist.broadcast(sample, 0) # synchronize samples for comparison later
-    print(f'[GPU {global_rank}] - Sample = {sample}')
 
-    result = pipelined_forward(layer, sample)
+    result = async_pipelined_forward(layer, sample)
+
+    dist.broadcast(sample, 0) # synchronize samples for comparison later
 
     # Only the last rank has the result ; the others can stop
     if global_rank == world_size - 1:
@@ -132,8 +131,9 @@ if __name__ == "__main__":
             model[i].load_state_dict(state)
 
         model = model.to(rank)
-        print(f'[GPU {global_rank}] : Reconstructed model = {list(model.parameters())}')
+     
         result_full = model(sample)
+
         assert torch.allclose(result, result_full), f'Results are different for full and pipelined models : {result_full} vs {result}'
 
         '''
