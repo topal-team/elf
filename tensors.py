@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-import torch.profiler
+import torch.profiler as profiler
 import os
 
 def main(world_size, rank, global_rank):
