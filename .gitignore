@@ -5,7 +5,10 @@ __pycache__/
 
 # Slurm outputs
 core.*
-slurm-*.out
+*.out
+
+# Program outputs
+trace*.json
 
 # C extensions
 *.so

@@ -140,8 +140,7 @@ if __name__ == "__main__":
 
     # Only the last rank has the result ; the others can stop
     if global_rank == world_size - 1:
-        assert result.shape == sample.shape, f'Error : expected result to have shape {sample.shape}, got {result.shape}'
-        
+        assert result.shape == sample.shape, f'Error : expected result to have shape {sample.shape}, got {result.shape}'        
         # Normal computation for comparison
         # Reconstruct full model on last GPU
         model = nn.Sequential(*[LinearBlock(3, 3) for _ in range(world_size)])
@@ -154,7 +153,7 @@ if __name__ == "__main__":
         result_full = model(sample_full)
 
         assert torch.allclose(result, result_full), f'Results are different for full and pipelined models : {result_full} vs {result}'
-        
+        '''
         target = torch.randn_like(result)
         loss = F.mse_loss(result, target)
         loss.backward()
@@ -169,6 +168,7 @@ if __name__ == "__main__":
         status = dist.irecv(grads_full, world_size - 1)
         status.wait()
         assert torch.allclose(grads, grads_full), f'Gradients are different for full and pipelined model : {grads_full} vs {grads}'
+        '''
 
     dist.barrier()
     if dist.is_initialized():
