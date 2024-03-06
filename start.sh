@@ -10,9 +10,8 @@ if [[ $SLURM_JOB_NUM_NODES -gt 1 ]] ; then
     nodes_array=($nodes)
 
     head_node=${nodes_array[0]}
-    head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
 
-    echo Head node ip : $head_node_ip $head_node
+    echo Head node : $head_node
     options="--rdzv-id $RANDOM --rdzv-backend c10d --rdzv-endpoint $head_node:26501"
 else
     options="--standalone"
