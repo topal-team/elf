@@ -4,139 +4,10 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import os
 from collections import deque
+from pipeline import PipelineBlock
+from schedule import train_step_afab, train_step_1f1b
 
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
-
-class PipelineBlock():
-    '''
-    Manages one layer/group of contiguous layers placed on one device
-    '''
-    def __init__(self, model, rank, id_):
-        super(PipelineBlock, self).__init__()
-        # Block infos
-        self.model = model.cuda()
-        self.rank = rank # global rank
-        self.id = id_ # rank in the model
-
-        # Queues of tensor to process
-        self.inputs = deque() # Waiting for forward
-        self.activations = deque() # Kept for backward
-        self.grads = deque() # Waiting for backward
-        self.act_to_send = deque() # Sent to next block
-        self.grads_to_send = deque() # Sent to previous block
-        self.inputs_to_keep = deque() # Kept for backward
-
-        # Ranks where the previous/next blocks in the model are placed
-        self.previous = None
-        self.next = None
-
-        # We need to keep track of ids when we merge layers together
-        self.previous_id = None
-        self.next_id = None
-
-        # TODO : make this generic to any shape. With metadata ?
-        self.input_shape = (self.model.in_features,)
-        self.output_shape = (self.model.out_features,)
-
-    def __str__(self) -> str:
-        return f'[Layer {self.id} : GPU {self.rank}]'
-
-    def forward(self):
-        '''
-        Perform the forward pass for one tensor of activations and register it as computed
-        '''
-        if len(self.inputs) == 0: return
-        if DEBUG: print(f'{self} - Computing forward')
-        x = self.inputs.popleft()
-        x.requires_grad = True
-        y = self.model(x)
-        self.activations.append(y)
-        self.act_to_send.append(y)
-        self.inputs_to_keep.append(x)
-        
-    def backward(self):
-        '''
-        Perform the backward pass for one tensor of gradients and register it as computed
-        Backward assumes activations AND grads to be on top of the queue
-        '''
-        if len(self.grads) == 0: return
-        if DEBUG: print(f'{self} - Computing backward')
-
-        act = self.activations.popleft()
-        grads = self.grads.popleft()
-        x = self.inputs_to_keep.popleft()
-
-        (act * grads).sum().backward()
-
-        self.grads_to_send.append(x.grad.data)
-
-    def send_forward(self):
-        '''
-        Send one activation to the next layer in the model
-        '''
-        if self.next is None or len(self.act_to_send) == 0: return
-
-        tag = self.next_id
-        activations = self.act_to_send.popleft()
-
-        if DEBUG: print(f'{self} - Sending activations to layer {self.next_id} (tagged {tag}) on rank {self.next}')
-        dist.send(activations, self.next, tag=tag)
-
-    def send_backward(self):
-        '''
-        Send one gradient to the previous layer in the model
-        '''
-        if self.previous is None or len(self.grads_to_send) == 0: return
-
-        # trick : to differentiate backward and forward passes, we use bitwise not tag for backward
-        # We need that in case a layer has the same next and previous ranks ; otherwise we cannot know if we received activations or gradients
-        # Since all ids are positive, there is no collision
-        tag = ~self.previous_id
-        grads = self.grads_to_send.popleft()
-
-        if DEBUG: print(f'{self} - Sending gradients to layer {self.previous_id} (tagged {tag}) on rank {self.previous}')
-        dist.send(grads, self.previous, tag=tag)
-
-    def recv_forward(self):
-        '''
-        Receive and store one activation to forward
-        '''
-        if self.previous is None: return
-
-        tag = self.previous_id + 1
-
-        buffer = torch.empty(self.input_shape).cuda()
-
-        if DEBUG: print(f'{self} - Waiting for activations from layer {self.previous_id} (tagged {tag}) on rank {self.previous}')
-        dist.recv(buffer, self.previous, tag=tag)
-        if DEBUG: print(f'{self} - Received activations !')
-
-        self.inputs.append(buffer.clone().detach())
-
-    def recv_backward(self):
-        '''
-        Receive and store one gradient to backward
-        '''
-        if self.next is None: return
-
-        tag = ~(self.next_id - 1) # see trick in send_backward
-
-        buffer = torch.empty(self.output_shape).cuda()
-
-        if DEBUG: print(f'{self} - Waiting for gradients from layer {self.next_id} (tagged {tag}) on rank {self.next}')
-        dist.recv(buffer, self.next, tag=tag)
-        if DEBUG: print(f'{self} - Received gradients !')
-
-        self.grads.append(buffer)
-
-    def merge(self, block):
-        '''
-        Merge another block with this one
-        '''
-        self.model = nn.Sequential(self.model, block.model)
-        self.next = block.next
-        self.next_id = block.next_id
-
 
 if __name__ == "__main__":
     world_size = int(os.environ["WORLD_SIZE"])
@@ -183,6 +54,8 @@ if __name__ == "__main__":
             if DEBUG: print(f'Rank {global_rank} - Merging block {i} and {i + 1}')
             block.merge(blocks[i + 1])
             blocks.pop(i + 1)
+            for j in range(i, len(blocks)):
+                blocks[j].id -= 1
             i -= 1
         i += 1
 
@@ -191,41 +64,7 @@ if __name__ == "__main__":
     target = torch.randn_like(batch).cuda() # No need to broadcast since only last device will use this anyway
     splits = iter(batch.split(1, dim=0))
 
-    # Schedule here !
-    # All forward
-    result = []
-    for b in blocks:
-        for i in range(batch.size(0)):
-            # Feed micro-batch in pipeline
-            if b.previous is None:
-                if DEBUG: print(f'{b} - Feeding micro batch {i} into the pipeline')
-                b.inputs.append(next(splits))
-
-            b.recv_forward()
-            b.forward()
-            # Last layer has the result
-            if b.next is None: result.append(b.act_to_send.popleft().unsqueeze(0))
-            b.send_forward()
-
-    grads = []
-    # All backward
-    for b in reversed(blocks):
-        for i in range(batch.size(0)):
-            # Compute loss on last device
-            if b.next is None:
-                if DEBUG: print(f'{b} - Starting backward pass for micro batch {i}')
-                output = result[i].detach()
-                output.requires_grad = True
-                loss = F.mse_loss(output, target[i].unsqueeze(0), reduction="sum")
-                loss.backward()
-                b.grads.append(output.grad.data)
-
-            b.recv_backward()
-            b.backward()
-            if b.previous is None: grads.append(b.grads_to_send.popleft())
-            b.send_backward()
-
-    # dist.barrier()
+    result, grads = train_step_afab(blocks, batch, target, F.mse_loss)
 
     for i,b in enumerate(blocks):
         assert len(b.activations) == 0, f'{b} - Should be no activation left, {len(b.activations)} still in queue'
