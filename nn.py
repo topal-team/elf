@@ -18,7 +18,6 @@ class LinearBlock(nn.Module):
 
     def forward(self, x):
         # save for backward
-        x = x.clone().detach()
         x.requires_grad = True
         self.inputs.append(x)
         y = self.layer(x)
