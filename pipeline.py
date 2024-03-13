@@ -5,6 +5,36 @@ import os
 from collections import deque
 
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
+
+class TensorMetadata():
+    MAX_SIZE = 64
+
+    @staticmethod
+    def from_tensor(t):
+        shape = []
+        assert len(t.shape) == 1, "Metadata should only have one dimension"
+        for s in t:
+            s = int(s.item())
+            if s == 0: break
+            shape.append(s)
+        
+        metadata = TensorMetadata(torch.empty(0))
+        metadata.shape = shape
+        return metadata
+
+    def __init__(self, t):
+        self.shape = t.shape
+
+    def to_tensor(self):
+        t = torch.zeros(TensorMetadata.MAX_SIZE).cuda()
+        for i, s in enumerate(self.shape):
+            t[i] = s
+        return t
+    
+    def get_buffer(self):
+        buffer = torch.empty(self.shape).cuda()
+        return buffer
+
 class PipelineBlock():
     '''
     Manages one layer/group of contiguous layers placed on one device
@@ -27,10 +57,6 @@ class PipelineBlock():
         # Ranks where the previous/next blocks in the model are placed
         self.previous = None
         self.next = None
-
-        # TODO : make this generic to any shape. With metadata ?
-        self.input_shape = (self.model.in_features,)
-        self.output_shape = (self.model.out_features,)
 
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
@@ -73,6 +99,9 @@ class PipelineBlock():
         tag = self.id + 1
         activations = self.act_to_send.popleft()
 
+        metadata = TensorMetadata(activations).to_tensor()
+        dist.send(metadata, self.next, tag=tag)
+
         if DEBUG: print(f'{self} - Sending activations to layer {self.id + 1} (tagged {tag}) on rank {self.next}')
         dist.send(activations, self.next, tag=tag)
 
@@ -88,6 +117,9 @@ class PipelineBlock():
         tag = ~(self.id - 1)
         grads = self.grads_to_send.popleft()
 
+        metadata = TensorMetadata(grads).to_tensor()
+        dist.send(metadata, self.previous, tag=tag)
+
         if DEBUG: print(f'{self} - Sending gradients to layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
         dist.send(grads, self.previous, tag=tag)
 
@@ -99,13 +131,16 @@ class PipelineBlock():
 
         tag = self.id
 
-        buffer = torch.empty(self.input_shape).cuda()
+        buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
+        dist.recv(buffer, self.previous, tag=tag)
+        metadata = TensorMetadata.from_tensor(buffer)
+        buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for activations from layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
+        if DEBUG: print(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
         dist.recv(buffer, self.previous, tag=tag)
         if DEBUG: print(f'{self} - Received activations !')
 
-        self.inputs.append(buffer.clone().detach())
+        self.inputs.append(buffer.detach())
 
     def recv_backward(self):
         '''
@@ -115,9 +150,12 @@ class PipelineBlock():
 
         tag = ~self.id # see trick in send_backward
 
-        buffer = torch.empty(self.output_shape).cuda()
+        buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
+        dist.recv(buffer, self.next, tag=tag)
+        metadata = TensorMetadata.from_tensor(buffer)
+        buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for gradients from layer {self.id + 1} (tagged {tag}) on rank {self.next}')
+        if DEBUG: print(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} (tagged {tag}) on rank {self.next}')
         dist.recv(buffer, self.next, tag=tag)
         if DEBUG: print(f'{self} - Received gradients !')
 
@@ -129,4 +167,11 @@ class PipelineBlock():
         '''
         self.model = nn.Sequential(self.model, block.model)
         self.next = block.next
+
+def compute_loss(block, output, target, loss_fn):
+    output = output.detach()
+    output.requires_grad = True
+    loss = loss_fn(output, target.unsqueeze(0), reduction="sum")
+    loss.backward()
+    block.grads.append(output.grad.data)
 
