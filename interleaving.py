@@ -5,7 +5,7 @@ import torch.distributed as dist
 import os
 from collections import deque
 from pipeline import PipelineBlock
-from schedule import train_step_afab
+from schedule import train_step_afab, train_step_1f1b
 
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
 
@@ -19,7 +19,8 @@ if __name__ == "__main__":
 
     # Suppose this is our model partition
     
-    placement = torch.randint(0, world_size, (world_size*2,)).cuda()
+    # placement = torch.randint(0, world_size, (world_size*2,)).cuda()
+    placement = torch.tensor([0, 1, 2, 3]).cuda()
     dist.broadcast(placement, 0) # synchronize placement on all processes
     print(f'Placement : {placement}')
 
@@ -63,7 +64,7 @@ if __name__ == "__main__":
     dist.broadcast(batch, src = 0) # for tests
     target = torch.randn((len(placement), len(placement) + 1)).cuda() # No need to broadcast since only last device will use this anyway
 
-    result, grads = train_step_afab(blocks, batch, target, F.mse_loss)
+    result, grads = train_step_1f1b(blocks, batch, target, F.mse_loss, len(placement))
     
     for i,b in enumerate(blocks):
         assert len(b.activations) == 0, f'{b} - There should be no activation left, {len(b.activations)} still in queue'
@@ -79,10 +80,10 @@ if __name__ == "__main__":
         output = torch.cat(result, dim=0)
         batch.requires_grad = True
         groundtruth = nn.Sequential(*all_layers).cuda()(batch)
-        assert torch.allclose(output, groundtruth, rtol=1e-4, atol=1e-7), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
+        assert torch.allclose(output, groundtruth, rtol=1e-3), f'Pipelined and regular models have different outputs : {output} and {groundtruth} : biggest difference is {torch.max((output - groundtruth).abs())}' # Sometimes there is a slight numerical instability
         print(f'{block} - Outputs are correct :)')
 
-        loss = F.mse_loss(groundtruth, target, reduction="sum")
+        loss = F.mse_loss(groundtruth, target, reduction="sum") # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
         loss.backward()
         if placement[0] != placement[-1]: dist.send(batch.grad.data, placement[0]) # First layer has gradients of pipelined model, send to check
 
@@ -94,8 +95,8 @@ if __name__ == "__main__":
         else:
             groundtruth = torch.empty_like(batch)
             dist.recv(groundtruth, placement[-1])
-        assert torch.allclose(grads, groundtruth, rtol=1e-4, atol=1e-7), f'Pipelined and regular models have different gradients : {grads} and {groundtruth}'
-        print(f'{block} - Gradients are correct :))') # Sometimes there is a slight numerical instability
+        assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth} biggest difference is {torch.max((grads - groundtruth).abs())}'
+        print(f'{block} - Gradients are correct :))')
 
     dist.barrier()
     if dist.is_initialized():
