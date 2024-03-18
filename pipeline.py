@@ -78,6 +78,7 @@ class PipelineBlock():
         '''
         if len(self.inputs) == 0: return
         logger.debug(f'{self} - Computing forward')
+        
         work, x = self.inputs.popleft()
         if work is not None: work.wait() # if properly managed, work should alredy be completed
         x.requires_grad = True
@@ -165,6 +166,7 @@ class PipelineBlock():
         dist.recv(buffer, self.next) # TODO : async here ?
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
+
 
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {self.next}')
         work = dist.irecv(buffer, self.next)
