@@ -46,28 +46,27 @@ def train_step_1f1b(blocks, batch, target, loss_fn, n_stages):
     grads = []
 
     for block in blocks:
-        for i, x in enumerate(splits):
-            if i < batch.size(0): # All forward have not been done
+        for i in range(batch.size(0) + n_stages - 1 - block.id):
+            if i < batch.size(0): # There are still forwards left
                 # One forward
                 if block.previous is None:
-                    block.inputs.append(x)
+                    block.inputs.append(next(splits))
 
                 block.recv_forward()
                 block.forward()
                 block.send_forward()
-                if block.next is None:
-                    result.append(block.act_to_send.popleft().unsqueeze(0))
+                if block.next is None: result.append(block.act_to_send.popleft())
 
-            # Not in warmup phase anymore
-            if i >= n_stages - 1 - block.id:
+            bwd_offset = n_stages - 1 - block.id
+            # Warmup phase
+            if i >= bwd_offset:
                 # One backward
                 if block.next is None:
-                    compute_loss(block, result[i], target[i], loss_fn)
+                    compute_loss(block, result[i - bwd_offset], target[i - bwd_offset], loss_fn)
 
                 block.recv_backward()
                 block.backward()
                 block.send_backward()
-                if block.previous is None:
-                    grads.append(block.grads_to_send.popleft())
+                if block.previous is None: grads.append(block.grads_to_send.popleft())
     
     return result, grads

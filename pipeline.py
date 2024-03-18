@@ -14,14 +14,19 @@ class TensorMetadata():
         shape = []
         assert len(t.shape) == 1, "Metadata should only have one dimension"
         for s in t:
+            s = int(s.item())
+            if s == 0: break
             shape.append(s)
-        return TensorMetadata(s)
+        
+        metadata = TensorMetadata(torch.empty(0))
+        metadata.shape = shape
+        return metadata
 
     def __init__(self, t):
         self.shape = t.shape
 
     def to_tensor(self):
-        t = torch.empty(TensorMetadata.MAX_SIZE).cuda()
+        t = torch.zeros(TensorMetadata.MAX_SIZE).cuda()
         for i, s in enumerate(self.shape):
             t[i] = s
         return t
@@ -131,11 +136,11 @@ class PipelineBlock():
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for activations from layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
+        if DEBUG: print(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
         dist.recv(buffer, self.previous, tag=tag)
         if DEBUG: print(f'{self} - Received activations !')
 
-        self.inputs.append(buffer.clone().detach())
+        self.inputs.append(buffer.detach())
 
     def recv_backward(self):
         '''
@@ -150,7 +155,7 @@ class PipelineBlock():
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for gradients from layer {self.id + 1} (tagged {tag}) on rank {self.next}')
+        if DEBUG: print(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} (tagged {tag}) on rank {self.next}')
         dist.recv(buffer, self.next, tag=tag)
         if DEBUG: print(f'{self} - Received gradients !')
 

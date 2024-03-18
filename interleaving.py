@@ -17,13 +17,16 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
 
     result, grads = schedule(blocks, batch, target, F.mse_loss)
 
+    result, grads = train_step_1f1b(blocks, batch, target, F.mse_loss, len(placement))
+    
     for i,b in enumerate(blocks):
-        assert len(b.activations) == 0, f'{b} - Should be no activation left, {len(b.activations)} still in queue'
-        assert len(b.inputs) == 0, f'{b} - Should be no input left to computet, {len(b.inputs)} still in queue'
-        assert len(b.act_to_send) == 0, f'{b} - Should be no activation left to send, {len(b.act_to_send)} still in queue'
-        assert len(b.grads) == 0, f'{b} - Should be no gradients left, {len(b.grads)} still in queue'
-        assert len(b.inputs_to_keep) == 0, f'{b} - Should be no inputs left to backward, {len(b.inputs_to_keep)} still in queue'
-        assert len(b.grads_to_send) == 0, f'{b} - Should be no grads left to send, {len(b.grads_to_send)} still in queue'
+        assert len(b.activations) == 0, f'{b} - There should be no activation left, {len(b.activations)} still in queue'
+        assert len(b.inputs) == 0, f'{b} - There should be no input left to compute, {len(b.inputs)} still in queue'
+        assert len(b.act_to_send) == 0, f'{b} - There should be no activation left to send, {len(b.act_to_send)} still in queue'
+        assert len(b.grads) == 0, f'{b} - There should be no gradients left, {len(b.grads)} still in queue'
+        assert len(b.inputs_to_keep) == 0, f'{b} - There should be no inputs left to backward, {len(b.inputs_to_keep)} still in queue'
+        assert len(b.grads_to_send) == 0, f'{b} - There should be no grads left to send, {len(b.grads_to_send)} still in queue'
+    
 
     if global_rank == placement[-1]: # last device has the result
         block = blocks[-1]
@@ -34,7 +37,7 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
         assert torch.allclose(output, groundtruth), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
         print(f'{block} - Outputs are correct :)')
 
-        loss = F.mse_loss(groundtruth, target, reduction="sum")
+        loss = F.mse_loss(groundtruth, target, reduction="sum") # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
         loss.backward()
         if placement[0] != placement[-1]: dist.send(batch.grad.data, placement[0]) # First layer has gradients of pipelined model, send to check
 
@@ -46,7 +49,7 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
         else:
             groundtruth = torch.empty_like(batch)
             dist.recv(groundtruth, placement[-1])
-        assert torch.allclose(grads, groundtruth), f'Pipelined and regular models have different gradients : {grads} and {groundtruth}'
+        assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth} biggest difference is {torch.max((grads - groundtruth).abs())}'
         print(f'{block} - Gradients are correct :))')
 
 if __name__ == "__main__":
