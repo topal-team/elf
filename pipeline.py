@@ -120,7 +120,8 @@ class PipelineBlock():
         dist.send(metadata, self.next)
 
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
-        dist.send(activations, self.next)
+        dist.isend(activations, self.next)
+
 
     def send_backward(self):
         '''
@@ -134,7 +135,8 @@ class PipelineBlock():
         dist.send(metadata, self.previous)
 
         logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
-        dist.send(grads, self.previous)
+        dist.isend(grads, self.previous)
+
 
     def recv_forward(self):
         '''
