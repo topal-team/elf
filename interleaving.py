@@ -9,23 +9,31 @@ from test_model import load_full_model, load_parts_model
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
 
 def test_pipeline(blocks, placement, schedule=train_step_afab):
+    '''
+    Test that a schedule computes the forward & backward passes correctly
+    To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
+    '''
     batch = torch.randn((len(placement), 3)).cuda()
-    if global_rank == 0: dist.send(batch, dst = placement[-1]) # for tests
-    if global_rank == placement[-1]: dist.recv(batch, src = 0)
+    # Pipelined model will use the batch from its first rank
+    # While full model will use the batch from the last rank of the pipelined model
+    # So we have to sync them
+    if placement[-1] != placement[0]:
+        if global_rank == placement[0]: dist.send(batch, dst = placement[-1])
+        if global_rank == placement[-1]: dist.recv(batch, src = placement[0])
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
     result, grads = schedule(blocks, batch, target, F.mse_loss)
     
-    for i,b in enumerate(blocks):
+    for b in blocks:
         assert len(b.activations) == 0, f'{b} - There should be no activation left, {len(b.activations)} still in queue'
         assert len(b.inputs) == 0, f'{b} - There should be no input left to compute, {len(b.inputs)} still in queue'
         assert len(b.act_to_send) == 0, f'{b} - There should be no activation left to send, {len(b.act_to_send)} still in queue'
         assert len(b.grads) == 0, f'{b} - There should be no gradients left, {len(b.grads)} still in queue'
         assert len(b.inputs_to_keep) == 0, f'{b} - There should be no inputs left to backward, {len(b.inputs_to_keep)} still in queue'
         assert len(b.grads_to_send) == 0, f'{b} - There should be no grads left to send, {len(b.grads_to_send)} still in queue'
-    
 
-    if global_rank == placement[-1]: # last device has the result
+    # Last device has the result, we reconstruct the full model on this one for simplicity
+    if global_rank == placement[-1]:
         block = blocks[-1]
         output = torch.cat(result, dim=0)
         batch.requires_grad = True
@@ -36,7 +44,8 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
 
         loss = F.mse_loss(groundtruth, target, reduction="sum") # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
         loss.backward()
-        if placement[0] != placement[-1]: dist.send(batch.grad.data, placement[0]) # First layer has gradients of pipelined model, send to check
+        # First device has the gradients w.r.t the inputs, it will check that they are right
+        if placement[0] != placement[-1]: dist.send(batch.grad.data, placement[0])
 
     if global_rank == placement[0]:
         block = blocks[0]

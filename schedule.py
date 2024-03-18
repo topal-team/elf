@@ -23,7 +23,7 @@ def train_step_afab(blocks, batch, target, loss_fn):
             b.forward()
             b.send_forward()
             # Last layer has the result
-            if b.next is None: result.append(b.act_to_send.popleft().unsqueeze(0))
+            if b.next is None: result.append(b.act_to_send.popleft())
 
     grads = []
     # All backward
