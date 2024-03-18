@@ -78,7 +78,8 @@ class PipelineBlock():
         '''
         if len(self.inputs) == 0: return
         logger.debug(f'{self} - Computing forward')
-        x = self.inputs.popleft()
+        work, x = self.inputs.popleft()
+        if work is not None: work.wait() # if properly managed, work should alredy be completed
         x.requires_grad = True
         y = self.model(x)
         self.activations.append(y)
@@ -97,7 +98,8 @@ class PipelineBlock():
         logger.debug(f'{self} - Computing backward')
 
         act = self.activations.popleft()
-        grads = self.grads.popleft()
+        work, grads = self.grads.popleft()
+        if work is not None: work.wait() # if properly managed, work should alredy be completed
         x = self.inputs_to_keep.popleft()
 
         (act * grads).sum().backward()
@@ -141,15 +143,15 @@ class PipelineBlock():
         if self.previous is None or isinstance(self.previous, PipelineBlock): return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        dist.recv(buffer, self.previous)
+        dist.recv(buffer, self.previous) # TODO : async here ?
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
         logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {self.previous}')
-        dist.recv(buffer, self.previous)
+        work = dist.irecv(buffer, self.previous)
         logger.debug(f'{self} - Received activations !')
 
-        self.inputs.append(buffer.detach())
+        self.inputs.append((work, buffer)) # .detach() ?
 
     def recv_backward(self):
         '''
@@ -158,15 +160,27 @@ class PipelineBlock():
         if self.next is None or isinstance(self.next, PipelineBlock): return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        dist.recv(buffer, self.next)
+        dist.recv(buffer, self.next) # TODO : async here ?
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {self.next}')
-        dist.recv(buffer, self.next)
+        work = dist.irecv(buffer, self.next)
         logger.debug(f'{self} - Received gradients !')
 
-        self.grads.append(buffer)
+        self.grads.append((work, buffer))
+
+    def has_work_forward(self):
+        for (work, _) in self.inputs:
+            if work is None or work.is_completed():
+                return True
+        return False
+
+    def has_work_backward(self):
+        for (work, _) in self.grads:
+            if work is None or work.is_completed():
+                return True
+        return False
 
 def create_pipeline(layers, placement):
     '''
