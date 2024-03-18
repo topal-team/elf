@@ -1,9 +1,8 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import os
-from pipeline import PipelineBlock, pipeline_from_layers
+from pipeline import pipeline_from_layers
 from schedule import train_step_afab, train_step_1f1b
 from test_model import load_full_model, load_parts_model
 
@@ -16,8 +15,6 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
     result, grads = schedule(blocks, batch, target, F.mse_loss)
-
-    result, grads = train_step_1f1b(blocks, batch, target, F.mse_loss, len(placement))
     
     for i,b in enumerate(blocks):
         assert len(b.activations) == 0, f'{b} - There should be no activation left, {len(b.activations)} still in queue'

@@ -4,13 +4,17 @@ from pipeline import compute_loss
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
 
 def train_step_afab(blocks, batch, target, loss_fn):
+    '''
+    All Forward All Backward schedule from GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism
+    https://arxiv.org/abs/1811.06965
+    '''
     splits = iter(batch.split(1, dim=0))
     # Schedule here !
     # All forward
     result = []
     for b in blocks:
         for i in range(batch.size(0)):
-            # Feed micro-batch in pipeline
+            # Feed micro-batch into the pipeline
             if b.previous is None:
                 if DEBUG: print(f'{b} - Feeding micro batch {i} into the pipeline')
                 b.inputs.append(next(splits))
@@ -39,7 +43,9 @@ def train_step_afab(blocks, batch, target, loss_fn):
 
 def train_step_1f1b(blocks, batch, target, loss_fn, n_stages):
     '''
-    Not interleaved for now !!
+    One Forward One Backward schedule from PipeDream: Fast and Efficient Pipeline Parallel DNN Training
+    https://arxiv.org/abs/1806.03377
+    !! Does not support interleaving for now !!
     '''
     splits = iter(batch.split(1, dim=0))
     result = []

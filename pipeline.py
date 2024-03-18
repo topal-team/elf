@@ -7,10 +7,16 @@ from collections import deque
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
 
 class TensorMetadata():
+    '''
+    Informations about Tensors that are sent and received in p2p communication
+    '''
     MAX_SIZE = 64
 
     @staticmethod
     def from_tensor(t):
+        '''
+        Creates a TensorMetadata object from its Tensor equivalent (should be used when receiving metadata via p2p)
+        '''
         shape = []
         assert len(t.shape) == 1, "Metadata should only have one dimension"
         for s in t:
@@ -26,12 +32,18 @@ class TensorMetadata():
         self.shape = t.shape
 
     def to_tensor(self):
+        '''
+        Creates the Tensor representation of this metadata. Should be used when sending metadata via p2p
+        '''
         t = torch.zeros(TensorMetadata.MAX_SIZE).cuda()
         for i, s in enumerate(self.shape):
             t[i] = s
         return t
     
     def get_buffer(self):
+        '''
+        Allocates a tensor with the right shape for this metadata
+        '''
         buffer = torch.empty(self.shape).cuda()
         return buffer
 
@@ -44,7 +56,7 @@ class PipelineBlock():
         # Block infos
         self.model = model.cuda()
         self.rank = rank # global rank
-        self.id = id_ # rank in the model
+        self.id = id_ # rank in the model. mainly used for tags: every communication uses the receiver's id as tag.
 
         # Queues of tensor to process
         self.inputs = deque() # Waiting for forward
@@ -169,6 +181,11 @@ class PipelineBlock():
         self.next = block.next
 
 def pipeline_from_layers(layers, placement, global_rank):
+    '''
+    Creates the pipeline from a list of layers and a placement on devices.
+    Basically does 2 things : creates PipelineBlock objects with the right ids and infos, and merges all the blocks that should be. 
+    This is needed to call the schedules in `schedule.py` or with your own schedules.
+    '''
     ids = [idx for idx, p in enumerate(placement) if global_rank == p]
     blocks = []
     for id_, layer in zip(ids, layers):
@@ -195,6 +212,9 @@ def pipeline_from_layers(layers, placement, global_rank):
     return blocks
 
 def compute_loss(block, output, target, loss_fn):
+    '''
+    Computes the loss and correctly prepares the gradients for the pipelined backward pass
+    '''
     output = output.detach()
     output.requires_grad = True
     loss = loss_fn(output, target.unsqueeze(0), reduction="sum")

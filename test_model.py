@@ -2,11 +2,17 @@ import torch
 import torch.nn as nn
 
 def load_full_model(size, path="test-model.pt"):
+    '''
+    Loads the sequential model stored in `path`, and returns the `size` first layers.
+    '''
     model = torch.load(path)
     new_model = nn.Sequential(*list(model.children())[:size])
     return nn.Sequential(new_model)
 
 def load_parts_model(placement, global_rank, path="test-model.pt"):
+    '''
+    Loads the sequential model stored in `path`, and returns the layers corresponding to `global_rank` in the model placement.
+    '''
     indices = [idx for idx, p in enumerate(placement) if global_rank == p]
     model = torch.load(path)
     children = list(model.children())
