@@ -56,7 +56,7 @@ class PipelineBlock():
         # Block infos
         self.model = model.cuda()
         self.rank = rank # global rank
-        self.id = id_ # rank in the model. mainly used for tags: every communication uses the receiver's id as tag.
+        self.id = id_ # rank in the model.
 
         # Queues of tensor to process
         self.inputs = deque() # Waiting for forward
@@ -108,14 +108,13 @@ class PipelineBlock():
         '''
         if self.next is None or len(self.act_to_send) == 0: return
 
-        tag = self.id + 1
         activations = self.act_to_send.popleft()
 
         metadata = TensorMetadata(activations).to_tensor()
-        dist.send(metadata, self.next, tag=tag)
+        dist.send(metadata, self.next)
 
-        if DEBUG: print(f'{self} - Sending activations to layer {self.id + 1} (tagged {tag}) on rank {self.next}')
-        dist.send(activations, self.next, tag=tag)
+        if DEBUG: print(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
+        dist.send(activations, self.next)
 
     def send_backward(self):
         '''
@@ -123,17 +122,13 @@ class PipelineBlock():
         '''
         if self.previous is None or len(self.grads_to_send) == 0: return
 
-        # trick : to differentiate backward and forward passes, we use bitwise not tag for backward
-        # We need that in case a layer has the same next and previous ranks ; otherwise we cannot know if we received activations or gradients
-        # Since all ids are positive, there is no collision
-        tag = ~(self.id - 1)
         grads = self.grads_to_send.popleft()
 
         metadata = TensorMetadata(grads).to_tensor()
-        dist.send(metadata, self.previous, tag=tag)
+        dist.send(metadata, self.previous)
 
-        if DEBUG: print(f'{self} - Sending gradients to layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
-        dist.send(grads, self.previous, tag=tag)
+        if DEBUG: print(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
+        dist.send(grads, self.previous)
 
     def recv_forward(self):
         '''
@@ -141,15 +136,13 @@ class PipelineBlock():
         '''
         if self.previous is None: return
 
-        tag = self.id
-
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        dist.recv(buffer, self.previous, tag=tag)
+        dist.recv(buffer, self.previous)
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
-        dist.recv(buffer, self.previous, tag=tag)
+        if DEBUG: print(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {self.previous}')
+        dist.recv(buffer, self.previous)
         if DEBUG: print(f'{self} - Received activations !')
 
         self.inputs.append(buffer.detach())
@@ -160,15 +153,13 @@ class PipelineBlock():
         '''
         if self.next is None: return
 
-        tag = ~self.id # see trick in send_backward
-
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        dist.recv(buffer, self.next, tag=tag)
+        dist.recv(buffer, self.next)
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} (tagged {tag}) on rank {self.next}')
-        dist.recv(buffer, self.next, tag=tag)
+        if DEBUG: print(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {self.next}')
+        dist.recv(buffer, self.next)
         if DEBUG: print(f'{self} - Received gradients !')
 
         self.grads.append(buffer)
@@ -208,6 +199,7 @@ def pipeline_from_layers(layers, placement, global_rank):
                 blocks[j].id -= 1
             i -= 1
         i += 1
+        assert block.next != block.previous, "Stages cannot receive and send to the same rank."
 
     return blocks
 
