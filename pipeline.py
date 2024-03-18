@@ -123,7 +123,6 @@ class PipelineBlock():
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
         dist.isend(activations, self.next)
 
-
     def send_backward(self):
         '''
         Send one gradient to the previous layer in the model
@@ -137,7 +136,6 @@ class PipelineBlock():
 
         logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
         dist.isend(grads, self.previous)
-
 
     def recv_forward(self):
         '''
