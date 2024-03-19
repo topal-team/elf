@@ -85,6 +85,9 @@ class PipelineBlock():
         self.activations.append(y)
         self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
+
+        if self.next is None:
+            return self.act_to_send.popleft()
         
     def backward(self):
         '''
@@ -101,6 +104,8 @@ class PipelineBlock():
         (act * grads).sum().backward()
 
         self.grads_to_send.append(x.grad.data)
+        if self.previous is None:
+            return self.grads_to_send.popleft()
 
     def send_forward(self):
         '''

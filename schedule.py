@@ -20,10 +20,9 @@ def train_step_afab(blocks, batch, target, loss_fn):
                 b.inputs.append(next(splits))
 
             b.recv_forward()
-            b.forward()
+            y = b.forward()
             b.send_forward()
-            # Last layer has the result
-            if b.next is None: result.append(b.act_to_send.popleft().unsqueeze(0))
+            if y is not None: result.append(y)
 
     grads = []
     # All backward
@@ -35,9 +34,9 @@ def train_step_afab(blocks, batch, target, loss_fn):
                 compute_loss(b, result[i], target[i], loss_fn)
 
             b.recv_backward()
-            b.backward()
+            g = b.backward()
             b.send_backward()
-            if b.previous is None: grads.append(b.grads_to_send.popleft())
+            if g is not None: grads.append(g)
 
     return result, grads
 
@@ -59,9 +58,9 @@ def train_step_1f1b(blocks, batch, target, loss_fn, n_stages):
                     block.inputs.append(next(splits))
 
                 block.recv_forward()
-                block.forward()
+                y = block.forward()
                 block.send_forward()
-                if block.next is None: result.append(block.act_to_send.popleft())
+                if y is not None: result.append(y)
 
             bwd_offset = n_stages - 1 - block.id
             # Warmup phase
@@ -71,8 +70,8 @@ def train_step_1f1b(blocks, batch, target, loss_fn, n_stages):
                     compute_loss(block, result[i - bwd_offset], target[i - bwd_offset], loss_fn)
 
                 block.recv_backward()
-                block.backward()
+                g = block.backward()
                 block.send_backward()
-                if block.previous is None: grads.append(block.grads_to_send.popleft())
+                if g is not None: grads.append(g)
     
     return result, grads
