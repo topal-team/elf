@@ -5,8 +5,10 @@ import os
 from pipeline import pipeline_from_layers
 from schedule import train_step_afab, train_step_1f1b
 from test_model import load_full_model, load_parts_model
+
 import logging
 logger = logging.getLogger("main")
+logging.basicConfig(level = logging.DEBUG) # change this to display more/less messages. TODO : pass this as cli argument
 
 def test_pipeline(blocks, placement, schedule=train_step_afab):
     batch = torch.randn((len(placement), 3)).cuda()
@@ -32,7 +34,7 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
         full_model = load_full_model(len(placement)).cuda()
         groundtruth = full_model(batch)
         assert torch.allclose(output, groundtruth), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
-        logger.info(f'{block} - Outputs are correct :)')
+        logger.log(0, f'{block} - Outputs are correct :)')
 
         loss = F.mse_loss(groundtruth, target, reduction="sum") # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
         loss.backward()
@@ -47,7 +49,7 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
             groundtruth = torch.empty_like(batch)
             dist.recv(groundtruth, placement[-1])
         assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth} biggest difference is {torch.max((grads - groundtruth).abs())}'
-        logger.info(f'{block} - Gradients are correct :))')
+        logger.log(0, f'{block} - Gradients are correct :))')
 
 if __name__ == "__main__":
     world_size = int(os.environ["WORLD_SIZE"])
@@ -60,7 +62,7 @@ if __name__ == "__main__":
     # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
     placement = torch.randint(0, world_size, (4,)).cuda()
     dist.broadcast(placement, 0) # synchronize placement on all processes
-    logger.info(f'Placement : {placement}')
+    logger.debug(f'Placement : {placement}')
 
     # Load your model here (each process should load the right layers depending on placement)
     layers = load_parts_model(placement, global_rank)
