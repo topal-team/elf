@@ -209,7 +209,7 @@ def pipeline_from_layers(layers, placement, global_rank):
             if DEBUG: print(f'Rank {global_rank} - Merging block {i} and {i + 1}')
             block.merge(blocks[i + 1])
             blocks.pop(i + 1)
-            for j in range(i, len(blocks)):
+            for j in range(i + 1, len(blocks)):
                 blocks[j].id -= 1
             i -= 1
         i += 1
