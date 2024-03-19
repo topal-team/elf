@@ -1,5 +1,6 @@
 import os
 from pipeline import compute_loss
+from engine import Operations
 
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
 
@@ -75,3 +76,60 @@ def train_step_1f1b(blocks, batch, target, loss_fn, n_stages):
                 if g is not None: grads.append(g)
     
     return result, grads
+
+
+
+def generate_afab_schedule(placement, n_micro_batches):
+    schedule = []
+    # All forward
+    for _ in range(n_micro_batches):
+        for id_ in range(len(placement)):
+            schedule.append((id_, Operations.RECV_FORWARD))
+            schedule.append((id_, Operations.FORWARD))
+            schedule.append((id_, Operations.SEND_FORWARD))
+    
+    # All backward
+    for _ in range(n_micro_batches):
+        for id_ in reversed(range(len(placement))):
+            schedule.append((id_, Operations.RECV_BACKWARD))
+            schedule.append((id_, Operations.BACKWARD))
+            schedule.append((id_, Operations.SEND_BACKWARD))
+    
+    assert len(schedule) == n_micro_batches * len(placement) * 2 * 3
+
+    return schedule
+
+def generate_1f1b_schedule(placement, n_micro_batches):
+    schedule = []
+
+    for _ in range(n_micro_batches):
+        for id_ in range(len(placement)):
+            # schedule.append((id_, Operations.RECV_FORWARD))
+            schedule.append((id_, Operations.FORWARD))
+            # schedule.append((id_, Operations.SEND_FORWARD))
+
+    # Interleave with backwards
+    i = len(placement) * 1
+    b = len(placement) - 1
+    offset = len(placement) - 1
+    for _ in range(n_micro_batches):
+        for b in reversed(range(len(placement))):
+            # schedule.insert(i, (b, Operations.RECV_BACKWARD))
+            schedule.insert(i, (b, Operations.BACKWARD))
+            # schedule.insert(i + 2, (b, Operations.SEND_BACKWARD))
+
+            i += offset
+            offset = 1 if offset == 1 else offset - (1 * 1)
+            if i < len(schedule): i+= 1
+
+    assert len(schedule) == n_micro_batches * len(placement) * 2 * 1
+
+    return schedule
+
+if __name__ == "__main__":
+    import torch
+    placement = torch.tensor([0, 1, 2, 3])
+    schedule = generate_1f1b_schedule(placement, 4)
+    for rank in range(placement.max().item() + 1):
+        actions = [(id_, op) for id_, op in schedule if id_ == rank]
+        print(f'Rank {rank} - {actions}')

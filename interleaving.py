@@ -3,12 +3,13 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import os
 from pipeline import pipeline_from_layers
-from schedule import train_step_afab, train_step_1f1b
+from schedule import train_step_afab, generate_afab_schedule
+from engine import StageScheduler
 from test_model import load_full_model, load_parts_model
 
 DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
 
-def test_pipeline(blocks, placement, schedule=train_step_afab):
+def test_pipeline(blocks, placement, scheduler):
     '''
     Test that a schedule computes the forward & backward passes correctly
     To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
@@ -20,9 +21,13 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
     if placement[-1] != placement[0]:
         if global_rank == placement[0]: dist.send(batch, dst = placement[-1])
         if global_rank == placement[-1]: dist.recv(batch, src = placement[0])
+        
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
-    result, grads = schedule(blocks, batch, target, F.mse_loss)
+    schedule = scheduler(placement, batch.size(0)) # // split size if needed
+    stage = StageScheduler(schedule, blocks)
+
+    result, grads = stage.train_step(batch, target, F.mse_loss)
     
     for b in blocks:
         assert len(b.activations) == 0, f'{b} - There should be no activation left, {len(b.activations)} still in queue'
@@ -78,7 +83,7 @@ if __name__ == "__main__":
     # After that you can use the schedules in `schedule.py` to compute results + gradients of your layers
 
     # Check that the results and gradients are the same as a single-gpu model
-    test_pipeline(blocks, placement, schedule=train_step_afab)
+    test_pipeline(blocks, placement, scheduler=generate_afab_schedule)
 
     dist.barrier()
     if dist.is_initialized():
