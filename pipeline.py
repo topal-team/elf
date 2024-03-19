@@ -1,10 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-import os
 from collections import deque
-
-DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
+import logging
+logger = logging.getLogger("pipeline")
 
 class TensorMetadata():
     '''
@@ -78,7 +77,7 @@ class PipelineBlock():
         Perform the forward pass for one tensor of activations and register it as computed
         '''
         if len(self.inputs) == 0: return
-        if DEBUG: print(f'{self} - Computing forward')
+        logger.debug(f'{self} - Computing forward')
         x = self.inputs.popleft()
         x.requires_grad = True
         y = self.model(x)
@@ -95,7 +94,7 @@ class PipelineBlock():
         Backward assumes activations AND grads to be on top of the queue
         '''
         if len(self.grads) == 0: return
-        if DEBUG: print(f'{self} - Computing backward')
+        logger.debug(f'{self} - Computing backward')
 
         act = self.activations.popleft()
         grads = self.grads.popleft()
@@ -119,7 +118,7 @@ class PipelineBlock():
         metadata = TensorMetadata(activations).to_tensor()
         dist.send(metadata, self.next, tag=tag)
 
-        if DEBUG: print(f'{self} - Sending activations to layer {self.id + 1} (tagged {tag}) on rank {self.next}')
+        logger.debug(f'{self} - Sending activations to layer {self.id + 1} (tagged {tag}) on rank {self.next}')
         dist.send(activations, self.next, tag=tag)
 
     def send_backward(self):
@@ -137,7 +136,7 @@ class PipelineBlock():
         metadata = TensorMetadata(grads).to_tensor()
         dist.send(metadata, self.previous, tag=tag)
 
-        if DEBUG: print(f'{self} - Sending gradients to layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
+        logger.debug(f'{self} - Sending gradients to layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
         dist.send(grads, self.previous, tag=tag)
 
     def recv_forward(self):
@@ -153,9 +152,9 @@ class PipelineBlock():
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
+        logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} (tagged {tag}) on rank {self.previous}')
         dist.recv(buffer, self.previous, tag=tag)
-        if DEBUG: print(f'{self} - Received activations !')
+        logger.debug(f'{self} - Received activations !')
 
         self.inputs.append(buffer.detach())
 
@@ -172,9 +171,9 @@ class PipelineBlock():
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        if DEBUG: print(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} (tagged {tag}) on rank {self.next}')
+        logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} (tagged {tag}) on rank {self.next}')
         dist.recv(buffer, self.next, tag=tag)
-        if DEBUG: print(f'{self} - Received gradients !')
+        logger.debug(f'{self} - Received gradients !')
 
         self.grads.append(buffer)
 
@@ -206,7 +205,7 @@ def pipeline_from_layers(layers, placement, global_rank):
     while i < len(blocks) - 1:
         block = blocks[i]
         if block.rank == block.next:
-            if DEBUG: print(f'Rank {global_rank} - Merging block {i} and {i + 1}')
+            logger.debug(f'Rank {global_rank} - Merging block {i} and {i + 1}')
             block.merge(blocks[i + 1])
             blocks.pop(i + 1)
             for j in range(i + 1, len(blocks)):

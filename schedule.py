@@ -1,8 +1,8 @@
-import os
 from pipeline import compute_loss
 from engine import Operations
 
-DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
+import logging
+logger = logging.getLogger("schedule")
 
 def train_step_afab(blocks, batch, target, loss_fn):
     '''
@@ -17,7 +17,7 @@ def train_step_afab(blocks, batch, target, loss_fn):
         for i in range(batch.size(0)):
             # Feed micro-batch into the pipeline
             if b.previous is None:
-                if DEBUG: print(f'{b} - Feeding micro batch {i} into the pipeline')
+                logger.debug(f'{b} - Feeding micro batch {i} into the pipeline')
                 b.inputs.append(next(splits))
 
             b.recv_forward()
@@ -31,7 +31,7 @@ def train_step_afab(blocks, batch, target, loss_fn):
         for i in range(batch.size(0)):
             # Compute loss on last device
             if b.next is None:
-                if DEBUG: print(f'{b} - Starting backward pass for micro batch {i}')
+                logger.debug(f'{b} - Starting backward pass for micro batch {i}')
                 compute_loss(b, result[i], target[i], loss_fn)
 
             b.recv_backward()
