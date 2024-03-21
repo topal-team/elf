@@ -10,8 +10,9 @@ DEBUG = "DEBUG" in os.environ and os.environ["DEBUG"] != "0"
 
 def test_pipeline(blocks, placement, schedule=train_step_afab):
     batch = torch.randn((len(placement), 3)).cuda()
-    if global_rank == 0: dist.send(batch, dst = placement[-1]) # for tests
-    if global_rank == placement[-1]: dist.recv(batch, src = 0)
+    if placement[0] != placement[-1]:
+        if global_rank == placement[0]: dist.send(batch, dst = placement[-1]) # for tests
+        if global_rank == placement[-1]: dist.recv(batch, src = placement[0])
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
     result, grads = schedule(blocks, batch, target, F.mse_loss)
