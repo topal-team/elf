@@ -54,9 +54,7 @@ class StageScheduler():
                         block.send_backward()
                     case Operations.RECV_FORWARD:
                         if id == 0:
-                            s = next(splits)
-                            logger.debug(f'Feeding next micro batch, of shape {s.shape}, into the pipeline')
-                            block.inputs.append(s) # When merging with async, don't forget to add (None, )
+                            block.inputs.append((None, next(splits)))
                         block.recv_forward()
                     case Operations.RECV_BACKWARD:
                         if id == last_block:

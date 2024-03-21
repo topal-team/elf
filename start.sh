@@ -2,7 +2,7 @@
 
 #SBATCH --constraint='sirocco'
 #SBATCH --job-name=unknown
-#SBATCH --exclude=sirocco[01-05,17,21]
+#SBATCH --exclude=sirocco[01-05,16,17,21,22]
 
 nodes=$( scontrol show hostnames $SLURM_JOB_NODELIST )
 if [[ $SLURM_JOB_NUM_NODES -gt 1 ]] ; then
