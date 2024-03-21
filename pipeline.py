@@ -66,6 +66,7 @@ class PipelineBlock():
         self.inputs_to_keep = deque() # Kept for backward
 
         # Ranks where the previous/next blocks in the model are placed
+        # OR reference to the next block if they are on the same device
         self.previous = None
         self.next = None
 
@@ -114,11 +115,14 @@ class PipelineBlock():
 
         activations = self.act_to_send.popleft()
 
-        metadata = TensorMetadata(activations).to_tensor()
-        dist.send(metadata, self.next)
+        if isinstance(self.next, PipelineBlock): # same rank
+            self.next.inputs.append(activations)
+        else:
+            metadata = TensorMetadata(activations).to_tensor()
+            dist.send(metadata, self.next)
 
-        logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
-        dist.send(activations, self.next)
+            logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
+            dist.send(activations, self.next)
 
     def send_backward(self):
         '''
@@ -128,17 +132,20 @@ class PipelineBlock():
 
         grads = self.grads_to_send.popleft()
 
-        metadata = TensorMetadata(grads).to_tensor()
-        dist.send(metadata, self.previous)
+        if isinstance(self.previous, PipelineBlock):
+            self.previous.grads.append(grads)
+        else:
+            metadata = TensorMetadata(grads).to_tensor()
+            dist.send(metadata, self.previous)
 
-        logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
-        dist.send(grads, self.previous)
+            logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
+            dist.send(grads, self.previous)
 
     def recv_forward(self):
         '''
         Receive and store one activation to forward
         '''
-        if self.previous is None: return
+        if self.previous is None or isinstance(self.previous, PipelineBlock): return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
         dist.recv(buffer, self.previous)
@@ -155,7 +162,7 @@ class PipelineBlock():
         '''
         Receive and store one gradient to backward
         '''
-        if self.next is None: return
+        if self.next is None or isinstance(self.next, PipelineBlock): return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
         dist.recv(buffer, self.next)
@@ -168,13 +175,6 @@ class PipelineBlock():
 
         self.grads.append(buffer)
 
-    def merge(self, block):
-        '''
-        Merge another block with this one
-        '''
-        self.model = nn.Sequential(self.model, block.model)
-        self.next = block.next
-
 def pipeline_from_layers(layers, placement, global_rank):
     '''
     Creates the pipeline from a list of layers and a placement on devices.
@@ -186,24 +186,12 @@ def pipeline_from_layers(layers, placement, global_rank):
     for id_, layer in zip(ids, layers):
         block = PipelineBlock(layer.cuda(), global_rank, id_)
         if id_ < len(placement) - 1:
-            block.next = placement[id_ + 1]
+            if placement[id_ + 1] != placement[id_]: block.next = placement[id_ + 1]
+            else: block.next = layers[id_ + 1]
         if id_ > 0:
-            block.previous = placement[id_ - 1]
+            if placement[id_ - 1] != placement[id_]: block.previous = placement[id_ - 1]
+            else: block.previous = layers[id_ - 1]
         blocks.append(block)
-
-    # Merge contiguous blocks that are on the same device
-    i = 0
-    while i < len(blocks) - 1:
-        block = blocks[i]
-        if block.rank == block.next:
-            logger.debug(f'Rank {global_rank} - Merging block {i} and {i + 1}')
-            block.merge(blocks[i + 1])
-            blocks.pop(i + 1)
-            for j in range(i + 1, len(blocks)):
-                blocks[j].id -= 1
-            i -= 1
-        i += 1
-        # assert block.next != block.previous, "Stages cannot receive and send to the same rank."
 
     return blocks
 
