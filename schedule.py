@@ -78,8 +78,6 @@ def train_step_1f1b(blocks, batch, target, loss_fn, n_stages):
     
     return result, grads
 
-
-
 def generate_afab_schedule(placement, n_micro_batches):
     schedule = []
     # All forward
@@ -102,28 +100,29 @@ def generate_afab_schedule(placement, n_micro_batches):
 
 def generate_1f1b_schedule(placement, n_micro_batches):
     schedule = []
+    n_stages = len(placement)
 
     for _ in range(n_micro_batches):
-        for id_ in range(len(placement)):
-            # schedule.append((id_, Operations.RECV_FORWARD))
+        for id_ in range(n_stages):
+            schedule.append((id_, Operations.RECV_FORWARD))
             schedule.append((id_, Operations.FORWARD))
-            # schedule.append((id_, Operations.SEND_FORWARD))
+            schedule.append((id_, Operations.SEND_FORWARD))
 
     # Interleave with backwards
-    i = len(placement) * 1
-    b = len(placement) - 1
-    offset = len(placement) - 1
+    i = n_stages * 3
+    b = n_stages - 1
+    offset = n_stages - 1
     for _ in range(n_micro_batches):
-        for b in reversed(range(len(placement))):
-            # schedule.insert(i, (b, Operations.RECV_BACKWARD))
-            schedule.insert(i, (b, Operations.BACKWARD))
-            # schedule.insert(i + 2, (b, Operations.SEND_BACKWARD))
+        for b in reversed(range(n_stages)):
+            schedule.insert(i, (b, Operations.RECV_BACKWARD))
+            schedule.insert(i + 1, (b, Operations.BACKWARD))
+            schedule.insert(i + 2, (b, Operations.SEND_BACKWARD))
 
             i += offset
-            offset = 1 if offset == 1 else offset - (1 * 1)
-            if i < len(schedule): i+= 1
+            offset = max(3, offset - 3)
+            if i < len(schedule): i += 3
 
-    assert len(schedule) == n_micro_batches * len(placement) * 2 * 1
+    assert len(schedule) == n_micro_batches * n_stages * 2 * 3
 
     return schedule
 

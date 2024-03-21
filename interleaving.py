@@ -3,12 +3,12 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import os
 from pipeline import pipeline_from_layers
-from schedule import train_step_afab, generate_afab_schedule
+from schedule import generate_afab_schedule, generate_1f1b_schedule
 from engine import StageScheduler
 from test_model import load_full_model, load_parts_model
 
 import logging
-logger = logging.getLogger("main")
+logger = logging.getLogger(f'main]')
 logging.basicConfig(level = logging.DEBUG) # change this to display more/less messages. TODO : pass this as cli argument
 
 def test_pipeline(blocks, placement, scheduler):
@@ -27,9 +27,11 @@ def test_pipeline(blocks, placement, scheduler):
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
     schedule = scheduler(placement, batch.size(0)) # // split size if needed
+    if global_rank == 0: logger.debug(schedule)
     stage = StageScheduler(schedule, blocks)
 
     result, grads = stage.train_step(batch, target, F.mse_loss)
+    logger.debug(f'[Rank {global_rank}] : result = {result}, grads = {grads}')
     
     for b in blocks:
         assert len(b.activations) == 0, f'{b} - There should be no activation left, {len(b.activations)} still in queue'
@@ -74,7 +76,8 @@ if __name__ == "__main__":
     dist.init_process_group(backend="nccl")
 
     # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
-    placement = torch.randint(0, world_size, (4,)).cuda()
+    # placement = torch.randint(0, world_size, (8,)).cuda()
+    placement = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3]).cuda()
     dist.broadcast(placement, 0) # synchronize placement on all processes
     logger.debug(f'Placement : {placement}')
 
@@ -85,7 +88,7 @@ if __name__ == "__main__":
     # After that you can use the schedules in `schedule.py` to compute results + gradients of your layers
 
     # Check that the results and gradients are the same as a single-gpu model
-    test_pipeline(blocks, placement, scheduler=generate_afab_schedule)
+    test_pipeline(blocks, placement, scheduler=generate_1f1b_schedule)
 
     dist.barrier()
     if dist.is_initialized():

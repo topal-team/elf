@@ -1,6 +1,9 @@
 from enum import Enum
 from pipeline import compute_loss
 
+import logging
+logger = logging.getLogger("engine")
+
 class Operations(Enum):
     FORWARD = 1
     BACKWARD = 2
@@ -20,7 +23,7 @@ class StageScheduler():
     def __init__(self, schedule, blocks):
         self.schedule = schedule
         self.blocks = blocks
-        self.rank = self.blocks[0].rank
+        self.rank = self.blocks[0].rank if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
@@ -31,10 +34,13 @@ class StageScheduler():
 
         result = []
         grads = []
+        i = 0 # TODO: change that ! maybe they're not computed in the same order
+        # Add a micro_batch_id to the schedule nodes ?
 
         for (id, op) in self.schedule:
             if str(id) in self.id_to_block:
                 block = self.id_to_block[str(id)]
+                logger.debug(f'Computing operation {op} on block {block}')
                 match op:
                     case Operations.FORWARD:
                         y = block.forward()
@@ -52,7 +58,8 @@ class StageScheduler():
                         block.recv_forward()
                     case Operations.RECV_BACKWARD:
                         if id == last_block:
-                            compute_loss(block, result[-1], target[len(result) - 1], loss_fn)
+                            compute_loss(block, result[i], target[i], loss_fn)
+                            i += 1
                         block.recv_backward()
                     case _:
                         raise f'Unknown operation : {op}'

@@ -116,7 +116,7 @@ class PipelineBlock():
         activations = self.act_to_send.popleft()
 
         if isinstance(self.next, PipelineBlock): # same rank
-            self.next.inputs.append(activations)
+            self.next.inputs.append(activations.detach()) # TODO: we don't actually need to detach ; we could fasten the backward pass by doing it all on one pass
         else:
             metadata = TensorMetadata(activations).to_tensor()
             dist.send(metadata, self.next)
@@ -132,7 +132,7 @@ class PipelineBlock():
 
         grads = self.grads_to_send.popleft()
 
-        if isinstance(self.previous, PipelineBlock):
+        if isinstance(self.previous, PipelineBlock): # same rank
             self.previous.grads.append(grads)
         else:
             metadata = TensorMetadata(grads).to_tensor()
@@ -185,13 +185,15 @@ def pipeline_from_layers(layers, placement, global_rank):
     blocks = []
     for id_, layer in zip(ids, layers):
         block = PipelineBlock(layer.cuda(), global_rank, id_)
+        blocks.append(block)
+
+    for i, (id_, block) in enumerate(zip(ids, blocks)):
         if id_ < len(placement) - 1:
             if placement[id_ + 1] != placement[id_]: block.next = placement[id_ + 1]
-            else: block.next = layers[id_ + 1]
+            else: block.next = blocks[i + 1] # we need to do 2 loops for this line
         if id_ > 0:
             if placement[id_ - 1] != placement[id_]: block.previous = placement[id_ - 1]
-            else: block.previous = layers[id_ - 1]
-        blocks.append(block)
+            else: block.previous = blocks[i - 1]
 
     return blocks
 
