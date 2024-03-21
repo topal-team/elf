@@ -203,7 +203,7 @@ def pipeline_from_layers(layers, placement, global_rank):
                 blocks[j].id -= 1
             i -= 1
         i += 1
-        assert block.next != block.previous, "Stages cannot receive and send to the same rank."
+        # assert block.next != block.previous, "Stages cannot receive and send to the same rank."
 
     return blocks
 

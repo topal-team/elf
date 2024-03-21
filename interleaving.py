@@ -42,7 +42,7 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
         full_model = load_full_model(len(placement)).cuda()
         groundtruth = full_model(batch)
         assert torch.allclose(output, groundtruth), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
-        logger.log(0, f'{block} - Outputs are correct :)')
+        logger.info(f'{block} - Outputs are correct :)')
 
         loss = F.mse_loss(groundtruth, target, reduction="sum") # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
         loss.backward()
@@ -58,7 +58,7 @@ def test_pipeline(blocks, placement, schedule=train_step_afab):
             groundtruth = torch.empty_like(batch)
             dist.recv(groundtruth, placement[-1])
         assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth} biggest difference is {torch.max((grads - groundtruth).abs())}'
-        logger.log(0, f'{block} - Gradients are correct :))')
+        logger.info(f'{block} - Gradients are correct :))')
 
 if __name__ == "__main__":
     world_size = int(os.environ["WORLD_SIZE"])
