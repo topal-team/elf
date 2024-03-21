@@ -23,6 +23,7 @@ def train_step_afab(blocks, batch, target, loss_fn):
             b.recv_forward()
             y = b.forward()
             b.send_forward()
+
             if y is not None: result.append(y)
 
     grads = []
