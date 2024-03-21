@@ -64,8 +64,9 @@ def test_pipeline(blocks, placement, scheduler):
         else:
             groundtruth = torch.empty_like(batch)
             dist.recv(groundtruth, placement[-1])
-        assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth} biggest difference is {torch.max((grads - groundtruth).abs())}'
-        logger.info(f'{block} - Gradients are correct :))')
+
+        assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth}'
+        print(f'{block} - Gradients are correct :))')
 
 if __name__ == "__main__":
     world_size = int(os.environ["WORLD_SIZE"])
@@ -76,7 +77,8 @@ if __name__ == "__main__":
     dist.init_process_group(backend="nccl")
 
     # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
-    # placement = torch.randint(0, world_size, (8,)).cuda()
+    # placement = torch.randint(0, world_size, (4,)).cuda()
+
     placement = torch.tensor([0, 1, 2, 3]).cuda()
     dist.broadcast(placement, 0) # synchronize placement on all processes
     logger.debug(f'Placement : {placement}')

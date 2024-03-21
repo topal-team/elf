@@ -3,7 +3,6 @@ from engine import Operations
 import logging
 logger = logging.getLogger("schedule")
 
-
 def generate_afab_schedule(placement, n_micro_batches):
     schedule = []
     n_stages = len(placement)
