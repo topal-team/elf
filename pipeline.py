@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 from collections import deque
 import logging
