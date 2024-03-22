@@ -33,14 +33,12 @@ def generate_1f1b_schedule(placement, n_micro_batches):
     for b in range(n_stages):
         # End of warmup phase is either first backward or end of batch
         warmup_fwd = min(n_micro_batches - 1, 2 * (n_stages - b - 1))
-        print(f'Block {b} : {warmup_fwd} before steady')
         for i in range(warmup_fwd):
             schedule.append((b, Operations.FORWARD))
 
     # Steady phase
     for b in range(n_stages):
         remaining_fwd = n_micro_batches - min(n_micro_batches - 1, 2 * (n_stages - b - 1))
-        print(f'Block {b} : {remaining_fwd} in steady')
         for i in range(remaining_fwd):
             schedule.append((b, Operations.FORWARD))
             schedule.append((b, Operations.BACKWARD))
@@ -48,7 +46,6 @@ def generate_1f1b_schedule(placement, n_micro_batches):
     # Cooldown phase
     for b in reversed(range(n_stages)):
         remaining_bwd = min(n_micro_batches - 1, 2 * (n_stages - b - 1))
-        print(f'Block {b} : {remaining_bwd} before end')
         for i in range(remaining_bwd):
             schedule.append((b, Operations.BACKWARD))
 
