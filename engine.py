@@ -27,10 +27,10 @@ class StageScheduler():
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
-    def train_step(self, batch, target, loss_fn):
+    def train_step(self, batch, target, loss_fn, split_size = 1):
         last_block = max(map(lambda s: s[0], self.schedule))
         
-        splits = iter(batch.split(1, dim=0)) # adjust micro batch size
+        splits = iter(batch.split(split_size, dim=0))
 
         result = []
         grads = []
@@ -54,11 +54,14 @@ class StageScheduler():
                         block.send_backward()
                     case Operations.RECV_FORWARD:
                         if id == 0:
-                            block.inputs.append(next(splits)) # When merging with async, don't forget to add (None, )
+                            s = next(splits)
+                            logger.debug(f'Feeding next micro batch, of shape {s.shape}, into the pipeline')
+                            block.inputs.append(s) # When merging with async, don't forget to add (None, )
                         block.recv_forward()
                     case Operations.RECV_BACKWARD:
                         if id == last_block:
-                            compute_loss(block, result[i], target[i], loss_fn)
+                            logger.debug(f'Computing loss between result[{i}] and target[{i*split_size}:{(i+1)*split_size}]')
+                            compute_loss(block, result[i], target[(i*split_size):(i + 1)*split_size], loss_fn)
                             i += 1
                         block.recv_backward()
                     case _:
