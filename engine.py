@@ -1,4 +1,5 @@
 from enum import Enum
+import torch.distributed as dist
 from pipeline import compute_loss
 
 import logging
@@ -37,9 +38,9 @@ class StageScheduler():
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
 
-        for (id, op) in self.schedule:
-            if str(id) in self.id_to_block:
-                block = self.id_to_block[str(id)]
+        for (id_, op) in self.schedule:
+            if str(id_) in self.id_to_block:
+                block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing operation {op} on block {block}')
                 match op:
                     case Operations.FORWARD:
@@ -53,16 +54,16 @@ class StageScheduler():
                     case Operations.SEND_BACKWARD:
                         block.send_backward()
                     case Operations.RECV_FORWARD:
-                        if id == 0:
+                        if id_ == 0:
                             block.inputs.append((None, next(splits)))
                         block.recv_forward()
                     case Operations.RECV_BACKWARD:
-                        if id == last_block:
-                            logger.debug(f'Computing loss between result[{i}] and target[{i*split_size}:{(i+1)*split_size}]')
-                            compute_loss(block, result[i], target[(i*split_size):(i + 1)*split_size], loss_fn)
+                        if id_ == last_block:
+                            compute_loss(block, result[i], target[i*split_size:(i + 1) * split_size], loss_fn)
                             i += 1
                         block.recv_backward()
                     case _:
                         raise f'Unknown operation : {op}'
 
+        dist.barrier()
         return result, grads

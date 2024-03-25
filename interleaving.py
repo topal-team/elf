@@ -16,21 +16,23 @@ def test_pipeline(blocks, placement, scheduler):
     Test that a schedule computes the forward & backward passes correctly
     To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
     '''
-    batch = torch.randn((len(placement) * 2, 3)).cuda()
+    split_size = 2
+    batch = torch.randn((len(placement) * split_size * 2, 3)).cuda()
+
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
     # So we have to sync them
-    if placement[-1] != placement[0]:
+    if placement[0] != placement[-1]:
         if global_rank == placement[0]: dist.send(batch, dst = placement[-1])
         if global_rank == placement[-1]: dist.recv(batch, src = placement[0])
         
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
-    schedule = scheduler(placement, batch.size(0)) # // split size if needed
+    schedule = scheduler(placement, batch.size(0) // split_size)
     if global_rank == 0: logger.debug(schedule)
     stage = StageScheduler(schedule, blocks)
 
-    result, grads = stage.train_step(batch, target, F.mse_loss)
+    result, grads = stage.train_step(batch, target, F.mse_loss, split_size)
     logger.debug(f'[Rank {global_rank}] : result = {result}, grads = {grads}')
     
     for b in blocks:

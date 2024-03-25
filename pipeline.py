@@ -77,6 +77,7 @@ class PipelineBlock():
         Perform the forward pass for one tensor of activations and register it as computed
         '''
         if len(self.inputs) == 0: return
+        
         logger.debug(f'{self} - Computing forward')
         
         work, x = self.inputs.popleft()
@@ -96,7 +97,7 @@ class PipelineBlock():
         Backward assumes activations AND grads to be on top of the queue
         '''
         if len(self.grads) == 0: return
-        logger.debug(f'{self} - Computing backward')
+        logger.debug(f'{self} - Computing one backward')
 
         act = self.activations.popleft()
         work, grads = self.grads.popleft()
@@ -118,8 +119,7 @@ class PipelineBlock():
         activations = self.act_to_send.popleft()
 
         metadata = TensorMetadata(activations).to_tensor()
-        dist.send(metadata, self.next)
-
+        dist.isend(metadata, self.next)
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
         dist.isend(activations, self.next)
 
@@ -132,7 +132,7 @@ class PipelineBlock():
         grads = self.grads_to_send.popleft()
 
         metadata = TensorMetadata(grads).to_tensor()
-        dist.send(metadata, self.previous)
+        dist.isend(metadata, self.previous)
 
         logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
         dist.isend(grads, self.previous)
@@ -144,7 +144,9 @@ class PipelineBlock():
         if self.previous is None or isinstance(self.previous, PipelineBlock): return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        dist.recv(buffer, self.previous) # TODO : async here ?
+        work = dist.irecv(buffer, self.previous)
+        logger.debug(f'{self} - Waiting for metadata of activations from rank {self.previous}')
+        work.wait()
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
@@ -161,7 +163,8 @@ class PipelineBlock():
         if self.next is None or isinstance(self.next, PipelineBlock): return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        dist.recv(buffer, self.next) # TODO : async here ?
+        work = dist.irecv(buffer, self.next)
+        work.wait()
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
