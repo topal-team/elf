@@ -6,18 +6,20 @@ from pipeline import PipelineBlock, create_pipeline
 from schedule import generate_afab_schedule, generate_1f1b_schedule
 from engine import StageScheduler
 from test_model import load_full_model, load_parts_model
+from argparse import ArgumentParser
 
 import logging
 logger = logging.getLogger(f'main')
-logging.basicConfig(level = logging.DEBUG) # change this to display more/less messages. TODO : pass this as cli argument
+logging.basicConfig(level = logging.DEBUG)
 
 def test_pipeline(blocks, placement, scheduler):
     '''
     Test that a schedule computes the forward & backward passes correctly
     To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
     '''
-    split_size = 2
-    batch = torch.randn((len(placement) * split_size * 2, 3)).cuda()
+
+    split_size = 1
+    batch = torch.randn((len(placement), 3)).cuda()
 
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
@@ -71,6 +73,17 @@ def test_pipeline(blocks, placement, scheduler):
         print(f'{block} - Gradients are correct :))')
 
 if __name__ == "__main__":
+    parser = ArgumentParser(description = "Demo/Test of pipelined model")
+    parser.add_argument('--log', choices=['debug', 'info', 'none'], default='info', required=False, help="logging level")
+    args = parser.parse_args()
+    match args.log:
+        case 'debug':
+            logger.setLevel(logging.DEBUG)
+        case 'info':
+            logger.setLevel(logging.INFO)
+        case 'none':
+            logger.setLevel(100)
+
     world_size = int(os.environ["WORLD_SIZE"])
     rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
@@ -81,7 +94,8 @@ if __name__ == "__main__":
     # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
     # placement = torch.randint(0, world_size, (4,)).cuda()
 
-    placement = torch.tensor([0, 1, 2, 3]).cuda()
+    placement = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3]).cuda()
+
     dist.broadcast(placement, 0) # synchronize placement on all processes
     logger.debug(f'Placement : {placement}')
 
@@ -92,7 +106,7 @@ if __name__ == "__main__":
     # After that you can use the schedules in `schedule.py` to compute results + gradients of your layers
 
     # Check that the results and gradients are the same as a single-gpu model
-    test_pipeline(blocks, placement, scheduler=generate_1f1b_schedule)
+    test_pipeline(blocks, placement, scheduler=generate_afab_schedule)
 
     dist.barrier()
     if dist.is_initialized():

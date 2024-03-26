@@ -77,8 +77,8 @@ class PipelineBlock():
         Perform the forward pass for one tensor of activations and register it as computed
         '''
         if len(self.inputs) == 0: return
-        
-        logger.debug(f'{self} - Computing forward')
+
+        logger.debug(f'{self} - Computing one forward')
         
         work, x = self.inputs.popleft()
         if work is not None: work.wait() # if properly managed, work should alredy be completed
@@ -163,8 +163,11 @@ class PipelineBlock():
         if self.next is None or isinstance(self.next, PipelineBlock): return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
+
         work = dist.irecv(buffer, self.next)
+        logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {self.next}')
         work.wait()
+
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
@@ -175,6 +178,7 @@ class PipelineBlock():
 
         self.grads.append((work, buffer))
 
+    '''
     def has_work_forward(self):
         for (work, _) in self.inputs:
             if work is None or work.is_completed():
@@ -186,6 +190,7 @@ class PipelineBlock():
             if work is None or work.is_completed():
                 return True
         return False
+    '''
 
 def create_pipeline(layers, placement):
     '''

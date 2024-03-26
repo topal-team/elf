@@ -6,6 +6,7 @@ __pycache__/
 # Slurm outputs
 core.*
 *.out
+out.*
 
 # Program outputs
 trace*.json
