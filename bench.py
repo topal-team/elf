@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from engine import StageScheduler
 from schedule import generate_afab_schedule, generate_1f1b_schedule
-from pipeline import pipeline_from_layers
+from pipeline import create_pipeline
 from torchvision.models import resnet101
 import time
 
@@ -32,7 +32,7 @@ if __name__ == '__main__':
         my_layers = [nn.Sequential(model.layer4, model.avgpool, nn.Flatten(), model.fc)]
     
     placement = list(range(world_size))
-    pipeline = pipeline_from_layers(my_layers, placement, global_rank)
+    pipeline = create_pipeline(my_layers, placement)
 
     batch_size = 4
     split_size = 2

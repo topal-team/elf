@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 import os
-from pipeline import pipeline_from_layers
+from pipeline import PipelineBlock, create_pipeline
 from schedule import generate_afab_schedule, generate_1f1b_schedule
 from engine import StageScheduler
 from test_model import load_full_model, load_parts_model
@@ -83,8 +83,8 @@ if __name__ == "__main__":
 
     # Load your model here (each process should load the right layers depending on placement)
     layers = load_parts_model(placement, global_rank)
-    # This method automatically creates the pipeline based on your placement. `blocks` now contains the pipelined blocks.
-    blocks = pipeline_from_layers(layers, placement, global_rank)
+    # This creates the pipeline based on your placement. `blocks` now contains the pipelined blocks.
+    blocks = create_pipeline(layers, placement)
     # After that you can use the schedules in `schedule.py` to compute results + gradients of your layers
 
     # Check that the results and gradients are the same as a single-gpu model

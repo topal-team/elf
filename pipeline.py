@@ -49,11 +49,11 @@ class PipelineBlock():
     '''
     Manages one layer/group of contiguous layers placed on one device
     '''
-    def __init__(self, model, rank, id_):
+    def __init__(self, model, id_, placement):
         super(PipelineBlock, self).__init__()
         # Block infos
         self.model = model.cuda()
-        self.rank = rank # global rank
+        self.rank = placement[id_] # global rank
         self.id = id_ # rank in the model.
 
         # Queues of tensor to process
@@ -66,8 +66,8 @@ class PipelineBlock():
 
         # Ranks where the previous/next blocks in the model are placed
         # OR reference to the next block if they are on the same device
-        self.previous = None
-        self.next = None
+        self.previous = None if self.id == 0 else placement[self.id - 1]
+        self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
 
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
@@ -114,14 +114,11 @@ class PipelineBlock():
 
         activations = self.act_to_send.popleft()
 
-        if isinstance(self.next, PipelineBlock): # same rank
-            self.next.inputs.append(activations.detach()) # TODO: we don't actually need to detach ; we could fasten the backward pass by doing it all on one pass
-        else:
-            metadata = TensorMetadata(activations).to_tensor()
-            dist.send(metadata, self.next)
+        metadata = TensorMetadata(activations).to_tensor()
+        dist.send(metadata, self.next)
 
-            logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
-            dist.send(activations, self.next)
+        logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
+        dist.send(activations, self.next)
 
     def send_backward(self):
         '''
@@ -131,14 +128,11 @@ class PipelineBlock():
 
         grads = self.grads_to_send.popleft()
 
-        if isinstance(self.previous, PipelineBlock): # same rank
-            self.previous.grads.append(grads)
-        else:
-            metadata = TensorMetadata(grads).to_tensor()
-            dist.send(metadata, self.previous)
+        metadata = TensorMetadata(grads).to_tensor()
+        dist.send(metadata, self.previous)
 
-            logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
-            dist.send(grads, self.previous)
+        logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
+        dist.send(grads, self.previous)
 
     def recv_forward(self):
         '''
@@ -174,26 +168,14 @@ class PipelineBlock():
 
         self.grads.append(buffer)
 
-def pipeline_from_layers(layers, placement, global_rank):
+def create_pipeline(layers, placement):
     '''
-    Creates the pipeline from a list of layers and a placement on devices.
-    Basically does 2 things : creates PipelineBlock objects with the right ids and infos, and merges all the blocks that should be. 
-    This is needed to call the schedules in `schedule.py` or with your own schedules.
+    Transforms a list of layers placed on different devices to a working pipeline
     '''
-    ids = [idx for idx, p in enumerate(placement) if global_rank == p]
-    blocks = []
-    for id_, layer in zip(ids, layers):
-        block = PipelineBlock(layer.cuda(), global_rank, id_)
-        blocks.append(block)
+    rank = dist.get_rank()
 
-    for i, (id_, block) in enumerate(zip(ids, blocks)):
-        if id_ < len(placement) - 1:
-            if placement[id_ + 1] != placement[id_]: block.next = placement[id_ + 1]
-            else: block.next = blocks[i + 1] # we need to do 2 loops for this line
-        if id_ > 0:
-            if placement[id_ - 1] != placement[id_]: block.previous = placement[id_ - 1]
-            else: block.previous = blocks[i - 1]
-
+    ids = [i for i in range(len(placement)) if placement[i] == rank]
+    blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
     return blocks
 
 def compute_loss(block, output, target, loss_fn):
