@@ -5,19 +5,10 @@ From: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-devel
     # Update and install system packages
     apt-get update && apt-get install -y git
 
-    pip install packaging
+    # Nanotron dependencies
+    pip install packaging pyyaml numpy safetensors dacite tqdm
     pip install "flash-attn>=2.5.0" --no-build-isolation
     pip install datasets transformers python-etcd tensorboardX matplotlib
-    
-
-    # Clone the GitHub repository
-    git clone https://github.com/Adrien-AM/nanotron.git
-
-    # Change directory to the cloned repository
-    cd /nanotron
-
-%environment
-    export PATH=/nanotron:$PATH
 
 %runscript
     # This script runs when the Singularity container is executed.
