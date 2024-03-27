@@ -8,7 +8,7 @@ from engine import StageScheduler
 from test_model import load_full_model, load_parts_model
 
 import logging
-logger = logging.getLogger(f'main]')
+logger = logging.getLogger(f'main')
 logging.basicConfig(level = logging.DEBUG) # change this to display more/less messages. TODO : pass this as cli argument
 
 def test_pipeline(blocks, placement, scheduler):
@@ -16,7 +16,7 @@ def test_pipeline(blocks, placement, scheduler):
     Test that a schedule computes the forward & backward passes correctly
     To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
     '''
-    batch = torch.randn((len(placement), 3)).cuda()
+    batch = torch.randn((len(placement) * 2, 3)).cuda()
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
     # So we have to sync them
@@ -59,7 +59,7 @@ def test_pipeline(blocks, placement, scheduler):
     if global_rank == placement[0]:
         block = blocks[0]
         grads = torch.cat(grads, dim=0)
-        if placement[0] == placement[-1]: 
+        if placement[0] == placement[-1]:
             groundtruth = batch.grad.data
         else:
             groundtruth = torch.empty_like(batch)
@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
     # placement = torch.randint(0, world_size, (8,)).cuda()
-    placement = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3]).cuda()
+    placement = torch.tensor([0, 1, 2, 3]).cuda()
     dist.broadcast(placement, 0) # synchronize placement on all processes
     logger.debug(f'Placement : {placement}')
 

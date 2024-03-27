@@ -10,7 +10,7 @@ import time
 
 import logging
 logger = logging.getLogger(f'benchmark')
-logging.basicConfig(level = logging.INFO) # 
+logging.basicConfig(level = logging.DEBUG)
 
 if __name__ == '__main__':
     world_size = int(os.environ["WORLD_SIZE"])
@@ -34,8 +34,9 @@ if __name__ == '__main__':
     placement = list(range(world_size))
     pipeline = pipeline_from_layers(my_layers, placement, global_rank)
 
-    batch_size = 32
-    n_iters = 50
+    batch_size = 4
+    split_size = 2
+    n_iters = 1
 
     if global_rank == 0:
         start = time.time()
@@ -48,7 +49,7 @@ if __name__ == '__main__':
             loss.backward()
         logger.info(f'Regular : {time.time() - start:.3f}s')
 
-    schedule = generate_afab_schedule(placement, batch_size)
+    schedule = generate_afab_schedule(placement, batch_size // split_size)
     scheduler = StageScheduler(schedule, pipeline)
 
     start = time.time()
@@ -56,10 +57,10 @@ if __name__ == '__main__':
     for _ in range(n_iters):
         dummy = torch.randn((batch_size, 3, 224, 224)).cuda()
         target = torch.randn((batch_size, 1000)).cuda()
-        scheduler.train_step(dummy, target, torch.nn.functional.cross_entropy)
+        scheduler.train_step(dummy, target, torch.nn.functional.cross_entropy, split_size)
     if global_rank == 0: logger.info(f'AFAB : {time.time() - start:.3f}s')
 
-    schedule = generate_1f1b_schedule(placement, batch_size)
+    schedule = generate_1f1b_schedule(placement, batch_size // split_size)
     scheduler = StageScheduler(schedule, pipeline)
 
     start = time.time()
@@ -67,7 +68,7 @@ if __name__ == '__main__':
     for _ in range(n_iters):
         dummy = torch.randn((batch_size, 3, 224, 224)).cuda()
         target = torch.randn((batch_size, 1000)).cuda()
-        scheduler.train_step(dummy, target, torch.nn.functional.cross_entropy)
+        scheduler.train_step(dummy, target, torch.nn.functional.cross_entropy, split_size)
     if global_rank == 0: logger.info(f'1F1B : {time.time() - start:.3f}s')
 
     if dist.is_initialized():
