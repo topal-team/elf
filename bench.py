@@ -48,24 +48,13 @@ if __name__ == '__main__':
         my_layers = [nn.Sequential(model.layer4, model.avgpool, nn.Flatten(), model.fc)]
     
     placement = list(range(world_size))
-<<<<<<< HEAD
+
     pipeline = create_pipeline(my_layers, placement)
 
     batch_size = 4
     split_size = 2
     n_iters = 1
 
-    '''
-=======
-    pipeline = pipeline_from_layers(my_layers, placement, global_rank)
-    for b in pipeline:
-        logger.info(f'{b.previous} -> {b} -> {b.next}')
-
-    batch_size = 64
-    split_size = 4
-    n_iters = 50
-    
->>>>>>> 4e9e0f6 (Benchmark on ResNet101 with bad partitioning #17)
     if global_rank == 0:
         start = time.time()
         logger.info(f'Starting benchmark for regular')
