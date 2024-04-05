@@ -1,6 +1,6 @@
 from enum import Enum
 import torch.distributed as dist
-from pipeline import compute_loss
+from .pipeline import compute_loss
 
 import logging
 logger = logging.getLogger("engine")

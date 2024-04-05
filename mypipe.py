@@ -35,23 +35,29 @@ if __name__ == "__main__":
 
     sequence = partition_model(model, placement = placement)
     blocks = create_pipeline([sequence], placement)
-    schedule = generate_1f1b_schedule(placement, block_size)
-    stage = StageScheduler(schedule, blocks)
 
-    # Warmup
-    for _ in range(5):
-        _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum())
-    start = time.time()
-    for _ in range(iters):
-        _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum())
-    end = time.time()
-    print(f'Time taken by custom pipeline : {end - start:.2f}s. Average : {(end - start) / iters:.3f}s')
-    # Time taken by custom pipeline : 16.79s. Average : 0.336s (AFAB XXXL)
-    # Time taken by custom pipeline : 15.60s. Average : 0.312s (1F1B XXXL)
+    sizes = [1, 2, 4, 8, 16, 32]
+    times = []
+    for block_size in sizes:
+        schedule = generate_1f1b_schedule(placement, dataset_size // block_size)
+        stage = StageScheduler(schedule, blocks)
 
-    # Time taken by custom pipeline : 3.61s. Average : 0.072s (AFAB ResNet Bottleneck 8)
-    # Time taken by custom pipeline : 3.48s. Average : 0.070s 1F1B ResNet Bottleneck 8)
+        # Warmup
+        for _ in range(5):
+            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), block_size)
+        start = time.time()
+        for _ in range(iters):
+            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), block_size)
+        end = time.time()
+        t = (end - start) / iters
+        print(f'Time taken by custom pipe (block size = {block_size}) : {end - start:.2f}s. Average : {t:.3f}s')
+        times.append(t)
 
+        if global_rank == 0:
+            with open(f'custom_GPTXXXL_{dataset_size}.txt', 'w') as file:
+                for size, t in zip(sizes, times):
+                    file.write(f'{size}, {t}\n')
+    
     dist.barrier()
     if dist.is_initialized():
         dist.destroy_process_group()

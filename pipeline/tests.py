@@ -2,9 +2,9 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 import os
-from pipeline import PipelineBlock, create_pipeline
-from schedule import generate_afab_schedule, generate_1f1b_schedule
-from engine import StageScheduler
+from .pipeline import PipelineBlock, create_pipeline
+from .schedule import generate_afab_schedule, generate_1f1b_schedule
+from .engine import StageScheduler
 from test_model import load_full_model, load_parts_model
 from argparse import ArgumentParser
 
