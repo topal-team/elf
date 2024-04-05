@@ -1,11 +1,5 @@
-from models.GPT import GPT, PipelineGPT
-from pipeline.pipeline import create_pipeline
-from pipeline.schedule import generate_afab_schedule
-from pipeline.engine import StageScheduler
-from argparse import ArgumentParser
-import torch
+from models.GPT import PipelineGPT
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.distributed.pipeline.sync import Pipe
 import os
 import time

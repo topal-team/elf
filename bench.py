@@ -2,9 +2,9 @@ import os
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from engine import StageScheduler
-from schedule import generate_afab_schedule, generate_1f1b_schedule
-from pipeline import create_pipeline
+from pipeline.engine import StageScheduler
+from pipeline.schedule import generate_afab_schedule, generate_1f1b_schedule
+from pipeline.pipeline import create_pipeline
 from torchvision.models import resnet101
 import time
 

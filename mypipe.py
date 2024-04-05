@@ -1,15 +1,12 @@
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import os
 import time
-from models.GPT import GPT
 from pipeline.pipeline import create_pipeline, partition_model
 from pipeline.schedule import generate_afab_schedule, generate_1f1b_schedule
 from pipeline.engine import StageScheduler
 from argparse import ArgumentParser
 from settings import *
-import psutil
 
 import logging
 logger = logging.getLogger('gpt')
