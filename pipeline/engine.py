@@ -29,9 +29,11 @@ class StageScheduler():
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
     def train_step(self, batch, target, loss_fn, split_size = 1):
+        '''
+        Perform forward + backward pass on a batch of data
+        '''
         for b in self.blocks:
             b.model.zero_grad()
-        last_block = max(map(lambda s: s[0], self.schedule))
         
         splits = iter(batch.split(split_size, dim=0))
 

@@ -4,6 +4,10 @@ import logging
 logger = logging.getLogger("schedule")
 
 def generate_afab_schedule(placement, n_micro_batches):
+    '''
+    All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
+    Supports any model placement
+    '''
     schedule = []
     n_stages = len(placement)
 
@@ -26,6 +30,10 @@ def generate_afab_schedule(placement, n_micro_batches):
     return schedule
 
 def generate_1f1b_schedule(placement, n_micro_batches):
+    '''
+    One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
+    Does not support interleaving for now !
+    '''
     schedule = []
     n_stages = len(placement)
     

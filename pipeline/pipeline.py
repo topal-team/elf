@@ -98,7 +98,7 @@ class PipelineBlock():
         logger.debug(f'{self} - Computing one forward')
         
         work, x = self.inputs.popleft()
-        if self.previous is None: assert work is None, "??????"
+
         if work is not None: work.wait() # if properly managed, work should already be completed
         
         if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
@@ -124,12 +124,10 @@ class PipelineBlock():
         act = self.activations.popleft()
         work, grads = self.grads.popleft()
         
-        if self.next is None: assert work is None, "??????"
         if work is not None: work.wait() # if properly managed, work should alredy be completed
         
         x = self.inputs_to_keep.popleft()
-        logger.debug(f'{self} - Work received. Starting actual computation.')
-        (act * grads).sum().backward()
+        (act * grads).sum().backward() # Optimal ? Maybe setting the gradients directly is faster
 
         if x.requires_grad:
             self.grads_to_send.append(x.grad.data)
@@ -202,20 +200,6 @@ class PipelineBlock():
 
         self.grads.append((work, buffer))
 
-    '''
-    def has_work_forward(self):
-        for (work, _) in self.inputs:
-            if work is None or work.is_completed():
-                return True
-        return False
-
-    def has_work_backward(self):
-        for (work, _) in self.grads:
-            if work is None or work.is_completed():
-                return True
-        return False
-    '''
-
 def create_pipeline(layers, placement):
     '''
     Transforms a list of layers placed on different devices to a working pipeline
@@ -237,6 +221,11 @@ def compute_loss(block, output, target, loss_fn):
     block.grads.append((None, output.grad.data))
 
 def partition_model(model, placement):
+    '''
+    Divide a model into roughly equal blocks, in terms of number of parameters
+    Each block that is placed on this rank is moved to the corresponding GPU
+    Currently does not support interleaving / multiple blocks per device
+    '''
     rank = dist.get_rank() if dist.is_initialized() else None
     
     layers = []
