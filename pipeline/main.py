@@ -34,7 +34,8 @@ def test_pipeline(blocks, placement, scheduler):
     if global_rank == 0: logger.debug(schedule)
     stage = StageScheduler(schedule, blocks)
 
-    result, grads = stage.train_step(batch, target, F.mse_loss, split_size)
+    result = stage.train_step(batch, target, F.mse_loss, split_size)
+    grads = batch.grad.data
     logger.debug(f'[Rank {global_rank}] : result = {result}, grads = {grads}')
     
     for b in blocks:
@@ -78,11 +79,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     match args.log:
         case 'debug':
-            logger.setLevel(logging.DEBUG)
+            logging.getLogger().setLevel(logging.DEBUG)
         case 'info':
-            logger.setLevel(logging.INFO)
+            logging.getLogger().setLevel(logging.INFO)
         case 'none':
-            logger.setLevel(100)
+            logging.getLogger().setLevel(100)
 
     world_size = int(os.environ["WORLD_SIZE"])
     rank = int(os.environ["LOCAL_RANK"])

@@ -1,12 +1,26 @@
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 from collections import deque
+from enum import Enum
 import logging
 logger = logging.getLogger("pipeline")
+
+dtypes = [
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+    torch.float64,
+    torch.int16,
+    torch.int32,
+    torch.int64,
+    torch.bool
+]
 
 class TensorMetadata():
     '''
     Informations about Tensors that are sent and received in p2p communication
+    [dtype, *shape]
     '''
     MAX_SIZE = 64
 
@@ -15,34 +29,37 @@ class TensorMetadata():
         '''
         Creates a TensorMetadata object from its Tensor equivalent (should be used when receiving metadata via p2p)
         '''
+        dtype = dtypes[int(t[0].item())]
         shape = []
         assert len(t.shape) == 1, "Metadata should only have one dimension"
-        for s in t:
+        for s in t[1:]:
             s = int(s.item())
             if s == 0: break
             shape.append(s)
         
-        metadata = TensorMetadata(torch.empty(0))
+        metadata = TensorMetadata(torch.empty(0, dtype=dtype))
         metadata.shape = shape
         return metadata
 
     def __init__(self, t):
         self.shape = t.shape
+        self.dtype = t.dtype
 
     def to_tensor(self):
         '''
         Creates the Tensor representation of this metadata. Should be used when sending metadata via p2p
         '''
         t = torch.zeros(TensorMetadata.MAX_SIZE).cuda()
+        t[0] = dtypes.index(self.dtype)
         for i, s in enumerate(self.shape):
-            t[i] = s
+            t[1 + i] = s
         return t
     
     def get_buffer(self):
         '''
         Allocates a tensor with the right shape for this metadata
         '''
-        buffer = torch.empty(self.shape).cuda()
+        buffer = torch.empty(self.shape, dtype=self.dtype).cuda()
         return buffer
 
 class PipelineBlock():
@@ -81,8 +98,13 @@ class PipelineBlock():
         logger.debug(f'{self} - Computing one forward')
         
         work, x = self.inputs.popleft()
-        if work is not None: work.wait() # if properly managed, work should alredy be completed
-        x.requires_grad = True
+        if self.previous is None: assert work is None, "??????"
+        if work is not None: work.wait() # if properly managed, work should already be completed
+        
+        if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
+            x.requires_grad = True
+            
+        logger.debug(f'{self} - Work received. Starting actual computation.')
         y = self.model(x)
         self.activations.append(y)
         self.act_to_send.append(y)
@@ -101,15 +123,17 @@ class PipelineBlock():
 
         act = self.activations.popleft()
         work, grads = self.grads.popleft()
+        
+        if self.next is None: assert work is None, "??????"
         if work is not None: work.wait() # if properly managed, work should alredy be completed
+        
         x = self.inputs_to_keep.popleft()
-
+        logger.debug(f'{self} - Work received. Starting actual computation.')
         (act * grads).sum().backward()
 
-        self.grads_to_send.append(x.grad.data)
-        if self.previous is None:
-            return self.grads_to_send.popleft()
-
+        if x.requires_grad:
+            self.grads_to_send.append(x.grad.data)
+            
     def send_forward(self):
         '''
         Send one activation to the next layer in the model
@@ -120,6 +144,7 @@ class PipelineBlock():
 
         metadata = TensorMetadata(activations).to_tensor()
         dist.isend(metadata, self.next)
+
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
         dist.isend(activations, self.next)
 
@@ -141,7 +166,7 @@ class PipelineBlock():
         '''
         Receive and store one activation to forward
         '''
-        if self.previous is None or isinstance(self.previous, PipelineBlock): return
+        if self.previous is None: return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
         work = dist.irecv(buffer, self.previous)
@@ -160,7 +185,7 @@ class PipelineBlock():
         '''
         Receive and store one gradient to backward
         '''
-        if self.next is None or isinstance(self.next, PipelineBlock): return
+        if self.next is None: return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
 
@@ -170,7 +195,6 @@ class PipelineBlock():
 
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
-
 
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {self.next}')
         work = dist.irecv(buffer, self.next)
@@ -211,3 +235,47 @@ def compute_loss(block, output, target, loss_fn):
     loss = loss_fn(output, target, reduction="sum")
     loss.backward()
     block.grads.append((None, output.grad.data))
+
+def partition_model(model, placement):
+    rank = dist.get_rank() if dist.is_initialized() else None
+    
+    layers = []
+    for module in model.children():
+        if isinstance(module, nn.ModuleList) or isinstance(module, nn.Sequential):
+            layers.extend(module)
+        else:
+            layers.append(module)
+            
+    def numel(layer):
+        return sum([p.numel() for p in layer.parameters()])
+
+    total_numel = sum([numel(layer) for layer in layers])
+    phase_numel = total_numel // len(placement)
+    delim_numel = phase_numel
+    accum_numel = 0
+
+    # seal one pipeline phase when its numel is larger than phase_numel
+    phases = [[]]
+    for layer in layers:
+        phases[-1].append(layer)
+        accum_numel += numel(layer)
+        if accum_numel > delim_numel:
+            delim_numel += phase_numel
+            phases.append([])
+
+    # pack all remaining layers into the last phase
+    while len(phases) > len(placement):
+        phases[-2].extend(phases[-1])
+        phases.pop()
+
+    if rank is None:
+        for i, phase in enumerate(phases):
+            for layer in phase:
+                layer.to_empty(device=torch.device(placement[i]))
+    else:
+        for layer in phases[rank]:
+            layer.to_empty(device=torch.device(placement[rank]))
+
+    # create nn.Sequential
+    if rank is None: return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
+    else: return nn.Sequential(*phases[rank])

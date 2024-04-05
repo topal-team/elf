@@ -29,41 +29,42 @@ class StageScheduler():
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
     def train_step(self, batch, target, loss_fn, split_size = 1):
+        for b in self.blocks:
+            b.model.zero_grad()
         last_block = max(map(lambda s: s[0], self.schedule))
         
         splits = iter(batch.split(split_size, dim=0))
 
         result = []
-        grads = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
 
         for (id_, op) in self.schedule:
             if str(id_) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
-                logger.debug(f'Computing operation {op} on block {block}')
+                logger.debug(f'Computing {op} on block {block}')
                 match op:
                     case Operations.FORWARD:
                         y = block.forward()
                         if y is not None: result.append(y)
                     case Operations.BACKWARD:
-                        g = block.backward()
-                        if g is not None: grads.append(g)
+                        block.backward()
                     case Operations.SEND_FORWARD:
                         block.send_forward()
                     case Operations.SEND_BACKWARD:
                         block.send_backward()
                     case Operations.RECV_FORWARD:
-                        if id_ == 0:
+                        if block.previous is None:
                             block.inputs.append((None, next(splits)))
                         block.recv_forward()
                     case Operations.RECV_BACKWARD:
-                        if id_ == last_block:
+                        if block.next is None:
                             compute_loss(block, result[i], target[i*split_size:(i + 1) * split_size], loss_fn)
                             i += 1
                         block.recv_backward()
                     case _:
-                        raise f'Unknown operation : {op}'
+                        raise Exception(f'Unknown operation : {op}')
 
+        logger.debug(f'[Rank {self.rank}] - Finished computation !')
         dist.barrier()
-        return result, grads
+        return result
