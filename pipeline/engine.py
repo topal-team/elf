@@ -1,6 +1,8 @@
 from enum import Enum
 import torch.distributed as dist
 from pipeline import compute_loss
+import time
+import matplotlib.pyplot as plt
 
 import logging
 logger = logging.getLogger("engine")
@@ -28,7 +30,7 @@ class StageScheduler():
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
-    def train_step(self, batch, target, loss_fn, split_size = 1):
+    def train_step(self, batch, target, loss_fn, split_size = 1, viz_file = None):
         '''
         Perform forward + backward pass on a batch of data
         '''        
@@ -37,11 +39,13 @@ class StageScheduler():
         result = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
+        f = open(viz_file, 'w') if viz_file is not None else None
 
         for (id_, op) in self.schedule:
             if str(id_) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing {op} on block {block}')
+                if f is not None: f.write(f'{self.rank}:{time.time()}:{id_},{op}')
                 match op:
                     case Operations.FORWARD:
                         y = block.forward()
@@ -64,6 +68,34 @@ class StageScheduler():
                     case _:
                         raise Exception(f'Unknown operation : {op}')
 
+
+        # f.close()
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         dist.barrier()
         return result
+
+    # ChatGPT generated :)    
+    def visualize(self, path):
+        operations = {}  # Dictionary to store operations by device
+        with open(path, 'r') as file:
+            for line in file:
+                rank, time_id_op = line.split(':')
+                time, id_op = time_id_op.split(',')
+                time = float(time)  # Convert time to float
+                
+                if rank not in operations:
+                    operations[rank] = []
+                operations[rank].append((time, id_op.strip()))
+
+        # Function to plot the operations
+        fig, ax = plt.subplots()
+        for rank, ops in operations.items():
+            times = [op[0] for op in ops]  # Extract times
+            ids = [int(rank)] * len(ops)  # Use device rank as y-value
+            
+            ax.scatter(times, ids, label=f'Device {rank}', s=100)  # s is the marker size
+        
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Device Rank')
+        ax.legend()
+        plt.show()
