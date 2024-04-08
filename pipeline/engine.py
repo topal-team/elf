@@ -2,6 +2,7 @@ from enum import Enum
 import torch.distributed as dist
 from pipeline import compute_loss
 import time
+import os
 import matplotlib.pyplot as plt
 
 import logging
@@ -26,7 +27,7 @@ class StageScheduler():
     def __init__(self, schedule, blocks):
         self.schedule = schedule
         self.blocks = blocks
-        self.rank = self.blocks[0].rank if blocks else None
+        self.rank = self.blocks[0].rank.item() if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
@@ -39,13 +40,13 @@ class StageScheduler():
         result = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
-        f = open(viz_file, 'w') if viz_file is not None else None
-
+        f = open(viz_file + str(self.rank), 'w') if viz_file is not None else None
+        
         for (id_, op) in self.schedule:
             if str(id_) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing {op} on block {block}')
-                if f is not None: f.write(f'{self.rank}:{time.time()}:{id_},{op}')
+                if f is not None: f.write(f'{self.rank}:{time.time()}:{id_},{op}\n')
                 match op:
                     case Operations.FORWARD:
                         y = block.forward()
@@ -69,33 +70,39 @@ class StageScheduler():
                         raise Exception(f'Unknown operation : {op}')
 
 
-        # f.close()
+        
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         dist.barrier()
+        if f is not None:
+            f.close()
+            if self.rank == 0:
+                with open(viz_file, 'w') as outfile: [outfile.write(open(f, 'r').read()) for f in [viz_file + str(r) for r in range(int(os.environ["WORLD_SIZE"]))]]
+            dist.barrier()    
+            os.remove(viz_file + str(self.rank))
         return result
 
-    # ChatGPT generated :)    
-    def visualize(self, path):
-        operations = {}  # Dictionary to store operations by device
-        with open(path, 'r') as file:
-            for line in file:
-                rank, time_id_op = line.split(':')
-                time, id_op = time_id_op.split(',')
-                time = float(time)  # Convert time to float
+# ChatGPT generated :)    
+def visualize(path):
+    operations = {}  # Dictionary to store operations by device
+    with open(path, 'r') as file:
+        for line in file:
+            rank, time_id_op = line.split(':')
+            time, id_op = time_id_op.split(',')
+            time = float(time)  # Convert time to float
                 
-                if rank not in operations:
-                    operations[rank] = []
-                operations[rank].append((time, id_op.strip()))
+            if rank not in operations:
+                operations[rank] = []
+            operations[rank].append((time, id_op.strip()))
 
-        # Function to plot the operations
-        fig, ax = plt.subplots()
-        for rank, ops in operations.items():
-            times = [op[0] for op in ops]  # Extract times
-            ids = [int(rank)] * len(ops)  # Use device rank as y-value
+    # Function to plot the operations
+    fig, ax = plt.subplots()
+    for rank, ops in operations.items():
+        times = [op[0] for op in ops]  # Extract times
+        ids = [int(rank)] * len(ops)  # Use device rank as y-value
             
-            ax.scatter(times, ids, label=f'Device {rank}', s=100)  # s is the marker size
+        ax.scatter(times, ids, label=f'Device {rank}', s=100)  # s is the marker size
         
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Device Rank')
-        ax.legend()
-        plt.show()
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Device Rank')
+    ax.legend()
+    plt.show()

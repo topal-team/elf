@@ -34,8 +34,11 @@ def test_pipeline(blocks, placement, scheduler):
     if global_rank == 0: logger.debug(schedule)
     stage = StageScheduler(schedule, blocks)
 
-    result = stage.train_step(batch, target, F.mse_loss, split_size)
-    grads = batch.grad.data
+    result = stage.train_step(batch, target, F.mse_loss, split_size, "afab.viz")
+    grads = None
+    if global_rank == placement[0]:
+        grads = list(blocks[0].grads_to_send)
+        blocks[0].grads_to_send.clear()
     logger.debug(f'[Rank {global_rank}] : result = {result}, grads = {grads}')
     
     for b in blocks:
@@ -95,7 +98,7 @@ if __name__ == "__main__":
     # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
     # placement = torch.randint(0, world_size, (4,)).cuda()
 
-    placement = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3]).cuda()
+    placement = torch.tensor([0, 1, 2, 3]).cuda()
 
     dist.broadcast(placement, 0) # synchronize placement on all processes
     logger.debug(f'Placement : {placement}')
