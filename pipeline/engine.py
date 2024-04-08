@@ -81,28 +81,56 @@ class StageScheduler():
             os.remove(viz_file + str(self.rank))
         return result
 
-# ChatGPT generated :)    
 def visualize(path):
     operations = {}  # Dictionary to store operations by device
     with open(path, 'r') as file:
         for line in file:
-            rank, time_id_op = line.split(':')
-            time, id_op = time_id_op.split(',')
-            time = float(time)  # Convert time to float
-                
+            rank, times, id_op = line.split(':')
+            times = float(times)  # Convert time to float
+            
             if rank not in operations:
                 operations[rank] = []
-            operations[rank].append((time, id_op.strip()))
+            operations[rank].append((times, id_op.strip()))
 
-    # Function to plot the operations
+    colors = {
+        str(Operations.RECV_FORWARD): "gold",
+        str(Operations.FORWARD): "springgreen",
+        str(Operations.SEND_FORWARD): "orange",
+        str(Operations.RECV_BACKWARD): "plum",
+        str(Operations.BACKWARD): "red",
+        str(Operations.SEND_BACKWARD): "fuchsia",
+    }
+
+
     fig, ax = plt.subplots()
     for rank, ops in operations.items():
-        times = [op[0] for op in ops]  # Extract times
-        ids = [int(rank)] * len(ops)  # Use device rank as y-value
-            
-        ax.scatter(times, ids, label=f'Device {rank}', s=100)  # s is the marker size
+        # Sort operations by start time to ensure correct sequential plotting
+        ops.sort(key=lambda x: x[0])
         
+        for i, (start_time, id_op) in enumerate(ops):
+            if i + 1 < len(ops):
+                duration = ops[i + 1][0] - start_time
+            else:
+                duration = 0.1  # Default duration for the last operation
+
+            # Plot each operation as a horizontal bar
+            bar = ax.barh(y=int(rank), width=duration, left=start_time, height=0.8, color=colors[id_op.split(',')[1]], edgecolor='black')
+            
+            # Annotate the bar with the operation ID
+            # Adjust the position to be inside the bar, slightly to the right and vertically centered
+            text_x = start_time + 0.2 * duration  # Adjust this value as needed
+            text_y = int(rank)
+            # print(f'{duration}, {(ops[-1][0] - ops[0][0]) / 10}')
+            if duration > (ops[-1][0] - ops[0][0]) / 10:
+                ax.text(text_x, text_y, id_op, va='center', ha='left', fontsize=16, color='black')
+
     ax.set_xlabel('Time')
     ax.set_ylabel('Device Rank')
-    ax.legend()
     plt.show()
+
+if __name__ == "__main__":
+    import sys
+    path = sys.argv[1]
+
+    visualize(path)
+
