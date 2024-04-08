@@ -31,10 +31,7 @@ class StageScheduler():
     def train_step(self, batch, target, loss_fn, split_size = 1):
         '''
         Perform forward + backward pass on a batch of data
-        '''
-        for b in self.blocks:
-            b.model.zero_grad()
-        
+        '''        
         splits = iter(batch.split(split_size, dim=0))
 
         result = []

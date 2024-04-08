@@ -12,12 +12,12 @@ if __name__ == "__main__":
         
     inputs = inputs.cuda()
     
-    pipelined = PipelineGPT(model, devices = placement, vocab_size = vocab_size, input_shape = inputs.shape)
+    sequential = PipelineGPT(model, devices = placement, vocab_size = vocab_size, input_shape = inputs.shape)
 
-    sizes = [1, 2, 4, 8, 16, 32]
+    nmb = [1, 2, 4, 8, 16, 32, 64]
     times = []
-    for block_size in sizes:
-        pipelined = Pipe(pipelined, chunks = vocab_size // block_size)
+    for n_micro_batches in nmb:
+        pipelined = Pipe(sequential, chunks = n_micro_batches)
     
         # Warmup
         for _ in range(5):
@@ -31,8 +31,5 @@ if __name__ == "__main__":
             loss.backward()
         end = time.time()
         t = (end - start) / iters
-        print(f'Time taken by torch pipe (block size = {block_size}) : {end - start:.2f}s. Average : {t:.3f}s')
+        print(f'Time taken by torch pipe : {end - start:.2f}s. Average : {t:.3f}s ({batch_size // n_micro_batches},{t})')
         times.append(t)
-        with open(f'torch_GPTXXXL_{dataset_size}.txt', 'w') as file:
-            for size, t in zip(sizes, times):
-                file.write(f'{size}, {t}\n')

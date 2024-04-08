@@ -34,30 +34,28 @@ if __name__ == "__main__":
     inputs = inputs.cuda()
 
     sequence = partition_model(model, placement = placement)
-    blocks = create_pipeline([sequence], placement)
+    blocks = create_pipeline(sequence, placement)
 
-    sizes = [1, 2, 4, 8, 16, 32]
+    nmb = [1, 2, 4, 8, 16, 32, 64]
     times = []
-    for block_size in sizes:
-        schedule = generate_1f1b_schedule(placement, dataset_size // block_size)
+    for n_micro_batches in nmb:
+        if global_rank == 0: logger.info(f'Beginning bench for {n_micro_batches} micro batches (split size = {batch_size // n_micro_batches})')
+        schedule = generate_afab_schedule(placement, n_micro_batches)
         stage = StageScheduler(schedule, blocks)
 
         # Warmup
-        for _ in range(5):
-            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), block_size)
+        for i in range(5):
+            if global_rank == 0: logger.info(f'Warmup {i}')
+            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), batch_size // n_micro_batches)
         start = time.time()
-        for _ in range(iters):
-            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), block_size)
+        for i in range(iters):
+            if global_rank == 0: logger.info(f'Iter {i}')
+            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), batch_size // n_micro_batches)
         end = time.time()
         t = (end - start) / iters
-        print(f'Time taken by custom pipe (block size = {block_size}) : {end - start:.2f}s. Average : {t:.3f}s')
+        if global_rank == 0: print(f'Time taken by custom pipe ({n_micro_batches} micro batches) : {end - start:.2f}s. Average : {t:.3f}s ({batch_size // n_micro_batches},{t})')
         times.append(t)
-
-        if global_rank == 0:
-            with open(f'custom_GPTXXXL_{dataset_size}.txt', 'w') as file:
-                for size, t in zip(sizes, times):
-                    file.write(f'{size}, {t}\n')
-    
+        
     dist.barrier()
     if dist.is_initialized():
         dist.destroy_process_group()

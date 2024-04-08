@@ -262,9 +262,11 @@ def partition_model(model, placement):
             for layer in phase:
                 layer.to_empty(device=torch.device(placement[i]))
     else:
-        for layer in phases[rank]:
-            layer.to_empty(device=torch.device(placement[rank]))
+        for i in range(len(placement)):
+            if rank == placement[i]:
+                for layer in phases[i]:
+                    layer.to_empty(device=torch.device(rank))
 
     # create nn.Sequential
     if rank is None: return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
-    else: return nn.Sequential(*phases[rank])
+    else: return [nn.Sequential(*phases[i]) for i in range(len(placement)) if placement[i] == rank]
