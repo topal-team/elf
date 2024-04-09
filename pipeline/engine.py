@@ -1,6 +1,6 @@
 from enum import Enum
 import torch.distributed as dist
-from pipeline import compute_loss
+from .pipeline import compute_loss
 import time
 import os
 import matplotlib.pyplot as plt
@@ -27,7 +27,7 @@ class StageScheduler():
     def __init__(self, schedule, blocks):
         self.schedule = schedule
         self.blocks = blocks
-        self.rank = self.blocks[0].rank.item() if blocks else None
+        self.rank = int(self.blocks[0].rank) if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
@@ -36,7 +36,6 @@ class StageScheduler():
         Perform forward + backward pass on a batch of data
         '''        
         splits = iter(batch.split(split_size, dim=0))
-        
 
         result = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order

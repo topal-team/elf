@@ -23,13 +23,15 @@ if __name__ == "__main__":
             logging.getLogger().setLevel(logging.INFO)
         case 'none':
             logging.getLogger().setLevel(100)
-    
+            
     world_size = int(os.environ["WORLD_SIZE"])
     rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
     
     torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl")
+
+    if global_rank == 0: f = open("mypipe.out", "w")
 
     inputs = inputs.cuda()
 
@@ -53,11 +55,12 @@ if __name__ == "__main__":
             _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), batch_size // n_micro_batches)
         end = time.time()
         t = (end - start) / iters
-        if global_rank == 0: print(f'Time taken by custom pipe ({n_micro_batches} micro batches) : {end - start:.2f}s. Average : {t:.3f}s ({batch_size // n_micro_batches},{t})')
+        if global_rank == 0:
+            print(f'Time taken by custom pipe ({n_micro_batches} micro batches) : {end - start:.2f}s. Average : {t:.3f}s')
+            f.write(f'{batch_size // n_micro_batches},{t}')
         times.append(t)
-        
+
+    if global_rank == 0: f.close()
     dist.barrier()
     if dist.is_initialized():
         dist.destroy_process_group()
-
-

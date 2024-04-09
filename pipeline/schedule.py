@@ -1,5 +1,6 @@
-from engine import Operations
+from .engine import Operations
 
+import math
 import logging
 logger = logging.getLogger("schedule")
 
@@ -32,38 +33,31 @@ def generate_afab_schedule(placement, n_micro_batches):
 def generate_1f1b_schedule(placement, n_micro_batches):
     '''
     One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
-    Does not support interleaving for now !
     '''
     schedule = []
     n_stages = len(placement)
+    n_devices = int(max(placement)) + 1
+    stages_per_device = len(placement) // n_devices
     
-    # Warmup phase
-    for b in range(n_stages):
-        # End of warmup phase is either first backward or end of batch
-        warmup_fwd = min(n_micro_batches - 1, 2 * (n_stages - b - 1))
-        for i in range(warmup_fwd):
-            schedule.append((b, Operations.RECV_FORWARD))
-            schedule.append((b, Operations.FORWARD))
-            schedule.append((b, Operations.SEND_FORWARD))
+    for d in range(n_devices):
+        # we assume blocks are placed sequentially among every device, e.g. [0, 1, 2, 0, 1, 2]
+        # and there are at least as many micro batches as there are devices
+        offset = d * (stages_per_device * n_micro_batches * 2 * 3)
 
-    # Steady phase
-    for b in range(n_stages):
-        remaining_fwd = n_micro_batches - min(n_micro_batches - 1, 2 * (n_stages - b - 1))
-        for i in range(remaining_fwd):
-            schedule.append((b, Operations.RECV_FORWARD))
-            schedule.append((b, Operations.FORWARD))
-            schedule.append((b, Operations.SEND_FORWARD))
-            schedule.append((b, Operations.RECV_BACKWARD))
-            schedule.append((b, Operations.BACKWARD))
-            schedule.append((b, Operations.SEND_BACKWARD))
+        for i in range(n_micro_batches * stages_per_device):
+            b = ((i // min(n_micro_batches, n_devices)) % stages_per_device)
+            schedule.append((b * n_devices + d, Operations.RECV_FORWARD))
+            schedule.append((b * n_devices + d, Operations.FORWARD))
+            schedule.append((b * n_devices + d, Operations.SEND_FORWARD))
 
-    # Cooldown phase
-    for b in reversed(range(n_stages)):
-        remaining_bwd = min(n_micro_batches - 1, 2 * (n_stages - b - 1))
-        for i in range(remaining_bwd):
-            schedule.append((b, Operations.RECV_BACKWARD))
-            schedule.append((b, Operations.BACKWARD))
-            schedule.append((b, Operations.SEND_BACKWARD))
+        magic = n_stages + (n_devices - d - 1) - d
+        magic = min(magic, n_micro_batches * stages_per_device)
+        for i in range(n_micro_batches * stages_per_device):
+            b = stages_per_device - ((i // min(n_micro_batches, math.ceil(n_devices / 2))) % stages_per_device) - 1
+            schedule.insert(offset + (magic * 3), (b * n_devices + d, Operations.RECV_BACKWARD))
+            schedule.insert(offset + (magic * 3) + 1, (b * n_devices + d, Operations.BACKWARD))
+            schedule.insert(offset + (magic * 3) + 2, (b * n_devices + d, Operations.SEND_BACKWARD))
+            magic += 4
 
     assert len(schedule) == n_micro_batches * n_stages * 2 * 3
 

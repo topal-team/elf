@@ -14,6 +14,8 @@ if __name__ == "__main__":
     
     sequential = PipelineGPT(model, devices = placement, vocab_size = vocab_size, input_shape = inputs.shape)
 
+    f = open("torchpipe.out", "w")
+
     nmb = [1, 2, 4, 8, 16, 32, 64]
     times = []
     for n_micro_batches in nmb:
@@ -31,5 +33,6 @@ if __name__ == "__main__":
             loss.backward()
         end = time.time()
         t = (end - start) / iters
-        print(f'Time taken by torch pipe : {end - start:.2f}s. Average : {t:.3f}s ({batch_size // n_micro_batches},{t})')
+        print(f'Time taken by torch pipe : {end - start:.2f}s. Average : {t:.3f}s')
+        f.write(f'{batch_size // n_micro_batches},{t}')
         times.append(t)
