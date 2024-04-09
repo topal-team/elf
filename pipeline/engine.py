@@ -38,6 +38,7 @@ class Engine():
         result = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
+        curr = 0
         f = open(viz_file + str(self.rank), 'w') if viz_file is not None else None
         
         for (id_, op) in schedule:
@@ -61,14 +62,10 @@ class Engine():
                         block.recv_forward()
                     case Operations.RECV_BACKWARD:
                         if block.next is None:
-                            if isinstance(split_size, int): # equal split size
-                                curr = i * split_size
-                                nexti = (i + 1) * split_size
-                            else: # different sizes
-                                curr = sum(split_size[:i])
-                                nexti = curr + split_size[i]
+                            nexti = curr + split_size[i]
                             compute_loss(block, result[i], target[curr:nexti], loss_fn)
                             i += 1
+                            curr = nexti
                         block.recv_backward()
                     case _:
                         raise Exception(f'Unknown operation : {op}')
