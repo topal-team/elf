@@ -2,6 +2,7 @@ from enum import Enum
 import torch.distributed as dist
 import time
 import os
+import matplotlib
 import matplotlib.pyplot as plt
 
 import logging
@@ -39,13 +40,14 @@ class Engine():
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
         curr = 0
-        f = open(viz_file + str(self.rank), 'w') if viz_file is not None else None
+        if viz_file is not None:
+            stats = []
         
         for (id_, op) in schedule:
             if str(id_) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing {op} on block {block}')
-                if f is not None: f.write(f'{self.rank}:{time.time()}:{id_},{op}\n')
+                if viz_file is not None: stats.append((time.time(), id_, op))
                 match op:
                     case Operations.FORWARD:
                         y = block.forward()
@@ -71,13 +73,17 @@ class Engine():
                         raise Exception(f'Unknown operation : {op}')
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
+        if viz_file is not None: stats.append((time.time(), self.rank, ".END"))
         dist.barrier()
-        if f is not None:
-            f.close()
-            if self.rank == 0:
-                with open(viz_file, 'w') as outfile: [outfile.write(open(f, 'r').read()) for f in [viz_file + str(r) for r in range(int(os.environ["WORLD_SIZE"]))]]
-            dist.barrier()    
-            os.remove(viz_file + str(self.rank))
+        if viz_file is not None:
+            for r in range(int(os.environ["WORLD_SIZE"])):
+                # Each process writes in turn
+                if r == self.rank:
+                    with open(viz_file, 'a') as outfile:
+                        for t, id_, op in stats:
+                            outfile.write(f'{self.rank}:{t}:{id_},{op}\n')
+
+                dist.barrier()
         return result
 
 
@@ -113,32 +119,44 @@ def visualize(path):
         str(Operations.RECV_BACKWARD): "plum",
         str(Operations.BACKWARD): "red",
         str(Operations.SEND_BACKWARD): "fuchsia",
+        ".END": "black"
     }
 
     fig, ax = plt.subplots()
+    first_start = 0
     for rank, ops in operations.items():
         # Sort operations by start time to ensure correct sequential plotting
         ops.sort(key=lambda x: x[0])
+        if ops[0][0] < first_start or first_start == 0:
+            first_start = ops[0][0]
+
+    for rank, ops in operations.items():
+        # Sort operations by start time to ensure correct sequential plotting
+        if ops[0][0] < first_start or first_start == 0:
+            first_start = ops[0][0]
         
         for i, (start_time, id_op) in enumerate(ops):
             if i + 1 < len(ops):
                 duration = ops[i + 1][0] - start_time
             else:
-                duration = 0.1  # Default duration for the last operation
+                duration = 0
 
-            # Plot each operation as a horizontal bar
-            bar = ax.barh(y=int(rank), width=duration, left=start_time, height=0.8, color=colors[id_op.split(',')[1]], edgecolor='black')
+            # Plot each operation as a horizontal bar, *1000 for ms instead of s 
+            ax.barh(y=int(rank), width=duration * 1000, left=(start_time - first_start) * 1000, height=0.8, color=colors[id_op.split(',')[1]], edgecolor='black')
             
             # Annotate the bar with the operation ID
             # Adjust the position to be inside the bar, slightly to the right and vertically centered
-            text_x = start_time + 0.2 * duration  # Adjust this value as needed
-            text_y = int(rank)
-            # print(f'{duration}, {(ops[-1][0] - ops[0][0]) / 10}')
-            if duration > (ops[-1][0] - ops[0][0]) / 10:
-                ax.text(text_x, text_y, id_op, va='center', ha='left', fontsize=16, color='black')
+            # text_x = start_time + 0.15 * duration  # Adjust this value as needed
+            # text_y = int(rank)
+            # if duration > (ops[-1][0] - ops[0][0]) / 12:
+            #     ax.text(text_x, text_y, id_op, va='center', ha='left', fontsize=12, color='black')
 
-    ax.set_xlabel('Time')
+
+    legend_handles = [matplotlib.patches.Patch(facecolor=color, edgecolor='black', label=label.split('.')[1].lower()) for label, color in colors.items() if label != ".END"]
+    ax.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1, 1))
+    ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Device Rank')
+    ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True)) # show only integers
     plt.show()
 
 if __name__ == "__main__":
