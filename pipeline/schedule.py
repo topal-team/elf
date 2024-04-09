@@ -59,16 +59,16 @@ def generate_1f1b_schedule(placement, n_micro_batches):
             schedule.insert(offset + (magic * 3) + 2, (b * n_devices + d, Operations.SEND_BACKWARD))
             magic += 4
 
-    assert len(schedule) == n_micro_batches * n_stages * 2 * 3
+    assert len(schedule) == n_micro_batches * n_stages * 2 * 1
 
     return schedule
 
 if __name__ == "__main__":
     import torch
-    placement = torch.tensor([0, 1, 2, 3])
-    schedule = generate_1f1b_schedule(placement, 8)
+    placement = torch.tensor([0, 1, 0, 1])
+    schedule = generate_1f1b_schedule(placement, 1)
     for rank in range(placement.max().item() + 1):
-        actions = [(id_, op) for id_, op in schedule if id_ == rank]
-        print(f'Rank {rank} - {actions}')
+        actions = [(id_, op) for id_, op in schedule if placement[id_] == rank]
+        print(f'Rank {rank} - {actions}\n')
 
     print(schedule)

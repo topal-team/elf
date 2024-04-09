@@ -1,8 +1,10 @@
+from typing import Any
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from .schedule import generate_afab_schedule, generate_1f1b_schedule
+from .engine import Engine
 from collections import deque
-from enum import Enum
 import logging
 logger = logging.getLogger("pipeline")
 
@@ -200,6 +202,33 @@ class PipelineBlock():
 
         self.grads.append((work, buffer))
 
+class Pipeline():
+    def __init__(self, model, placement, partition="auto", schedule="afab"):
+        if partition == "auto":
+            model = partition_model(model, placement)
+        match schedule:
+            case 'afab':
+                self.scheduler = generate_afab_schedule
+            case '1f1b':
+                self.scheduler = generate_1f1b_schedule
+            case _:
+                raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b"].')
+        
+        self.blocks = create_pipeline(model, placement)
+        self.placement = placement
+        self.__call__ = self.forward
+
+    def forward(self, batch, target, loss_fn, split_size = 1, viz_file = None):
+        if isinstance(split_size, int):
+            n_micro_batches = batch.size(0) // split_size
+        else:
+            n_micro_batches = len(split_size)
+        schedule = self.scheduler(self.placement, n_micro_batches)
+
+        engine = Engine(schedule, self.blocks)
+        result = engine.train_step(batch, target, loss_fn, split_size, viz_file)
+        if result: return torch.cat(result, dim=0)
+        
 def create_pipeline(layers, placement):
     '''
     Transforms a list of layers placed on different devices to a working pipeline
@@ -209,16 +238,6 @@ def create_pipeline(layers, placement):
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
     return blocks
-
-def compute_loss(block, output, target, loss_fn):
-    '''
-    Computes the loss and correctly prepares the gradients for the pipelined backward pass
-    '''
-    output = output.detach()
-    output.requires_grad = True
-    loss = loss_fn(output, target, reduction="sum")
-    loss.backward()
-    block.grads.append((None, output.grad.data))
 
 def partition_model(model, placement):
     '''

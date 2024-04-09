@@ -1,6 +1,5 @@
 from enum import Enum
 import torch.distributed as dist
-from .pipeline import compute_loss
 import time
 import os
 import matplotlib.pyplot as plt
@@ -19,7 +18,7 @@ class Operations(Enum):
     def __repr__(self) -> str:
         return self.name
 
-class StageScheduler():
+class Engine():
     '''
     Schedule is a list of tuples (block id, operation)
     It is supposed to be feasible and correct
@@ -86,6 +85,17 @@ class StageScheduler():
             os.remove(viz_file + str(self.rank))
         return result
 
+
+def compute_loss(block, output, target, loss_fn):
+    '''
+    Computes the loss and correctly prepares the gradients for the pipelined backward pass
+    '''
+    output = output.detach()
+    output.requires_grad = True
+    loss = loss_fn(output, target, reduction="sum")
+    loss.backward()
+    block.grads.append((None, output.grad.data))
+
 def visualize(path):
     operations = {}  # Dictionary to store operations by device
     with open(path, 'r') as file:
@@ -105,7 +115,6 @@ def visualize(path):
         str(Operations.BACKWARD): "red",
         str(Operations.SEND_BACKWARD): "fuchsia",
     }
-
 
     fig, ax = plt.subplots()
     for rank, ops in operations.items():
