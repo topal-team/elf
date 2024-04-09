@@ -36,6 +36,7 @@ class StageScheduler():
         Perform forward + backward pass on a batch of data
         '''        
         splits = iter(batch.split(split_size, dim=0))
+        
 
         result = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
@@ -63,12 +64,17 @@ class StageScheduler():
                         block.recv_forward()
                     case Operations.RECV_BACKWARD:
                         if block.next is None:
-                            compute_loss(block, result[i], target[i*split_size:(i + 1) * split_size], loss_fn)
+                            if isinstance(split_size, int): # equal split size
+                                curr = i * split_size
+                                nexti = (i + 1) * split_size
+                            else: # different sizes
+                                curr = sum(split_size[:i])
+                                nexti = curr + split_size[i]
+                            compute_loss(block, result[i], target[curr:nexti], loss_fn)
                             i += 1
                         block.recv_backward()
                     case _:
                         raise Exception(f'Unknown operation : {op}')
-
 
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')

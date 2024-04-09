@@ -19,7 +19,7 @@ def test_pipeline(blocks, placement, scheduler):
     '''
 
     split_size = 1
-    batch = torch.randn((len(placement), 3)).cuda()
+    batch = torch.randn(len(placement) if isinstance(split_size, int) else sum(split_size), 3).cuda()
 
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
@@ -30,11 +30,11 @@ def test_pipeline(blocks, placement, scheduler):
         
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
-    schedule = scheduler(placement, batch.size(0) // split_size)
+    schedule = scheduler(placement, batch.size(0) // split_size if isinstance(split_size, int) else len(split_size))
     if global_rank == 0: logger.debug(schedule)
     stage = StageScheduler(schedule, blocks)
 
-    result = stage.train_step(batch, target, F.mse_loss, split_size, "afab.viz")
+    result = stage.train_step(batch, target, F.mse_loss, split_size)
     grads = None
     if global_rank == placement[0]:
         grads = list(blocks[0].grads_to_send)
