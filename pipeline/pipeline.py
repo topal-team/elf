@@ -1,4 +1,4 @@
-from typing import Any
+import os
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -203,10 +203,22 @@ class PipelineBlock():
         self.grads.append((work, buffer))
 
 class Pipeline():
-    def __init__(self, model, placement, partition="auto", schedule="afab"):
+    '''
+    Model wrapper for pipelining
+    Maybe it can inherit from nn.Module ?
+    '''
+    def __init__(self, model, placement = "auto", partition = "auto", schedule = "afab"):
+        '''
+        model: torch module
+        placement: ranks on which each model block should be placed
+        partition: if your model is already partitioned, set to None. Otherwise leave the default, which will try to create balanced blocks according to their number of parameters
+        schedule: pipeline algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b")
+        '''
+        if placement == "auto":
+            placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
             model = partition_model(model, placement)
-        match schedule:
+        match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
             case '1f1b':
@@ -216,19 +228,31 @@ class Pipeline():
         
         self.blocks = create_pipeline(model, placement)
         self.placement = placement
-        self.__call__ = self.forward
+        self.engine = Engine(self.blocks)
+        self.schedule = []
 
-    def forward(self, batch, target, loss_fn, split_size = 1, viz_file = None):
+    def __call__(self, batch, target, loss_fn, split_size = 1, viz_file = None):
+        '''
+        Execute the schedule on a batch of data
+        split_size: either int for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or list of micro batch sizes
+        viz_file: path to a file to write informations about the execution. Set to None (default) to disable
+        '''
         if isinstance(split_size, int):
             n_micro_batches = batch.size(0) // split_size
+            s = [split_size for _ in range(n_micro_batches)]
+            if batch.size(0) % split_size != 0:
+                s.append(batch.size(0) % split_size)
+            split_size = s
         else:
+            assert sum(split_size) == batch.size(0), f'Splits do not cover the entire batch'
             n_micro_batches = len(split_size)
-        schedule = self.scheduler(self.placement, n_micro_batches)
+            
+        if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
+            self.schedule = self.scheduler(self.placement, n_micro_batches)
 
-        engine = Engine(schedule, self.blocks)
-        result = engine.train_step(batch, target, loss_fn, split_size, viz_file)
+        result = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
         if result: return torch.cat(result, dim=0)
-        
+
 def create_pipeline(layers, placement):
     '''
     Transforms a list of layers placed on different devices to a working pipeline

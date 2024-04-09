@@ -23,14 +23,13 @@ class Engine():
     Schedule is a list of tuples (block id, operation)
     It is supposed to be feasible and correct
     '''
-    def __init__(self, schedule, blocks):
-        self.schedule = schedule
+    def __init__(self, blocks):
         self.blocks = blocks
         self.rank = int(self.blocks[0].rank) if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
-    def train_step(self, batch, target, loss_fn, split_size = 1, viz_file = None):
+    def train_step(self, batch, target, loss_fn, schedule, split_size = 1, viz_file = None):
         '''
         Perform forward + backward pass on a batch of data
         '''        
@@ -41,7 +40,7 @@ class Engine():
         # Add a micro_batch_id to the schedule nodes ?
         f = open(viz_file + str(self.rank), 'w') if viz_file is not None else None
         
-        for (id_, op) in self.schedule:
+        for (id_, op) in schedule:
             if str(id_) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing {op} on block {block}')
@@ -73,7 +72,6 @@ class Engine():
                         block.recv_backward()
                     case _:
                         raise Exception(f'Unknown operation : {op}')
-
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         dist.barrier()
@@ -97,6 +95,10 @@ def compute_loss(block, output, target, loss_fn):
     block.grads.append((None, output.grad.data))
 
 def visualize(path):
+    '''
+    Display the execution time of each operation executed by the engine
+    path: path to a file that should be created by a Pipeline/Engine call
+    '''
     operations = {}  # Dictionary to store operations by device
     with open(path, 'r') as file:
         for line in file:

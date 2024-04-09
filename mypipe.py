@@ -2,9 +2,7 @@ import torch
 import torch.distributed as dist
 import os
 import time
-from pipeline.pipeline import create_pipeline, partition_model
-from pipeline.schedule import generate_afab_schedule, generate_1f1b_schedule
-from pipeline.engine import StageScheduler
+from pipeline.pipeline import Pipeline
 from argparse import ArgumentParser
 from settings import *
 
@@ -35,29 +33,26 @@ if __name__ == "__main__":
 
     inputs = inputs.cuda()
 
-    sequence = partition_model(model, placement = placement)
-    blocks = create_pipeline(sequence, placement)
-
-    nmb = [1, 2, 4, 8, 16, 32, 64]
+    split_sizes = [1, 2, 4, 8, 16, 32, 64]
     times = []
-    for n_micro_batches in nmb:
-        if global_rank == 0: logger.info(f'Beginning bench for {n_micro_batches} micro batches (split size = {batch_size // n_micro_batches})')
-        schedule = generate_afab_schedule(placement, n_micro_batches)
-        stage = StageScheduler(schedule, blocks)
+    for size in split_sizes:
+        if global_rank == 0: logger.info(f'Beginning bench for micro batches of size {size}')
+
+        pipe = Pipeline(model, placement, partition = None, schedule = "afab")
 
         # Warmup
         for i in range(5):
             if global_rank == 0: logger.info(f'Warmup {i}')
-            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), batch_size // n_micro_batches)
+            _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
         start = time.time()
         for i in range(iters):
             if global_rank == 0: logger.info(f'Iter {i}')
-            _ = stage.train_step(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), batch_size // n_micro_batches)
+            _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
         end = time.time()
         t = (end - start) / iters
         if global_rank == 0:
-            print(f'Time taken by custom pipe ({n_micro_batches} micro batches) : {end - start:.2f}s. Average : {t:.3f}s')
-            f.write(f'{batch_size // n_micro_batches},{t}')
+            print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Average : {t:.3f}s')
+            f.write(f'{size},{t}')
         times.append(t)
 
     if global_rank == 0: f.close()
