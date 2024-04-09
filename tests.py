@@ -29,12 +29,13 @@ def test_pipeline(blocks, placement, scheduler):
     target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
 
     pipe = Pipeline(blocks, placement, partition = None, schedule = scheduler)
-    result = pipe(batch, target, F.mse_loss, split_size)
+    output = pipe(batch, target, F.mse_loss, split_size)
+    blocks = pipe.blocks # we shouldn't access directly the internal modules but it's for the purpose of testing
     grads = None
     if global_rank == placement[0]:
         grads = list(blocks[0].grads_to_send)
         blocks[0].grads_to_send.clear()
-    logger.debug(f'[Rank {global_rank}] : result = {result}, grads = {grads}')
+    logger.debug(f'[Rank {global_rank}] : result = {output}, grads = {grads}')
     
     for b in blocks:
         assert len(b.activations) == 0, f'{b} - There should be no activation left, {len(b.activations)} still in queue'
@@ -47,7 +48,6 @@ def test_pipeline(blocks, placement, scheduler):
     # Last device has the result, we reconstruct the full model on this one for simplicity
     if global_rank == placement[-1]:
         block = blocks[-1]
-        output = torch.cat(result, dim=0)
         batch.requires_grad = True
         full_model = load_full_model(len(placement)).cuda()
         groundtruth = full_model(batch)
