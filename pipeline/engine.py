@@ -43,17 +43,17 @@ class Engine():
         if viz_file is not None:
             stats = []
         
-        for (id_, op) in schedule:
+        for (id_, op, *options) in schedule:
             if str(id_) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing {op} on block {block}')
                 if viz_file is not None: stats.append((time.time(), id_, op))
                 match op:
                     case Operations.FORWARD:
-                        y = block.forward()
+                        y = block.forward(options)
                         if y is not None: result.append(y)
                     case Operations.BACKWARD:
-                        block.backward()
+                        block.backward(options)
                     case Operations.SEND_FORWARD:
                         block.send_forward()
                     case Operations.SEND_BACKWARD:

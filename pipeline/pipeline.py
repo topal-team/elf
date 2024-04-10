@@ -90,7 +90,7 @@ class PipelineBlock():
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
 
-    def forward(self):
+    def forward(self, options):
         '''
         Perform the forward pass for one tensor of activations and register it as computed
         '''
@@ -107,14 +107,14 @@ class PipelineBlock():
             
         logger.debug(f'{self} - Work received. Starting actual computation.')
         y = self.model(x)
-        self.activations.append(y)
+        if options and 'remat' in options.keys(): self.activations.append(y)
         self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
 
         if self.next is None:
             return self.act_to_send.popleft()
         
-    def backward(self):
+    def backward(self, options):
         '''
         Perform the backward pass for one tensor of gradients and register it as computed
         Backward assumes activations AND grads to be on top of the queue
@@ -122,12 +122,15 @@ class PipelineBlock():
         if len(self.grads) == 0: return
         logger.debug(f'{self} - Computing one backward')
 
-        act = self.activations.popleft()
+        x = self.inputs_to_keep.popleft()
+        if options and 'remat' in options:
+            act = self.model(x)
+        else:
+            act = self.activations.popleft()
         work, grads = self.grads.popleft()
         
         if work is not None: work.wait() # if properly managed, work should alredy be completed
         
-        x = self.inputs_to_keep.popleft()
         (act * grads).sum().backward() # Optimal ? Maybe setting the gradients directly is faster
 
         if x.requires_grad:

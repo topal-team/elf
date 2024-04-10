@@ -68,7 +68,7 @@ if __name__ == "__main__":
     placement = torch.tensor([0, 1, 0, 1])
     schedule = generate_1f1b_schedule(placement, 1)
     for rank in range(placement.max().item() + 1):
-        actions = [(id_, op) for id_, op in schedule if placement[id_] == rank]
+        actions = [(id_, op, options) for id_, op, *options in schedule if placement[id_] == rank]
         print(f'Rank {rank} - {actions}\n')
 
     print(schedule)
