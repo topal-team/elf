@@ -33,6 +33,6 @@ if __name__ == "__main__":
             loss.backward()
         end = time.time()
         t = (end - start) / iters
-        f.write(f'{size},{t}')
+        f.write(f'{size},{t}\n')
         print(f'Time taken by torch pipe (size {size}) : {end - start:.2f}s. Average : {t:.3f}s')
         times.append(t)

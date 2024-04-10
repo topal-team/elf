@@ -38,7 +38,7 @@ if __name__ == "__main__":
     for size in split_sizes:
         if global_rank == 0: logger.info(f'Beginning bench for micro batches of size {size}')
 
-        pipe = Pipeline(model, placement, partition = None, schedule = "afab")
+        pipe = Pipeline(model, placement, schedule = "1f1b")
 
         # Warmup
         for i in range(5):
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         t = (end - start) / iters
         if global_rank == 0:
             print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Average : {t:.3f}s')
-            f.write(f'{size},{t}')
+            f.write(f'{size},{t}\n')
         times.append(t)
 
     if global_rank == 0: f.close()

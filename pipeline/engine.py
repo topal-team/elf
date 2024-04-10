@@ -79,6 +79,7 @@ class Engine():
             for r in range(int(os.environ["WORLD_SIZE"])):
                 # Each process writes in turn
                 if r == self.rank:
+                    open(viz_file, 'w').close() # erase content
                     with open(viz_file, 'a') as outfile:
                         for t, id_, op in stats:
                             outfile.write(f'{self.rank}:{t}:{id_},{op}\n')

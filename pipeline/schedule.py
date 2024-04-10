@@ -59,7 +59,7 @@ def generate_1f1b_schedule(placement, n_micro_batches):
             schedule.insert(offset + (magic * 3) + 2, (b * n_devices + d, Operations.SEND_BACKWARD))
             magic += 4
 
-    assert len(schedule) == n_micro_batches * n_stages * 2 * 1
+    assert len(schedule) == n_micro_batches * n_stages * 2 * 3
 
     return schedule
 
