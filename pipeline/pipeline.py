@@ -33,7 +33,7 @@ class TensorMetadata():
         '''
         dtype = dtypes[int(t[0].item())]
         shape = []
-        assert len(t.shape) == 1, "Metadata should only have one dimension"
+       assert len(t.shape) == 1, "Metadata should only have one dimension"
         for s in t[1:]:
             s = int(s.item())
             if s == 0: break
@@ -112,12 +112,16 @@ class PipelineBlock():
             self.activations.append(y)
         else:
             with torch.no_grad(): y = self.model(x)
+        y = self.model(x)
+        if options and 'remat' in options.keys(): self.activations.append(y)
+        
         self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
 
         if self.next is None:
             return self.act_to_send.popleft()
         
+
     def backward(self, options = {}):
         '''
         Perform the backward pass for one tensor of gradients and register it as computed
