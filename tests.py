@@ -1,14 +1,38 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import os
 from pipeline.pipeline import Pipeline
-from pipeline.test_model import load_full_model, load_parts_model
 from argparse import ArgumentParser
 
 import logging
 logger = logging.getLogger(f'main')
 logging.basicConfig(level = logging.DEBUG)
+
+def create_model():
+    all_layers = [nn.Linear(3, 3, bias=False) for i in range(10)]
+
+    model = nn.Sequential(*all_layers)
+    torch.save(model, "test-model.pt")
+
+def load_full_model(size, path="test-model.pt"):
+    '''
+    Loads the sequential model stored in `path`, and returns the `size` first layers.
+    '''
+    model = torch.load(path)
+    new_model = nn.Sequential(*list(model.children())[:size])
+    return nn.Sequential(new_model)
+
+def load_parts_model(placement, global_rank, path="test-model.pt"):
+    '''
+    Loads the sequential model stored in `path`, and returns the layers corresponding to `global_rank` in the model placement.
+    '''
+    indices = [idx for idx, p in enumerate(placement) if global_rank == p]
+    model = torch.load(path)
+    children = list(model.children())
+    blocks = [children[idx] for idx in indices]
+    return blocks
 
 def test_pipeline(blocks, placement, scheduler):
     '''
