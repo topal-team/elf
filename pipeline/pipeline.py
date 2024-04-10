@@ -111,17 +111,14 @@ class PipelineBlock():
             y = self.model(x)
             self.activations.append(y)
         else:
-            with torch.no_grad(): y = self.model(x)
-        y = self.model(x)
-        if options and 'remat' in options.keys(): self.activations.append(y)
-        
+            with torch.no_grad(): y = self.model(x)        
+
         self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
 
         if self.next is None:
             return self.act_to_send.popleft()
         
-
     def backward(self, options = {}):
         '''
         Perform the backward pass for one tensor of gradients and register it as computed
