@@ -59,7 +59,7 @@ class TensorMetadata():
     
     def get_buffer(self):
         '''
-        Allocates a tensor with the right shape for this metadata
+        Allocates a tensor with the right shape and dtype for this metadata
         '''
         buffer = torch.empty(self.shape, dtype=self.dtype).cuda()
         return buffer
@@ -75,7 +75,7 @@ class PipelineBlock():
         self.rank = placement[id_] # global rank
         self.id = id_ # rank in the model.
 
-        # Queues of tensor to process
+        # Queues of tensors to process
         self.inputs = deque() # Waiting for forward
         self.activations = deque() # Kept for backward
         self.grads = deque() # Waiting for backward
@@ -84,7 +84,6 @@ class PipelineBlock():
         self.inputs_to_keep = deque() # Kept for backward
 
         # Ranks where the previous/next blocks in the model are placed
-        # OR reference to the next block if they are on the same device
         self.previous = None if self.id == 0 else placement[self.id - 1]
         self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
 
@@ -267,7 +266,6 @@ def partition_model(model, placement):
     '''
     Divide a model into roughly equal blocks, in terms of number of parameters
     Each block that is placed on this rank is moved to the corresponding GPU
-    Currently does not support interleaving / multiple blocks per device
     '''
     rank = dist.get_rank() if dist.is_initialized() else None
     
