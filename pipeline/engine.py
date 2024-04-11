@@ -50,10 +50,10 @@ class Engine():
                 if viz_file is not None: stats.append((time.time(), id_, op))
                 match op:
                     case Operations.FORWARD:
-                        y = block.forward(options)
+                        y = block.forward(*options)
                         if y is not None: result.append(y)
                     case Operations.BACKWARD:
-                        block.backward(options)
+                        block.backward(*options)
                     case Operations.SEND_FORWARD:
                         block.send_forward()
                     case Operations.SEND_BACKWARD:
@@ -79,7 +79,7 @@ class Engine():
             for r in range(int(os.environ["WORLD_SIZE"])):
                 # Each process writes in turn
                 if r == self.rank:
-                    open(viz_file, 'w').close() # erase content
+                    if r == 0: open(viz_file, "w").close() # erase content
                     with open(viz_file, 'a') as outfile:
                         for t, id_, op in stats:
                             outfile.write(f'{self.rank}:{t}:{id_},{op}\n')

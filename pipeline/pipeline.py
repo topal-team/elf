@@ -90,7 +90,7 @@ class PipelineBlock():
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
 
-    def forward(self, options):
+    def forward(self, options = {}):
         '''
         Perform the forward pass for one tensor of activations and register it as computed
         '''
@@ -106,15 +106,19 @@ class PipelineBlock():
             x.requires_grad = True
             
         logger.debug(f'{self} - Work received. Starting actual computation.')
-        y = self.model(x)
-        if options and 'remat' in options.keys(): self.activations.append(y)
+
+        if not (options and 'remat' in options.keys()):
+            y = self.model(x)
+            self.activations.append(y)
+        else:
+            with torch.no_grad(): y = self.model(x)
         self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
 
         if self.next is None:
             return self.act_to_send.popleft()
         
-    def backward(self, options):
+    def backward(self, options = {}):
         '''
         Perform the backward pass for one tensor of gradients and register it as computed
         Backward assumes activations AND grads to be on top of the queue
@@ -129,7 +133,7 @@ class PipelineBlock():
             act = self.activations.popleft()
         work, grads = self.grads.popleft()
         
-        if work is not None: work.wait() # if properly managed, work should alredy be completed
+        if work is not None: work.wait() # if properly managed, work should already be completed
         
         (act * grads).sum().backward() # Optimal ? Maybe setting the gradients directly is faster
 

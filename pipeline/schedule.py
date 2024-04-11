@@ -16,14 +16,14 @@ def generate_afab_schedule(placement, n_micro_batches):
     for _ in range(n_micro_batches):
         for id_ in range(n_stages):
             schedule.append((id_, Operations.RECV_FORWARD))
-            schedule.append((id_, Operations.FORWARD))
+            schedule.append((id_, Operations.FORWARD, {'remat': True}))
             schedule.append((id_, Operations.SEND_FORWARD))
     
     # All backward
     for _ in range(n_micro_batches):
         for id_ in reversed(range(len(placement))):
             schedule.append((id_, Operations.RECV_BACKWARD))
-            schedule.append((id_, Operations.BACKWARD))
+            schedule.append((id_, Operations.BACKWARD, {'remat': True}))
             schedule.append((id_, Operations.SEND_BACKWARD))
     
     assert len(schedule) == n_micro_batches * n_stages * 2 * 3
