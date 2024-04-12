@@ -1,5 +1,6 @@
 from .engine import Operations
 
+import os
 import math
 import logging
 logger = logging.getLogger("schedule")
@@ -30,14 +31,50 @@ def generate_afab_schedule(placement, n_micro_batches):
 
     return schedule
 
-
 def generate_1f1b_schedule(placement, n_micro_batches):
     '''
     One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
     '''
 
     schedule = []
-    import os
+    rank = int(os.getenv("RANK"))
+
+    n_stages = len(placement)
+    n_devices = int(max(placement)) + 1
+    stages_per_device = n_stages // n_devices
+    n_steps = n_devices - rank - 1 + stages_per_device
+
+    for b in range(n_steps):
+        block = (b // n_devices) % stages_per_device * n_devices + rank
+        schedule.append((block, Operations.RECV_FORWARD))
+        schedule.append((block, Operations.FORWARD))
+        schedule.append((block, Operations.SEND_FORWARD))
+
+    for b in range(n_steps, stages_per_device * n_micro_batches):
+        block = (b // n_devices) % stages_per_device * n_devices + rank
+        schedule.append((block, Operations.RECV_FORWARD))
+        schedule.append(( block, Operations.FORWARD))
+        schedule.append((block, Operations.SEND_FORWARD))
+
+        schedule.append((block, Operations.RECV_BACKWARD))
+        schedule.append((block, Operations.BACKWARD))
+        schedule.append((block, Operations.SEND_BACKWARD))
+
+    for b in range(stages_per_device * n_micro_batches - n_steps, stages_per_device * n_micro_batches):
+        block = (b // n_devices) % stages_per_device * n_devices + rank
+        schedule.append((block, Operations.RECV_BACKWARD))
+        schedule.append((block, Operations.BACKWARD))
+        schedule.append((block, Operations.SEND_BACKWARD))
+
+    return schedule
+
+'''
+def generate_1f1b_schedule(placement, n_micro_batches):
+    \'''
+    One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
+    \'''
+
+    schedule = []
     rank = int(os.getenv("RANK"))
 
     n_stages = len(placement)
@@ -68,7 +105,7 @@ def generate_1f1b_schedule(placement, n_micro_batches):
             schedule.append((b * n_devices + rank, Operations.SEND_BACKWARD))
 
     return schedule
-
+'''
 
 def generate_custom_1f1b_schedule(placement, n_micro_batches):
     '''
