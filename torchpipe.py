@@ -16,7 +16,7 @@ if __name__ == "__main__":
 
     f = open("torchpipe.out", "w")
 
-    split_sizes = [1, 2, 4, 8, 16, 32, 64]
+    split_sizes = [1, 2, 4, 8, 16, 32]
     times = []
     for size in split_sizes:
         pipelined = Pipe(sequential, chunks = batch_size // size, checkpoint = 'never')
@@ -26,13 +26,17 @@ if __name__ == "__main__":
             y = pipelined(inputs.clone()).local_value()[0]
             loss = y.sum()
             loss.backward()
-        start = time.time()
+
+        torch.cuda.reset_peak_memory_stats()
+        iter_times = []
         for _ in range(iters):
+            start = time.time()
             y = pipelined(inputs.clone()).local_value()[0]
             loss = y.sum()
             loss.backward()
-        end = time.time()
-        t = (end - start) / iters
+            end = time.time()
+            iter_times.append(end - start)
+        t = sorted(iter_times)[iters // 2] # median
         f.write(f'{size},{t}\n')
-        print(f'Time taken by torch pipe (size {size}) : {end - start:.2f}s. Average : {t:.3f}s')
+        print(f'Time taken by torch pipe (size {size}) : {end - start:.2f}s. Median : {t:.3f}s')
         times.append(t)

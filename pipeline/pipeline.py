@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from .schedule import generate_afab_schedule, generate_1f1b_schedule
+from .schedule import *
 from .engine import Engine
 from collections import deque
 import logging
@@ -233,6 +233,8 @@ class Pipeline():
                 self.scheduler = generate_afab_schedule
             case '1f1b':
                 self.scheduler = generate_1f1b_schedule
+            case '1f1b2':
+                self.scheduler = generate_custom_1f1b_schedule
             case _:
                 raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b"].')
         

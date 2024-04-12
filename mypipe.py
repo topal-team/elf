@@ -33,26 +33,30 @@ if __name__ == "__main__":
 
     inputs = inputs.cuda()
 
-    split_sizes = [1, 2, 4, 8, 16, 32, 64]
+    split_sizes = [8]
     times = []
     for size in split_sizes:
         if global_rank == 0: logger.info(f'Beginning bench for micro batches of size {size}')
 
-        pipe = Pipeline(model, placement, schedule = "1f1b")
-
+        pipe = Pipeline(model, placement, schedule = schedule)
+        
         # Warmup
         for i in range(5):
             if global_rank == 0: logger.info(f'Warmup {i}')
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
-        start = time.time()
+        torch.cuda.reset_peak_memory_stats()
+        
+        iter_times = []
         for i in range(iters):
             if global_rank == 0: logger.info(f'Iter {i}')
+            start = time.time()
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
-        end = time.time()
-        t = (end - start) / iters
+            end = time.time()
+            iter_times.append(end - start)
+        t = sorted(iter_times)[iters // 2] # median
         if global_rank == 0:
-            print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Average : {t:.3f}s')
-            f.write(f'{size},{t}\n')
+            print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Median : {t:.3f}s')
+            f.write(f'{size},{t},{torch.cuda.max_memory_allocated() / (2**30)}\n')
         times.append(t)
 
     if global_rank == 0: f.close()

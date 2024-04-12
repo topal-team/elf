@@ -30,7 +30,47 @@ def generate_afab_schedule(placement, n_micro_batches):
 
     return schedule
 
+
 def generate_1f1b_schedule(placement, n_micro_batches):
+    '''
+    One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
+    '''
+
+    schedule = []
+    import os
+    rank = int(os.getenv("RANK"))
+
+    n_stages = len(placement)
+    n_devices = int(max(placement)) + 1
+    stages_per_device = n_stages // n_devices
+    n_steps = min(n_micro_batches, n_devices)
+
+    for b in range(stages_per_device):
+        for d in range(n_steps):
+            schedule.append((b * n_devices + rank, Operations.RECV_FORWARD))
+            schedule.append((b * n_devices + rank, Operations.FORWARD))
+            schedule.append((b * n_devices + rank, Operations.SEND_FORWARD))
+
+    for d in range(n_micro_batches - n_steps):
+        for b in range(stages_per_device):
+            schedule.append((b * n_devices + rank, Operations.RECV_FORWARD))
+            schedule.append((b * n_devices + rank, Operations.FORWARD))
+            schedule.append((b * n_devices + rank, Operations.SEND_FORWARD))
+
+            schedule.append(((stages_per_device - b) * n_devices + rank, Operations.RECV_BACKWARD))
+            schedule.append(((stages_per_device - b) * n_devices + rank, Operations.BACKWARD))
+            schedule.append(((stages_per_device - b) * n_devices + rank, Operations.SEND_BACKWARD))
+
+    for d in range(n_steps):
+        for b in reversed(range(stages_per_device)):
+            schedule.append((b * n_devices + rank, Operations.RECV_BACKWARD))
+            schedule.append((b * n_devices + rank, Operations.BACKWARD))
+            schedule.append((b * n_devices + rank, Operations.SEND_BACKWARD))
+
+    return schedule
+
+
+def generate_custom_1f1b_schedule(placement, n_micro_batches):
     '''
     One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
     '''
