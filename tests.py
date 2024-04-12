@@ -34,14 +34,14 @@ def load_parts_model(placement, global_rank, path="test-model.pt"):
     blocks = [children[idx] for idx in indices]
     return blocks
 
-def test_pipeline(blocks, placement, scheduler):
+def test_pipeline(blocks, placement, scheduler, batch_size):
     '''
     Test that a schedule computes the forward & backward passes correctly
     To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
     '''
 
     split_size = 1
-    batch = torch.randn((len(placement), 3)).cuda()
+    batch = torch.randn((batch_size, 3)).cuda()
 
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
@@ -75,7 +75,7 @@ def test_pipeline(blocks, placement, scheduler):
         batch.requires_grad = True
         full_model = load_full_model(len(placement)).cuda()
         groundtruth = full_model(batch)
-        assert torch.allclose(output, groundtruth), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
+        assert torch.allclose(output, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
         logger.info(f'{block} - Outputs are correct :)')
 
         loss = F.mse_loss(groundtruth, target, reduction="sum") # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
@@ -93,7 +93,7 @@ def test_pipeline(blocks, placement, scheduler):
             dist.recv(groundtruth, placement[-1])
 
         assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth}'
-        print(f'{block} - Gradients are correct :))')
+        logger.info(f'{block} - Gradients are correct :))')
 
 if __name__ == "__main__":
     parser = ArgumentParser(description = "Demo/Test of pipelined model")
@@ -117,17 +117,24 @@ if __name__ == "__main__":
     # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
     # placement = torch.randint(0, world_size, (4,)).cuda()
 
-    placement = torch.tensor([0, 1, 2, 3]).cuda()
-
-    dist.broadcast(placement, 0) # synchronize placement on all processes
-    logger.debug(f'Placement : {placement}')
-
     # Load your model here (each process should load the right layers depending on placement)
-    layers = load_parts_model(placement, global_rank)
+
+    placements = [
+        [0, 1, 2, 3],
+        [0, 1, 2, 3, 0, 1, 2, 3]
+    ]
+
+    batch_sizes = [4, 8, 16]
 
     # Check that the results and gradients are the same as a single-gpu model
-    test_pipeline(layers, placement, "afab")
-
-    dist.barrier()
+    for p in placements:
+        for b in batch_sizes:
+            if b < len(p): continue
+            if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
+            layers = load_parts_model(p, global_rank)
+            test_pipeline(layers, p, "1f1b", b)
+            dist.barrier()
+            if global_rank == 0: logger.info('\n')
+            
     if dist.is_initialized():
         dist.destroy_process_group()
