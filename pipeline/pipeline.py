@@ -7,6 +7,7 @@ from .engine import Engine
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
+logger.setLevel(100)
 
 dtypes = [
     torch.float16,
@@ -253,11 +254,11 @@ class Pipeline():
         self.engine = Engine(self.blocks)
         self.schedule = []
 
-    def __call__(self, batch, target, loss_fn, split_size = 1, viz_file = None):
+    def __call__(self, batch, target, loss_fn, split_size = 1, profile = None):
         '''
         Execute the schedule on a batch of data
         split_size: either int for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or list of micro batch sizes
-        viz_file: path to a file to write informations about the execution. Set to None (default) to disable
+        profile: activate nvidia profiling. Set to None (default) to disable
         '''
         if isinstance(split_size, int):
             n_micro_batches = batch.size(0) // split_size
@@ -284,7 +285,7 @@ class Pipeline():
             b.register_metadata()
             logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
-        result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
+        result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
         if len(result) != 0:
             return torch.cat(result, dim = 0), torch.tensor(losses, device = torch.cuda.current_device()).sum(dim = 0, keepdim = True)
         else: return None, None
