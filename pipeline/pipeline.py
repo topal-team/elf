@@ -33,7 +33,7 @@ class TensorMetadata():
         '''
         dtype = dtypes[int(t[0].item())]
         shape = []
-       assert len(t.shape) == 1, "Metadata should only have one dimension"
+        assert len(t.shape) == 1, "Metadata should only have one dimension"
         for s in t[1:]:
             s = int(s.item())
             if s == 0: break
