@@ -1,5 +1,3 @@
-from .engine import Operations
-
 import os
 import math
 import logging
@@ -42,70 +40,47 @@ def generate_1f1b_schedule(placement, n_micro_batches):
     n_stages = len(placement)
     n_devices = int(max(placement)) + 1
     stages_per_device = n_stages // n_devices
-    n_steps = n_devices - rank - 1 + stages_per_device
 
-    for b in range(n_steps):
-        block = (b // n_devices) % stages_per_device * n_devices + rank
-        schedule.append((block, Operations.RECV_FORWARD))
-        schedule.append((block, Operations.FORWARD))
-        schedule.append((block, Operations.SEND_FORWARD))
+    i = 0
+    b_f = 0
+    while i < (stages_per_device * n_micro_batches) and i < (n_stages - rank):
+        i += 1
+        # schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
+        schedule.append((b_f * n_devices + rank, Operations.FORWARD))
+        # schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
 
-    for b in range(n_steps, stages_per_device * n_micro_batches):
-        block = (b // n_devices) % stages_per_device * n_devices + rank
-        schedule.append((block, Operations.RECV_FORWARD))
-        schedule.append(( block, Operations.FORWARD))
-        schedule.append((block, Operations.SEND_FORWARD))
+        if (i % n_devices) == 0:
+            b_f = (b_f + 1) % stages_per_device
 
-        schedule.append((block, Operations.RECV_BACKWARD))
-        schedule.append((block, Operations.BACKWARD))
-        schedule.append((block, Operations.SEND_BACKWARD))
+    state = i
+    
+    b_b = stages_per_device - 1 # last layer first
+    while i < (stages_per_device * n_micro_batches):
+        i += 1
+        # schedule.append((b_b * n_devices + rank, Operations.RECV_BACKWARD))
+        schedule.append((b_b * n_devices + rank, Operations.BACKWARD))
+        # schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
 
-    for b in range(stages_per_device * n_micro_batches - n_steps, stages_per_device * n_micro_batches):
-        block = (b // n_devices) % stages_per_device * n_devices + rank
-        schedule.append((block, Operations.RECV_BACKWARD))
-        schedule.append((block, Operations.BACKWARD))
-        schedule.append((block, Operations.SEND_BACKWARD))
+        if (i - state) % (n_devices // 2) == 0:
+            b_b = (b_b - 1) % stages_per_device
 
-    return schedule
+        # schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
+        schedule.append((b_f * n_devices + rank, Operations.FORWARD))
+        # schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
 
-'''
-def generate_1f1b_schedule(placement, n_micro_batches):
-    \'''
-    One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
-    \'''
+        if (i % n_devices) == 0:
+            b_f = (b_f + 1) % stages_per_device
 
-    schedule = []
-    rank = int(os.getenv("RANK"))
+    while i < (stages_per_device * n_micro_batches * 2 - (stages_per_device * n_micro_batches - state)):
+        i += 1
+        # schedule.append((b_b * n_devices + rank, Operations.RECV_BACKWARD))
+        schedule.append((b_b * n_devices + rank, Operations.BACKWARD))
+        # schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
 
-    n_stages = len(placement)
-    n_devices = int(max(placement)) + 1
-    stages_per_device = n_stages // n_devices
-    n_steps = min(n_micro_batches, n_devices)
-
-    for b in range(stages_per_device):
-        for d in range(n_steps):
-            schedule.append((b * n_devices + rank, Operations.RECV_FORWARD))
-            schedule.append((b * n_devices + rank, Operations.FORWARD))
-            schedule.append((b * n_devices + rank, Operations.SEND_FORWARD))
-
-    for d in range(n_micro_batches - n_steps):
-        for b in range(stages_per_device):
-            schedule.append((b * n_devices + rank, Operations.RECV_FORWARD))
-            schedule.append((b * n_devices + rank, Operations.FORWARD))
-            schedule.append((b * n_devices + rank, Operations.SEND_FORWARD))
-
-            schedule.append(((stages_per_device - b) * n_devices + rank, Operations.RECV_BACKWARD))
-            schedule.append(((stages_per_device - b) * n_devices + rank, Operations.BACKWARD))
-            schedule.append(((stages_per_device - b) * n_devices + rank, Operations.SEND_BACKWARD))
-
-    for d in range(n_steps):
-        for b in reversed(range(stages_per_device)):
-            schedule.append((b * n_devices + rank, Operations.RECV_BACKWARD))
-            schedule.append((b * n_devices + rank, Operations.BACKWARD))
-            schedule.append((b * n_devices + rank, Operations.SEND_BACKWARD))
+        if (i - n_micro_batches - state) % (n_devices // 2) == 0:
+            b_b = (b_b - 1) % stages_per_device
 
     return schedule
-'''
 
 def generate_custom_1f1b_schedule(placement, n_micro_batches):
     '''
@@ -142,10 +117,10 @@ def generate_custom_1f1b_schedule(placement, n_micro_batches):
 
 if __name__ == "__main__":
     import torch
-    placement = torch.tensor([0, 1, 0, 1])
-    schedule = generate_1f1b_schedule(placement, 1)
-    for rank in range(placement.max().item() + 1):
-        actions = [(id_, op, options) for id_, op, *options in schedule if placement[id_] == rank]
-        print(f'Rank {rank} - {actions}\n')
+    from engine import Operations
+    placement = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+    schedule = generate_1f1b_schedule(placement, 4)
 
-    print(schedule)
+    print(f'Rank {os.getenv("RANK")} - {schedule}\n')
+else:
+    from .engine import Operations

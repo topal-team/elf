@@ -11,7 +11,7 @@ logger = logging.getLogger(f'main')
 logging.basicConfig(level = logging.DEBUG)
 
 def create_model():
-    all_layers = [nn.Linear(3, 3, bias=False) for i in range(10)]
+    all_layers = [nn.Linear(3, 3, bias=False) for i in range(32)]
 
     model = nn.Sequential(*all_layers)
     torch.save(model, "test-model.pt")
@@ -121,15 +121,15 @@ if __name__ == "__main__":
 
     placements = [
         [0, 1, 2, 3],
-        [0, 1, 2, 3, 0, 1, 2, 3]
+        [0, 1, 2, 3, 0, 1, 2, 3],
+        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
     ]
 
-    batch_sizes = [4, 8, 16]
+    batch_sizes = [4, 8, 16, 32]
 
     # Check that the results and gradients are the same as a single-gpu model
     for p in placements:
         for b in batch_sizes:
-            if b < len(p): continue
             if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
             layers = load_parts_model(p, global_rank)
             test_pipeline(layers, p, "1f1b", b)
