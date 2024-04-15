@@ -45,9 +45,9 @@ def generate_1f1b_schedule(placement, n_micro_batches):
     b_f = 0
     while i < (stages_per_device * n_micro_batches) and i < (n_stages - rank):
         i += 1
-        # schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
+        schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
         schedule.append((b_f * n_devices + rank, Operations.FORWARD))
-        # schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
+        schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
 
         if (i % n_devices) == 0:
             b_f = (b_f + 1) % stages_per_device
@@ -57,25 +57,25 @@ def generate_1f1b_schedule(placement, n_micro_batches):
     b_b = stages_per_device - 1 # last layer first
     while i < (stages_per_device * n_micro_batches):
         i += 1
-        # schedule.append((b_b * n_devices + rank, Operations.RECV_BACKWARD))
+        schedule.append((b_b * n_devices + rank, Operations.RECV_BACKWARD))
         schedule.append((b_b * n_devices + rank, Operations.BACKWARD))
-        # schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
+        schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
 
         if (i - state) % (n_devices // 2) == 0:
             b_b = (b_b - 1) % stages_per_device
 
-        # schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
+        schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
         schedule.append((b_f * n_devices + rank, Operations.FORWARD))
-        # schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
+        schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
 
         if (i % n_devices) == 0:
             b_f = (b_f + 1) % stages_per_device
 
     while i < (stages_per_device * n_micro_batches * 2 - (stages_per_device * n_micro_batches - state)):
         i += 1
-        # schedule.append((b_b * n_devices + rank, Operations.RECV_BACKWARD))
+        schedule.append((b_b * n_devices + rank, Operations.RECV_BACKWARD))
         schedule.append((b_b * n_devices + rank, Operations.BACKWARD))
-        # schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
+        schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
 
         if (i - n_micro_batches - state) % (n_devices // 2) == 0:
             b_b = (b_b - 1) % stages_per_device
