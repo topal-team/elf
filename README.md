@@ -2,17 +2,43 @@
 
 Use script ``start.sh`` to start multi-nodes tasks.\
 Usage:
-```
-sbatch --nodes=? ./start.sh your_script.py
+```bash
+sbatch --nodes=? ./start.sh {your_script}.py
 ```
 By default, the script will use every GPU on every node, and start one process per gpu.
 
-## Pipeline Engine
+## For Jean-Zay
 
-In the file ``engine.py`` you can find the ``StageScheduler``, an engine made to execute a custom pipeline schedule on an arbitrary list of blocks placed on different devices. It takes as inputs a list of blocks, which are assumed to be placed on the current cuda device for each process, and a schedule. The schedule is a list of tuples (block_id, operation) where operation is from the enum Operations. The available ones are:
-- Receive forward (``RECV_FORWARD``)
-- Compute forward (``FORWARD``)
-- Send forward (``SEND_FORWARD``)
-- Receive backward (``RECV_BACKWARD``)
-- Compute backward (``BACKWARD``)
-- Send backward (``SEND_BACKWARD``)
+I recommend allocating a node in interactive mode !
+Then, you can use :
+
+```bash
+singularity exec --nv --bind $(pwd):/mnt $SINGULARITY_ALLOWED_DIR/nanotron.sif torchrun --nnodes 1 --nproc-per-node 4 --standalone -- /mnt/{your_script}.py
+```
+
+## How it works
+
+### Create the pipeline
+
+The object ``Pipeline`` from ``pipeline`` provides a simple API to automatically take care of everything.
+```py
+from pipeline import Pipeline
+pipe = Pipeline(model)
+y = pipe(inputs)
+```
+
+There are several arguments to modify its behaviour :
+- ``placement`` specifies the rank of each model block.
+- ``partition`` can be set to ``None`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device.
+- ``schedule`` modifies the schedule algorithm to use. Currently, only AFAB from Gpipe and 1F1B from PipeDream are supported.
+
+### Write your own schedule
+
+You can define your own schedule if you want to perform tests or use an unimplemented one. In order to do that, you simply have to write a function that takes as argument a ``placement`` and a number of micro batches ``n_micro_batches``, and returns the right sequence of operations as ``(block_id, op, [options])`` for the current device. Then, register it in the ``Pipeline`` class in ``pipeline.py``.
+
+### Change the pipeline behaviour
+
+The options can be anything that modifies the behaviour of the operation, as long as the corresponding function in ``pipeline.py`` is modified to take it into account. See remat for an example. Currently supported :
+
+- Rematerialization (``{"remat": True}``)
+
