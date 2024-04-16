@@ -1,6 +1,6 @@
-import torch.distributed as dist
 import time
-import os
+import torch
+import torch.distributed as dist
 import matplotlib
 import matplotlib.pyplot as plt
 from .schedule import OperationType
@@ -37,7 +37,7 @@ class Engine():
         for w in works: w.wait()
         self.comms.clear()
 
-    def train_step(self, batch, target, loss_fn, schedule, split_size, viz_file = None):
+    def train_step(self, batch, target, loss_fn, schedule, split_size, profile = None):
         '''
         Perform forward + backward pass on a batch of data
         '''
@@ -48,14 +48,13 @@ class Engine():
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
         curr = 0
-        if viz_file is not None:
-            stats = []
             
         for op in schedule:
             if str(op.block_id) in self.id_to_block:
                 block = self.id_to_block[str(op.block_id)]
                 logger.debug(f'Computing {op} on block {block}')
-                if viz_file is not None: stats.append((time.time(), id_, op))
+                if profile is not None:
+                    torch.cuda.nvtx.push_range(f'{block}:{op}')
                 match op.op:
                     case OperationType.FORWARD:
                         self._run_comms()
@@ -90,19 +89,11 @@ class Engine():
                         raise Exception(f'Unknown operation : {op}')
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
-        if viz_file is not None: stats.append((time.time(), self.rank, ".END"))
         self._run_comms()
         dist.barrier()
-        if viz_file is not None:
-            for r in range(int(os.environ["WORLD_SIZE"])):
-                # Each process writes in turn
-                if r == self.rank:
-                    if r == 0: open(viz_file, "w").close() # erase content
-                    with open(viz_file, 'a') as outfile:
-                        for t, id_, op in stats:
-                            outfile.write(f'{self.rank}:{t}:{id_},{op}\n')
 
-                dist.barrier()
+        if profile is not None:
+            torch.cuda.nvtx.pop_range()
         return result, losses
 
 def compute_loss(block, output, target, loss_fn):

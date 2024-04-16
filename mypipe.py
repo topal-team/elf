@@ -30,7 +30,8 @@ if __name__ == "__main__":
     dist.init_process_group(backend="nccl")
 
     if global_rank == 0: f = open("mypipe.out", "w")
-
+    torch.cuda.cudart().cudaProfilerStart()
+    
     inputs = inputs.cuda()
 
     times = []
@@ -61,6 +62,8 @@ if __name__ == "__main__":
             f.write(f'{size},{t},{torch.cuda.max_memory_allocated() / (2**30)}\n')
         times.append(t)
 
+    torch.cuda.cudart().cudaProfilerStop()
+    
     if global_rank == 0: f.close()
     dist.barrier()
     if dist.is_initialized():
