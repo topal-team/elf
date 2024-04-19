@@ -130,6 +130,7 @@ if __name__ == "__main__":
     # Check that the results and gradients are the same as a single-gpu model
     for p in placements:
         for b in batch_sizes:
+            if b < len(p): continue
             if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
             layers = load_parts_model(p, global_rank)
             test_pipeline(layers, p, "1f1b", b)

@@ -43,32 +43,39 @@ def generate_1f1b_schedule(placement, n_micro_batches):
 
     i = 0
     b_f = 0
+    # Warmup phase : each device can compute until the micro batch forward is finished (n_stages), but it can only start after it was forwarded through all the previous layers (rank)
     while i < (stages_per_device * n_micro_batches) and i < (n_stages - rank):
         i += 1
         schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
         schedule.append((b_f * n_devices + rank, Operations.FORWARD))
         schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
 
-        if (i % n_devices) == 0:
+        # each layer has time to compute n_devices micro batches before work arrives for the next layer
+        # we always prioritize forward on the last possible layer
+        # (also, we stop if all micro batches have been computed)
+        if (i % n_devices) == 0 or (i % n_micro_batches) == 0:
             b_f = (b_f + 1) % stages_per_device
 
+    # Number of forward passes computed before steady state
     state = i
-    
     b_b = stages_per_device - 1 # last layer first
+    
+    # Steady state
     while i < (stages_per_device * n_micro_batches):
         i += 1
         schedule.append((b_b * n_devices + rank, Operations.RECV_BACKWARD))
         schedule.append((b_b * n_devices + rank, Operations.BACKWARD))
         schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
 
-        if (i - state) % (n_devices // 2) == 0:
+        # Same as before, except that we can compute 2x less micro batches because half of the time is spent doing forwards
+        if (i - state) % (n_devices // 2) == 0 or (i - state) % n_micro_batches == 0:
             b_b = (b_b - 1) % stages_per_device
 
         schedule.append((b_f * n_devices + rank, Operations.RECV_FORWARD))
         schedule.append((b_f * n_devices + rank, Operations.FORWARD))
         schedule.append((b_f * n_devices + rank, Operations.SEND_FORWARD))
 
-        if (i % n_devices) == 0:
+        if (i >= n_stages and i % (n_devices // 2) == 0) or (i % n_micro_batches) == 0:
             b_f = (b_f + 1) % stages_per_device
 
     while i < (stages_per_device * n_micro_batches * 2 - (stages_per_device * n_micro_batches - state)):
@@ -77,8 +84,19 @@ def generate_1f1b_schedule(placement, n_micro_batches):
         schedule.append((b_b * n_devices + rank, Operations.BACKWARD))
         schedule.append((b_b * n_devices + rank, Operations.SEND_BACKWARD))
 
-        if (i - n_micro_batches - state) % (n_devices // 2) == 0:
+        # Finish all backwards
+        if (i - n_micro_batches - state) % (n_devices // 2) == 0 or (i - n_micro_batches - state) % n_micro_batches == 0:
             b_b = (b_b - 1) % stages_per_device
+
+    # We need to swap send/recv on one out of two devices to avoid deadlocks
+    if rank % 2 == 1:
+        for i in range(len(schedule) - 1):
+            if schedule[i][1] == Operations.SEND_FORWARD and schedule[i + 1][1] == Operations.RECV_BACKWARD or \
+               schedule[i][1] == Operations.SEND_BACKWARD and schedule[i + 1][1] == Operations.RECV_FORWARD:
+                tmp = schedule[i+1]
+                schedule[i+1] = schedule[i]
+                schedule[i] = tmp
+         
 
     return schedule
 

@@ -33,9 +33,11 @@ if __name__ == "__main__":
 
     inputs = inputs.cuda()
 
-    split_sizes = [8]
     times = []
     for size in split_sizes:
+        if (batch_size // size) % len(placement) != 0:
+            if global_rank == 0: logger.warning(f'The number of micro batches should be a multiple of the number of stages ! Got {batch_size // size} and {len(placement)}. Skipping.')
+            continue
         if global_rank == 0: logger.info(f'Beginning bench for micro batches of size {size}')
 
         pipe = Pipeline(model, placement, schedule = schedule)

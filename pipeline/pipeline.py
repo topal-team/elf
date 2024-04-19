@@ -107,12 +107,12 @@ class PipelineBlock():
             
         logger.debug(f'{self} - Work received. Starting actual computation.')
 
-        if not (options and 'remat' in options.keys()):
-            y = self.model(x)
-            self.activations.append(y)
-        else:
+        if options and 'remat' in options.keys():
             with torch.no_grad(): y = self.model(x)        
-
+        else:
+           y = self.model(x)
+           self.activations.append(y)
+           
         self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
 
@@ -184,7 +184,6 @@ class PipelineBlock():
 
         logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {self.previous}')
         work = dist.irecv(buffer, self.previous)
-        logger.debug(f'{self} - Received activations !')
 
         self.inputs.append((work, buffer)) # .detach() ?
 
@@ -205,7 +204,6 @@ class PipelineBlock():
 
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {self.next}')
         work = dist.irecv(buffer, self.next)
-        logger.debug(f'{self} - Received gradients !')
 
         self.grads.append((work, buffer))
 
@@ -270,6 +268,7 @@ def create_pipeline(layers, placement):
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
+    
     return blocks
 
 def partition_model(model, placement):
