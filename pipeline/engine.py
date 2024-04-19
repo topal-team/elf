@@ -1,8 +1,5 @@
-import time
 import torch
 import torch.distributed as dist
-import matplotlib
-import matplotlib.pyplot as plt
 from .schedule import OperationType
 
 import logging
@@ -54,7 +51,7 @@ class Engine():
                 block = self.id_to_block[str(op.block_id)]
                 logger.debug(f'Computing {op} on block {block}')
                 if profile is not None:
-                    torch.cuda.nvtx.push_range(f'{block}:{op}')
+                    torch.cuda.nvtx.range_push(f'{block}:{op}')
                 match op.op:
                     case OperationType.FORWARD:
                         self._run_comms()
@@ -88,12 +85,12 @@ class Engine():
                     case _:
                         raise Exception(f'Unknown operation : {op}')
         
+        if profile is not None:
+            torch.cuda.nvtx.range_pop()
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         self._run_comms()
         dist.barrier()
 
-        if profile is not None:
-            torch.cuda.nvtx.pop_range()
         return result, losses
 
 def compute_loss(block, output, target, loss_fn):
@@ -106,71 +103,3 @@ def compute_loss(block, output, target, loss_fn):
     loss.backward()
     block.grads.append((None, output.grad.data))
     return loss
-
-def visualize(path):
-    '''
-    Display the execution time of each operation executed by the engine
-    path: path to a file that should be created by a Pipeline/Engine call
-    '''
-    operations = {}  # Dictionary to store operations by device
-    with open(path, 'r') as file:
-        for line in file:
-            rank, times, id_op = line.split(':')
-            times = float(times)  # Convert time to float
-            
-            if rank not in operations:
-                operations[rank] = []
-            operations[rank].append((times, id_op.strip()))
-
-    colors = {
-        str(OperationType.RECV_FORWARD): "gold",
-        str(OperationType.FORWARD): "springgreen",
-        str(OperationType.SEND_FORWARD): "orange",
-        str(OperationType.RECV_BACKWARD): "plum",
-        str(OperationType.BACKWARD): "red",
-        str(OperationType.SEND_BACKWARD): "fuchsia",
-        ".END": "black"
-    }
-
-    fig, ax = plt.subplots()
-    first_start = 0
-    for rank, ops in operations.items():
-        # Sort operations by start time to ensure correct sequential plotting
-        ops.sort(key=lambda x: x[0])
-        if ops[0][0] < first_start or first_start == 0:
-            first_start = ops[0][0]
-
-    for rank, ops in operations.items():
-        # Sort operations by start time to ensure correct sequential plotting
-        if ops[0][0] < first_start or first_start == 0:
-            first_start = ops[0][0]
-        
-        for i, (start_time, id_op) in enumerate(ops):
-            if i + 1 < len(ops):
-                duration = ops[i + 1][0] - start_time
-            else:
-                duration = 0
-
-            # Plot each operation as a horizontal bar, *1000 for ms instead of s 
-            ax.barh(y=int(rank), width=duration * 1000, left=(start_time - first_start) * 1000, height=0.8, color=colors[id_op.split(',')[1]], edgecolor='black')
-            
-            # Annotate the bar with the operation ID
-            # Adjust the position to be inside the bar, slightly to the right and vertically centered
-            # text_x = start_time + 0.15 * duration  # Adjust this value as needed
-            # text_y = int(rank)
-            # if duration > (ops[-1][0] - ops[0][0]) / 12:
-            #     ax.text(text_x, text_y, id_op, va='center', ha='left', fontsize=12, color='black')
-
-
-    legend_handles = [matplotlib.patches.Patch(facecolor=color, edgecolor='black', label=label.split('.')[1].lower()) for label, color in colors.items() if label != ".END"]
-    ax.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1, 1))
-    ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Device Rank')
-    ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True)) # show only integers
-    plt.show()
-
-if __name__ == "__main__":
-    import sys
-    path = sys.argv[1]
-
-    visualize(path)
