@@ -9,15 +9,18 @@ import logging
 logger = logging.getLogger("engine")
 
 class Operations(Enum):
+    RECV_FORWARD = 0
     FORWARD = 1
-    BACKWARD = 2
-    SEND_FORWARD = 3
-    SEND_BACKWARD = 4
-    RECV_FORWARD = 5
-    RECV_BACKWARD = 6
+    SEND_FORWARD = 2
+    RECV_BACKWARD = 3
+    BACKWARD = 4
+    SEND_BACKWARD = 5
     
     def __repr__(self) -> str:
         return self.name
+    
+    def __int__(self) -> int:
+        return self.value
 
 class Engine():
     '''

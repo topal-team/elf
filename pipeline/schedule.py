@@ -1,3 +1,4 @@
+import torch
 import os
 import math
 import logging
@@ -133,12 +134,25 @@ def generate_custom_1f1b_schedule(placement, n_micro_batches):
 
     return schedule
 
+def check_schedule(schedule):
+    counts = [0] * len(Operations)
+    for (_, op, *_) in schedule:
+        counts[int(op)] += 1 # dirty indexing trick
+        if int(op) != 0 and op != Operations.RECV_BACKWARD \
+                and counts[int(op) - 1] < counts[int(op)]: # Unfortunately, because of the asynchronous comms we cannot really check for recv_backward/send_forward order
+            return False, f"The order of operations is wrong !"
+    if not all (c == counts[0] for c in counts): 
+        return False, "Number of operations does not match !"
+    return True, "Schedule is correct :D"
+
 if __name__ == "__main__":
     import torch
     from engine import Operations
     placement = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
-    schedule = generate_1f1b_schedule(placement, 4)
-
-    print(f'Rank {os.getenv("RANK")} - {schedule}\n')
+    for n in range(5):
+        schedule = generate_1f1b_schedule(placement, 2**n)
+        print(f'[Rank {os.getenv("RANK")}] - {2**n} micro batches : {check_schedule(schedule)} \n')
+    # print(f'Rank {os.getenv("RANK")} - {schedule}')
+    
 else:
     from .engine import Operations
