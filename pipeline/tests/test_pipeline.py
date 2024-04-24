@@ -35,15 +35,103 @@ def test_metadata():
 
     return
 
+class FakeWorker():
+    def __init__(self, done):
+        self.done = done
+
+    def wait(self):
+        while not self.done: pass
+        return
+
+    def is_completed(self):
+        return self.done
+
 def test_block():
-    model = nn.Linear(3, 2)
+    '''
+    TODO: Tests for communications (send/recv) ; probably need multiple processes
+    '''
+    device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
+
+    model = nn.Linear(2, 1, bias = False)
+
+    # Test pipe links
     block = PipelineBlock(model, id_ = 0, placement = [0, 2])
 
     assert block.id == 0
     assert block.previous is None
     assert block.next == 2
     assert block.rank == 0
-    if torch.cuda.is_available():
-        assert block.model.device == torch.cuda.current_device()
+
+    block = PipelineBlock(model, id_ = 1, placement = [1, 2])
+    assert block.id == 1
+    assert block.previous == 1
+    assert block.next is None
+    assert block.rank == 2
+
+    block = PipelineBlock(model, id_ = 1, placement = [2, 1, 0])
+    assert block.id == 1
+    assert block.previous == 2
+    assert block.next == 0
+    assert block.rank == 1
+
+    # Test forward pass
+    block.model.weight = nn.Parameter(torch.tensor([3., -1.], device = device))
+    assert len(block.inputs) == 0
+    inputs = torch.tensor([2., 4.], device = device)
+    block.inputs.append((FakeWorker(True), inputs))
+
+    block.forward()
+
+    expected_result = torch.tensor([2.], device = device)
+    assert torch.allclose(block.activations[0], expected_result)
+    assert torch.allclose(block.act_to_send[0], expected_result)
+    assert len(block.inputs) == 0
+    assert len(block.inputs_to_keep) == 1
+
+    # Test backward pass
+    block.grads.append((FakeWorker(True), torch.tensor([3.], device = device)))
+
+    block.backward()
+    expected_grads_weights = torch.tensor([6., 12.], device = device)
+    expected_grads_inputs = torch.tensor([9., -3.], device = device)
+
+    assert torch.allclose(block.model.weight.grad.data, expected_grads_weights)
+    assert torch.allclose(inputs.grad.data, expected_grads_inputs)
+
+    assert len(block.activations) == 0
+    assert len(block.inputs_to_keep) == 0
+    assert len(block.grads_to_send) == 1
+
+def test_pipeline():
+    '''
+    TODO: Test full forward / backward pass ; probably needs multiple processes :)
+    '''
+
+    os.environ["WORLD_SIZE"] = "3"
+
+    # Test automatic placement + partitioning
+    model = nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 4), nn.Linear(4, 5))
+    try:
+        _ = Pipeline(model)
+        assert torch.cuda.device_count() == len(model), f'The partitioning should require {os.getenv("WORLD_SIZE")} devices to run'
+    except RuntimeError:
+        pass
+
+    # Test predefined placement
+    pipe = Pipeline(model, placement = ['cpu', 'cpu'])
+    assert len(pipe.blocks) == 2
+
+    if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
+        os.environ["RANK"] = "1"
+        pipe = Pipeline(model, placement = ['cpu', 'cpu', '1'])
+        assert len(pipe.blocks) == 1
+
+    # Test predefined partition
+    pipe = Pipeline([l for l in model.children()], partition = None)
+    assert len(pipe.blocks) == 0 # not the right rank
+    assert pipe.placement == list(range(len(model))) # default value
+
+
+
 
     

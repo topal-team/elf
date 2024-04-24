@@ -4,29 +4,31 @@ import math
 import logging
 logger = logging.getLogger("schedule")
 
-def generate_afab_schedule(placement, n_micro_batches):
+def generate_afab_schedule(placement, n_micro_batches, *options):
     '''
     All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
     Supports any model placement
     '''
     schedule = []
-    n_stages = len(placement)
+
+    rank = int(os.getenv("RANK"))
+    ids = [i for i in range(len(placement)) if placement[i] == rank]
 
     # All forward
     for _ in range(n_micro_batches):
-        for id_ in range(n_stages):
-            schedule.append((id_, Operations.RECV_FORWARD))
-            schedule.append((id_, Operations.FORWARD, {'remat': True}))
-            schedule.append((id_, Operations.SEND_FORWARD))
+        for id_ in ids:
+            schedule.append((id_, Operations.RECV_FORWARD, *options))
+            schedule.append((id_, Operations.FORWARD, *options))
+            schedule.append((id_, Operations.SEND_FORWARD, *options))
     
     # All backward
     for _ in range(n_micro_batches):
-        for id_ in reversed(range(len(placement))):
-            schedule.append((id_, Operations.RECV_BACKWARD))
-            schedule.append((id_, Operations.BACKWARD, {'remat': True}))
-            schedule.append((id_, Operations.SEND_BACKWARD))
+        for id_ in reversed(ids):
+            schedule.append((id_, Operations.RECV_BACKWARD, *options))
+            schedule.append((id_, Operations.BACKWARD, *options))
+            schedule.append((id_, Operations.SEND_BACKWARD, *options))
     
-    assert len(schedule) == n_micro_batches * n_stages * 2 * 3
+    assert len(schedule) == n_micro_batches * len(ids) * 2 * 3
 
     return schedule
 

@@ -224,6 +224,9 @@ class Pipeline():
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
             model = partition_model(model, placement)
+        else:
+            placement = placement * (len(model) // len(placement)) # repeat as many times as needed
+            placement = placement[:len(model)] # truncate
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
@@ -265,7 +268,7 @@ def create_pipeline(layers, placement):
     '''
     Transforms a list of layers placed on different devices to a working pipeline
     '''
-    rank = dist.get_rank()
+    rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
@@ -278,6 +281,10 @@ def partition_model(model, placement):
     Each block that is placed on this rank is moved to the corresponding GPU
     '''
     rank = dist.get_rank() if dist.is_initialized() else None
+
+    available_devices = [torch.device(device) for device in ['cpu'] + [f'cuda:{i}' for i in range(torch.cuda.device_count())]]
+    if any(torch.device(p) not in available_devices for p in placement):
+        raise RuntimeError(f'Trying to place the model on non existing or non visible devices : {placement}, but available devices are : {available_devices}')
     
     layers = []
     for module in model.children():
@@ -311,7 +318,7 @@ def partition_model(model, placement):
     if rank is None:
         for i, phase in enumerate(phases):
             for layer in phase:
-                layer.to_empty(device=torch.device(placement[i]))
+                layer.to_empty(device = torch.device(placement[i]))
     else:
         for i in range(len(placement)):
             if rank == placement[i]:

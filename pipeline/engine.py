@@ -29,7 +29,7 @@ class Engine():
     '''
     def __init__(self, blocks):
         self.blocks = blocks
-        self.rank = int(self.blocks[0].rank) if blocks else None
+        self.rank = self.blocks[0].rank if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
