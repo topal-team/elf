@@ -24,7 +24,7 @@ class TensorMetadata():
     Informations about Tensors that are sent and received in p2p communication
     [dtype, *shape]
     '''
-    MAX_SIZE = 64
+    MAX_SIZE = 16
 
     @staticmethod
     def from_tensor(t):
@@ -46,12 +46,13 @@ class TensorMetadata():
     def __init__(self, t):
         self.shape = t.shape
         self.dtype = t.dtype
+        self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
 
     def to_tensor(self):
         '''
         Creates the Tensor representation of this metadata. Should be used when sending metadata via p2p
         '''
-        t = torch.zeros(TensorMetadata.MAX_SIZE).cuda()
+        t = torch.zeros(TensorMetadata.MAX_SIZE, device = self.device)
         t[0] = dtypes.index(self.dtype)
         for i, s in enumerate(self.shape):
             t[1 + i] = s
@@ -61,7 +62,7 @@ class TensorMetadata():
         '''
         Allocates a tensor with the right shape and dtype for this metadata
         '''
-        buffer = torch.empty(self.shape, dtype=self.dtype).cuda()
+        buffer = torch.empty(self.shape, dtype=self.dtype, device = self.device)
         return buffer
 
 class PipelineBlock():
@@ -71,8 +72,8 @@ class PipelineBlock():
     def __init__(self, model, id_, placement):
         super(PipelineBlock, self).__init__()
         # Block infos
-        self.model = model.cuda()
         self.rank = placement[id_] # global rank
+        self.model = model.cuda() if torch.cuda.is_available() else model
         self.id = id_ # rank in the model.
 
         # Queues of tensors to process
@@ -223,6 +224,9 @@ class Pipeline():
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
             model = partition_model(model, placement)
+        else:
+            placement = placement * (len(model) // len(placement)) # repeat as many times as needed
+            placement = placement[:len(model)] # truncate
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
@@ -264,7 +268,7 @@ def create_pipeline(layers, placement):
     '''
     Transforms a list of layers placed on different devices to a working pipeline
     '''
-    rank = dist.get_rank()
+    rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
@@ -277,6 +281,10 @@ def partition_model(model, placement):
     Each block that is placed on this rank is moved to the corresponding GPU
     '''
     rank = dist.get_rank() if dist.is_initialized() else None
+
+    available_devices = [torch.device(device) for device in ['cpu'] + [f'cuda:{i}' for i in range(torch.cuda.device_count())]]
+    if any(torch.device(p) not in available_devices for p in placement):
+        raise RuntimeError(f'Trying to place the model on non existing or non visible devices : {placement}, but available devices are : {available_devices}')
     
     layers = []
     for module in model.children():
@@ -310,7 +318,7 @@ def partition_model(model, placement):
     if rank is None:
         for i, phase in enumerate(phases):
             for layer in phase:
-                layer.to_empty(device=torch.device(placement[i]))
+                layer.to_empty(device = torch.device(placement[i]))
     else:
         for i in range(len(placement)):
             if rank == placement[i]:
