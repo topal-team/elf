@@ -168,7 +168,7 @@ def test_block_multi(init_dist):
         assert len(block.inputs) == 0
         block.recv_forward() # Should do nothing as block has no previous
         assert len(block.inputs) == 0
-        block.inputs.append(torch.ones((2, 1), device = local_rank))
+        block.inputs.append((None, torch.ones((2, 1), device = local_rank)))
 
         assert len(block.activations) == 0
         block.forward()
@@ -199,3 +199,53 @@ def test_block_multi(init_dist):
         assert len(block.act_to_send) == 0 # no next block, nothing to send
         block.send_forward() # does nothing
         assert len(block.act_to_send) == 0
+
+@pytest.mark.multi
+def test_pipe_multi(dist_init):
+    rank, local_rank, world_size = dist_init
+
+    model = nn.Sequential(nn.Linear(3, 3, bias = False) for _ in range(world_size))
+    pipe = Pipeline(model)
+
+    inputs = torch.randn((4, 3), device = local_rank)
+    targets = torch.randn((4, 3), device = local_rank)
+    y, loss = pipe(inputs, targets, loss = nn.functional.mse_loss)
+    dist.broadcast(y, src = world_size - 1)
+    dist.broadcast(loss, src = world_size - 1)
+
+    # Everything should be cleared after a full pass
+    for b in pipe.blocks:
+        assert len(b.inputs) == 0
+        assert len(b.inputs_to_keep) == 0
+        assert len(b.activations) == 0
+        assert len(b.act_to_send) == 0
+        assert len(b.grads) == 0
+    
+    all_weights = [torch.empty_like(model.weight.data) for _ in range(world_size)]
+    dist.gather(model.weight, all_weights, dst = 0)
+    for w, l in zip(all_weights, model.children()):
+        l.weight.data = w.data
+
+    y_true = model(inputs)
+    assert torch.allclose(y, y_true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+    loss_true = nn.functional.mse_loss(y_true, targets)
+    assert torch.allclose(loss_true, loss)
+
+    loss_true.backward()
+
+    for w, l in zip(all_weights, model.children()):
+        assert torch.allclose(w.grad.data, l.weight.grad.data)
+    
