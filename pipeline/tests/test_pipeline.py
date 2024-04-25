@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 from ..pipeline import *
+import pytest
 
+@pytest.mark.single
 def test_metadata():
     # Test creation from class method from_tensor
     received = torch.tensor([dtypes.index(torch.float32), 2, 3, 4])
@@ -46,6 +48,7 @@ class FakeWorker():
     def is_completed(self):
         return self.done
 
+@pytest.mark.single
 def test_block():
     '''
     TODO: Tests for communications (send/recv) ; probably need multiple processes
@@ -102,6 +105,7 @@ def test_block():
     assert len(block.inputs_to_keep) == 0
     assert len(block.grads_to_send) == 1
 
+@pytest.mark.single
 def test_pipeline():
     '''
     TODO: Test full forward / backward pass ; probably needs multiple processes :)
