@@ -1,7 +1,22 @@
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from ..pipeline import *
 import pytest
+
+@pytest.fixture
+def init_dist():
+    assert "RANK" in os.environ, "Cannot run multi-process tests without torchrun !"
+
+    rank = int(os.getenv("RANK"))
+    local_rank = int(os.getenv("LOCAL_RANK"))
+    world_size = int(os.getenv("WORLD_SIZE"))
+    torch.cuda.set_device(local_rank)
+
+    dist.init_process_group(backend = "nccl")
+    yield rank, local_rank, world_size
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 @pytest.mark.single
 def test_metadata():
@@ -135,7 +150,52 @@ def test_pipeline():
     assert len(pipe.blocks) == 0 # not the right rank
     assert pipe.placement == list(range(len(model))) # default value
 
+@pytest.mark.multi
+def test_block_multi(init_dist):
+    rank, local_rank, world_size = init_dist
 
+    placement = [0, 1]
+    model = nn.Linear(rank + 1, rank + 2, bias = False)
+    block = PipelineBlock(model, rank, placement)
 
+    assert block.rank == rank
+    if rank == 0:
+        assert block.previous is None
+        assert block.next == 1
 
-    
+        block.model.weight = nn.Parameter(torch.tensor([[2.0], [2.0]], device = local_rank))
+
+        assert len(block.inputs) == 0
+        block.recv_forward() # Should do nothing as block has no previous
+        assert len(block.inputs) == 0
+        block.inputs.append(torch.ones((2, 1), device = local_rank))
+
+        assert len(block.activations) == 0
+        block.forward()
+        assert len(block.activations) == 1
+        assert len(block.act_to_send) == 1
+        assert len(block.inputs) == 0
+        assert len(block.inputs_to_keep) == 1
+        assert torch.allclose(block.activations[0], torch.full((2, 2), 2.0))
+
+        block.send_forward() # Should be matched by a recv_forward
+        assert len(block.act_to_send) == 0
+
+    elif rank == 1:
+        assert block.previous == 0
+        assert block.next is None
+
+        block.model.weight = nn.Parameter(torch.tensor([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]], device = local_rank))
+
+        assert len(block.inputs) == 0
+        block.recv_forward()
+        assert len(block.inputs) == 1
+        assert len(block.inputs_to_keep) == 1
+
+        assert len(block.activations) == 0
+        y = block.forward()
+        assert torch.allclose(y, torch.full((2, 3), 6.0, device = local_rank))
+
+        assert len(block.act_to_send) == 0 # no next block, nothing to send
+        block.send_forward() # does nothing
+        assert len(block.act_to_send) == 0
