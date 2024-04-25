@@ -1,7 +1,8 @@
 import os
-import torch
 from ..schedule import *
+import pytest
 
+@pytest.mark.single
 def test_afab():
     placement = [0, 1]
     n_micro_batches = 2
@@ -26,6 +27,7 @@ def test_afab():
         (1, Operations.RECV_BACKWARD), (1, Operations.BACKWARD), (1, Operations.SEND_BACKWARD),
     ]
 
+@pytest.mark.single
 def test_1f1b():
     placement = [0, 1]
     n_micro_batches = 4

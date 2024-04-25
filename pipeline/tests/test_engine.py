@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 from ..pipeline import PipelineBlock
 from ..engine import *
+import pytest
 
+@pytest.mark.single
 def test_compute_loss():
     model = nn.Linear(3, 2)
 
