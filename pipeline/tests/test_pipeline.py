@@ -15,6 +15,7 @@ def init_dist():
 
     dist.init_process_group(backend = "nccl")
     yield rank, local_rank, world_size
+    dist.barrier()
     if dist.is_initialized():
         dist.destroy_process_group()
 
@@ -167,12 +168,64 @@ def test_block_multi(init_dist):
         assert len(block.act_to_send) == 0
 
 @pytest.mark.multi
-def test_pipe_multi(init_dist):
-    '''
-    TODO: test more partitions/placements
-    '''
+def test_pipe_creation_multi(init_dist):
     rank, local_rank, world_size = init_dist
-    torch.manual_seed(47)
+
+    if world_size < 4:
+        dist.barrier()
+        if dist.is_initialized(): dist.destroy_process_group()
+        pytest.skip(f'This test needs 4 gpus (and 4 processes) to run.')
+
+    model = nn.Sequential(
+        nn.Linear(1, 1), nn.Linear(1, 1), nn.Linear(1, 1), nn.Linear(1, 1)
+    )
+
+    # Default
+    pipe = Pipeline(model)
+    assert len(pipe.blocks) == 1 # On every device, there is 1 block
+    assert pipe.blocks[0].id == pipe.blocks[0].rank == rank
+
+    # Handmade placement
+    pipe = Pipeline(model, placement = [0, 1, 0, 1])
+    if rank == 0:
+        assert len(pipe.blocks) == 2
+        b1, b2 = pipe.blocks[0], pipe.blocks[1]
+        assert b1.rank == b2.rank == rank
+        assert b1.id == 0
+        assert b1.previous is None
+        assert b1.next == 1
+
+        assert b2.id == 2
+        assert b1.previous == 1
+        assert b1.next == 1
+    if rank == 1:
+        assert len(pipe.blocks) == 2
+        b1, b2 = pipe.blocks[0], pipe.blocks[1]
+        assert b1.rank == b2.rank == rank
+        assert b1.id == 1
+        assert b1.previous == 0
+        assert b1.next == 0
+
+        assert b2.id == 3
+        assert b1.previous == 0
+        assert b1.next is None
+    else:
+        assert len(pipe.blocks) == 0
+
+    # Handmade partition
+    model = nn.Linear(1, 1)
+    pipe = Pipeline([model], partition = None)
+    assert len(pipe.blocks) == 1
+    assert pipe.blocks[0].id == pipe.blocks[0].rank == rank
+
+@pytest.mark.multi
+def test_pipe_correctness_multi(init_dist):
+    rank, local_rank, world_size = init_dist
+
+    if world_size != 2:
+        dist.barrier()
+        if dist.is_initialized(): dist.destroy_process_group()
+        pytest.skip(f'This test needs exactly 2 gpus (and processes) to run.')
 
     model = nn.Linear(3, 3, bias = False).cuda()
     model.weight.data = torch.full((3, 3), rank, device = local_rank, dtype = torch.float32)
