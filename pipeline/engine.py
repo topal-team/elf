@@ -40,6 +40,7 @@ class Engine():
         splits = iter(batch.split(split_size, dim=0))
 
         result = []
+        losses = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
         curr = 0
@@ -68,7 +69,8 @@ class Engine():
                     case Operations.RECV_BACKWARD:
                         if block.next is None:
                             nexti = curr + split_size[i]
-                            compute_loss(block, result[i], target[curr:nexti], loss_fn)
+                            loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
+                            losses.append(loss)
                             i += 1
                             curr = nexti
                         block.recv_backward()
@@ -88,7 +90,7 @@ class Engine():
                             outfile.write(f'{self.rank}:{t}:{id_},{op}\n')
 
                 dist.barrier()
-        return result
+        return result, losses
 
 
 def compute_loss(block, output, target, loss_fn):
@@ -100,6 +102,7 @@ def compute_loss(block, output, target, loss_fn):
     loss = loss_fn(output, target, reduction="sum")
     loss.backward()
     block.grads.append((None, output.grad.data))
+    return loss
 
 def visualize(path):
     '''

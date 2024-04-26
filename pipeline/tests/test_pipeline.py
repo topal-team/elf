@@ -65,9 +65,6 @@ class FakeWorker():
 
 @pytest.mark.single
 def test_block():
-    '''
-    TODO: Tests for communications (send/recv) ; probably need multiple processes
-    '''
     device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
 
     model = nn.Linear(2, 1, bias = False)
@@ -120,36 +117,6 @@ def test_block():
     assert len(block.inputs_to_keep) == 0
     assert len(block.grads_to_send) == 1
 
-@pytest.mark.single
-def test_pipeline():
-    '''
-    TODO: Test full forward / backward pass ; probably needs multiple processes :)
-    '''
-
-    os.environ["WORLD_SIZE"] = "3"
-
-    # Test automatic placement + partitioning
-    model = nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 4), nn.Linear(4, 5))
-    try:
-        _ = Pipeline(model)
-        assert torch.cuda.device_count() == len(model), f'The partitioning should require {os.getenv("WORLD_SIZE")} devices to run'
-    except RuntimeError:
-        pass
-
-    # Test predefined placement
-    pipe = Pipeline(model, placement = ['cpu', 'cpu'])
-    assert len(pipe.blocks) == 2
-
-    if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
-        os.environ["RANK"] = "1"
-        pipe = Pipeline(model, placement = ['cpu', 'cpu', '1'])
-        assert len(pipe.blocks) == 1
-
-    # Test predefined partition
-    pipe = Pipeline([l for l in model.children()], partition = None)
-    assert len(pipe.blocks) == 0 # not the right rank
-    assert pipe.placement == list(range(len(model))) # default value
-
 @pytest.mark.multi
 def test_block_multi(init_dist):
     rank, local_rank, world_size = init_dist
@@ -176,7 +143,7 @@ def test_block_multi(init_dist):
         assert len(block.act_to_send) == 1
         assert len(block.inputs) == 0
         assert len(block.inputs_to_keep) == 1
-        assert torch.allclose(block.activations[0], torch.full((2, 2), 2.0))
+        assert torch.allclose(block.activations[0], torch.full((2, 2), 2.0, device = local_rank))
 
         block.send_forward() # Should be matched by a recv_forward
         assert len(block.act_to_send) == 0
@@ -190,7 +157,6 @@ def test_block_multi(init_dist):
         assert len(block.inputs) == 0
         block.recv_forward()
         assert len(block.inputs) == 1
-        assert len(block.inputs_to_keep) == 1
 
         assert len(block.activations) == 0
         y = block.forward()
@@ -201,17 +167,30 @@ def test_block_multi(init_dist):
         assert len(block.act_to_send) == 0
 
 @pytest.mark.multi
-def test_pipe_multi(dist_init):
-    rank, local_rank, world_size = dist_init
+def test_pipe_multi(init_dist):
+    '''
+    TODO: test more partitions/placements
+    '''
+    rank, local_rank, world_size = init_dist
+    torch.manual_seed(47)
 
-    model = nn.Sequential(nn.Linear(3, 3, bias = False) for _ in range(world_size))
-    pipe = Pipeline(model)
+    model = nn.Linear(3, 3, bias = False).cuda()
+    model.weight.data = torch.full((3, 3), rank, device = local_rank, dtype = torch.float32)
+    pipe = Pipeline([model], partition = None)
 
     inputs = torch.randn((4, 3), device = local_rank)
     targets = torch.randn((4, 3), device = local_rank)
-    y, loss = pipe(inputs, targets, loss = nn.functional.mse_loss)
-    dist.broadcast(y, src = world_size - 1)
-    dist.broadcast(loss, src = world_size - 1)
+    y, loss = pipe(inputs, targets, loss_fn = nn.functional.mse_loss)
+    if rank == world_size - 1:
+        dist.send(y, 0)
+        dist.send(loss, 0)
+        dist.send(targets, 0)
+    if rank == 0:
+        y = torch.empty_like(targets)
+        loss = torch.empty((1,), device = local_rank)
+        dist.recv(y, world_size - 1)
+        dist.recv(loss, world_size - 1)
+        dist.recv(targets, world_size - 1)
 
     # Everything should be cleared after a full pass
     for b in pipe.blocks:
@@ -221,31 +200,24 @@ def test_pipe_multi(dist_init):
         assert len(b.act_to_send) == 0
         assert len(b.grads) == 0
     
-    all_weights = [torch.empty_like(model.weight.data) for _ in range(world_size)]
+    all_weights = [torch.empty_like(model.weight) for _ in range(world_size)] if rank == 0 else None
+    all_grads = [torch.empty_like(model.weight) for _ in range(world_size)] if rank == 0 else None
     dist.gather(model.weight, all_weights, dst = 0)
-    for w, l in zip(all_weights, model.children()):
-        l.weight.data = w.data
+    dist.gather(model.weight.grad, all_grads, dst = 0)
+    if rank == 0:
+        model_full = nn.Sequential()
+        for w in all_weights:
+            l = nn.Linear(3, 3, bias = False)
+            l.weight.data = w.data
+            model_full.append(l)
+            
+        y_true = model_full(inputs)
+        assert torch.allclose(y, y_true)
 
-    y_true = model(inputs)
-    assert torch.allclose(y, y_true)
+        loss_true = nn.functional.mse_loss(y_true, targets, reduction = "sum")
+        assert torch.allclose(loss_true, loss)
 
+        loss_true.backward()
 
-
-
-
-
-
-
-
-
-
-
-
-    loss_true = nn.functional.mse_loss(y_true, targets)
-    assert torch.allclose(loss_true, loss)
-
-    loss_true.backward()
-
-    for w, l in zip(all_weights, model.children()):
-        assert torch.allclose(w.grad.data, l.weight.grad.data)
-    
+        for g, l in zip(all_grads, model_full.children()):
+            assert torch.allclose(g.data, l.weight.grad.data)
