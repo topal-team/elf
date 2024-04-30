@@ -150,11 +150,10 @@ def check_schedule(schedule):
 if __name__ == "__main__":
     import torch
     from engine import Operations
-    placement = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
-    for n in range(5):
-        schedule = generate_1f1b_schedule(placement, 2**n)
-        print(f'[Rank {os.getenv("RANK")}] - {2**n} micro batches : {check_schedule(schedule)} \n')
-    # print(f'Rank {os.getenv("RANK")} - {schedule}')
+    placement = torch.tensor([0, 1, 1, 0])
+    schedule = generate_afab_schedule(placement, 2)
+    print(f'[Rank {os.getenv("RANK")}] - {2} micro batches : {check_schedule(schedule)} \n')
+    print(f'Rank {os.getenv("RANK")} - {schedule}')
     
 else:
     from .engine import Operations
