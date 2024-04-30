@@ -4,7 +4,29 @@ import math
 import logging
 logger = logging.getLogger("schedule")
 
-def generate_afab_schedule(placement, n_micro_batches, *options):
+def reorder_operations(operations):
+    # Define the target and source operations
+    target_ops = {Operations.FORWARD, Operations.BACKWARD}
+    source_ops = {Operations.RECV_FORWARD, Operations.RECV_BACKWARD}
+    
+    # We need to iterate while keeping track of indexes because we'll modify the list
+    i = 0
+    while i < len(operations):
+        _, op, *_ = operations[i]
+        if op in target_ops:
+            # Look for the next source operation
+            for j in range(i + 1, len(operations)):
+                _, op_next, *_ = operations[j]
+                if op_next in source_ops:
+                    # Move found operation to just before the current one
+                    operations.insert(i, operations.pop(j))
+                    i += 1
+                    break
+        i += 1
+    return operations
+
+
+def generate_afab_schedule(placement, n_micro_batches, *options, prefetching = False):
     '''
     All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
     Supports any model placement
@@ -29,10 +51,10 @@ def generate_afab_schedule(placement, n_micro_batches, *options):
             schedule.append((id_, Operations.SEND_BACKWARD, *options))
     
     assert len(schedule) == n_micro_batches * len(ids) * 2 * 3
-
+    if prefetching: return reorder_operations(schedule)
     return schedule
 
-def generate_1f1b_schedule(placement, n_micro_batches):
+def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False):
     '''
     One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
     '''
@@ -100,7 +122,7 @@ def generate_1f1b_schedule(placement, n_micro_batches):
                 schedule[i+1] = schedule[i]
                 schedule[i] = tmp
          
-
+    if prefetching: return reorder_operations(schedule)
     return schedule
 
 def generate_custom_1f1b_schedule(placement, n_micro_batches):

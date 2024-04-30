@@ -111,8 +111,8 @@ class PipelineBlock():
         if options and 'remat' in options.keys():
             with torch.no_grad(): y = self.model(x)        
         else:
-           y = self.model(x)
-           self.activations.append(y)
+            y = self.model(x)
+            self.activations.append(y)
            
         self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
@@ -202,7 +202,7 @@ class PipelineBlock():
         if src is None: return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-
+        
         work = dist.irecv(buffer, src)
         logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {src}')
         work.wait()
@@ -228,6 +228,8 @@ class Pipeline():
         partition: if your model is already partitioned, set to None. Otherwise leave the default, which will try to create balanced blocks according to their number of parameters
         schedule: pipeline algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b")
         '''
+        if not dist.is_initialized() or "RANK" not in os.environ.keys():
+            logger.warning(f'Trying to create a pipeline but no multi-gpu distributed setup has been found.')
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
@@ -265,15 +267,19 @@ class Pipeline():
             
         if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
             self.schedule = self.scheduler(self.placement, n_micro_batches)
+            self.schedule = reorder_operations(self.schedule)
 
-        result = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
-        if result: return torch.cat(result, dim=0)
+        result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
+        if result:
+            return torch.cat(result, dim=0), torch.tensor(losses, device = self.placement[-1]).sum()
+        else: return None, None
 
 def create_pipeline(layers, placement):
     '''
     Transforms a list of layers placed on different devices to a working pipeline
     '''
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
+    local_rank = int(os.getenv("LOCAL_RANK")) if "LOCAL_RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
@@ -288,10 +294,12 @@ def create_pipeline(layers, placement):
             blocks.pop(i + 1)
 
     # Init comms
-    t = torch.randn((1,), device = int(os.getenv("LOCAL_RANK")))
+    t = torch.randn((1,), device = local_rank)
     for b in blocks:
         if b.previous is not None: dist.irecv(t, b.previous).wait()
         if b.next is not None: dist.isend(t, b.next).wait()
+
+    dist.broadcast(t, src = placement[0]) # See doc on batch_isend_irecv, we need to call a collective before anything
         
     return blocks
 
@@ -303,6 +311,7 @@ def partition_model(model, placement):
     rank = dist.get_rank() if dist.is_initialized() else None
 
     available_devices = [torch.device(device) for device in ['cpu'] + [f'cuda:{i}' for i in range(torch.cuda.device_count())]]
+
     if any(torch.device(p) not in available_devices for p in placement):
         raise RuntimeError(f'Trying to place the model on non existing or non visible devices : {placement}, but available devices are : {available_devices}')
     
@@ -326,7 +335,7 @@ def partition_model(model, placement):
     for layer in layers:
         phases[-1].append(layer)
         accum_numel += numel(layer)
-        if accum_numel > delim_numel:
+        if accum_numel >= delim_numel:
             delim_numel += phase_numel
             phases.append([])
 

@@ -114,7 +114,7 @@ if __name__ == "__main__":
     torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl")
 
-    # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
+    # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on (global) rank placement[i]
     # placement = torch.randint(0, world_size, (4,)).cuda()
 
     # Load your model here (each process should load the right layers depending on placement)
@@ -122,7 +122,10 @@ if __name__ == "__main__":
     placements = [
         [0, 1, 2, 3],
         [0, 1, 2, 3, 0, 1, 2, 3],
-        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+        [0, 1, 1, 0], # Hanayo style
+        [0, 1, 2, 3, 3, 2, 1, 0],
+        [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
     ]
 
     batch_sizes = [4, 8, 16, 32]
@@ -133,7 +136,7 @@ if __name__ == "__main__":
             if b < len(p): continue
             if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
             layers = load_parts_model(p, global_rank)
-            test_pipeline(layers, p, "1f1b", b)
+            test_pipeline(layers, p, "afab", b)
             dist.barrier()
             if global_rank == 0: logger.info('\n')
             
