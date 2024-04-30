@@ -232,9 +232,6 @@ class Pipeline():
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
             model = partition_model(model, placement)
-        else:
-            placement = placement * (len(model) // len(placement)) # repeat as many times as needed
-            placement = placement[:len(model)] # truncate
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
@@ -289,7 +286,13 @@ def create_pipeline(layers, placement):
             merged_block.next = blocks[i + 1].next
             blocks[i] = merged_block
             blocks.pop(i + 1)
-    
+
+    # Init comms
+    t = torch.randn((1,), device = int(os.getenv("LOCAL_RANK")))
+    for b in blocks:
+        if b.previous is not None: dist.irecv(t, b.previous).wait()
+        if b.next is not None: dist.isend(t, b.next).wait()
+        
     return blocks
 
 def partition_model(model, placement):

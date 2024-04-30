@@ -22,6 +22,16 @@ class Operations(Enum):
     def __int__(self) -> int:
         return self.value
 
+def op_to_str(op):
+    '''
+    Pretty print for dist.P2POp
+    '''
+    match op.op:
+        case dist.isend:
+            return f'Send to {op.peer}'
+        case dist.irecv:
+            return f'Receive from {op.peer}'
+
 class Engine():
     '''
     Schedule is a list of tuples (block id, operation)
@@ -34,8 +44,12 @@ class Engine():
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
     def _run_comms(self, comms):
+        comms = [c for c in comms if c is not None]
+        if len(comms) == 0: return
+        logger.debug(f'[Rank {self.rank}] - Running {len(comms)} communications : {[op_to_str(op) for op in comms]}')
         works = dist.batch_isend_irecv(comms)
-        for w in works:
+        for i,w in enumerate(works):
+            logger.debug(f'[Rank {self.rank}] - Waiting for work n°{i}')
             w.wait()
 
     def train_step(self, batch, target, loss_fn, schedule, split_size = 1, viz_file = None):
@@ -92,6 +106,8 @@ class Engine():
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         if viz_file is not None: stats.append((time.time(), self.rank, ".END"))
+        self._run_comms(comms) # flush comms
+        comms.clear()
         dist.barrier()
         if viz_file is not None:
             for r in range(int(os.environ["WORLD_SIZE"])):
