@@ -123,7 +123,7 @@ def test_pipeline():
 
     # Test predefined placement
     pipe = Pipeline(model, placement = ['cpu', 'cpu'])
-    assert len(pipe.blocks) == 2
+    assert len(pipe.blocks) == 1 # Blocks should be merged together
 
     if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
         os.environ["RANK"] = "1"
