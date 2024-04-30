@@ -142,71 +142,79 @@ class PipelineBlock():
         if x.requires_grad:
             self.grads_to_send.append(x.grad.data)
             
-    def send_forward(self):
+    def send_forward(self, options = {}):
         '''
         Send one activation to the next layer in the model
         '''
-        if self.next is None or len(self.act_to_send) == 0: return
+        dst = options["dst"] if options and "dst" in options.keys() else self.next
+        if dst is None or len(self.act_to_send) == 0: return
 
         activations = self.act_to_send.popleft()
 
         metadata = TensorMetadata(activations).to_tensor()
-        dist.isend(metadata, self.next)
+        dist.isend(metadata, dst)
 
-        logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {self.next}')
-        dist.isend(activations, self.next)
+        logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
+        return dist.P2POp(dist.isend, activations, dst)
+        # dist.isend(activations, dst)
 
-    def send_backward(self):
+    def send_backward(self, options = {}):
         '''
         Send one gradient to the previous layer in the model
         '''
-        if self.previous is None or len(self.grads_to_send) == 0: return
+        dst = options["dst"] if options and "dst" in options.keys() else self.previous
+        if dst is None or len(self.grads_to_send) == 0: return
 
         grads = self.grads_to_send.popleft()
 
         metadata = TensorMetadata(grads).to_tensor()
-        dist.isend(metadata, self.previous)
+        dist.isend(metadata, dst)
 
-        logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {self.previous}')
-        dist.isend(grads, self.previous)
+        logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
+        return dist.P2POp(dist.isend, grads, dst)
+        # dist.isend(grads, dst)
 
-    def recv_forward(self):
+    def recv_forward(self, options = {}):
         '''
         Receive and store one activation to forward
         '''
-        if self.previous is None: return
+        src = options["src"] if options and "src" in options.keys() else self.previous
+        if src is None: return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        work = dist.irecv(buffer, self.previous)
-        logger.debug(f'{self} - Waiting for metadata of activations from rank {self.previous}')
+        work = dist.irecv(buffer, src)
+        logger.debug(f'{self} - Waiting for metadata of activations from rank {src}')
         work.wait()
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {self.previous}')
-        work = dist.irecv(buffer, self.previous)
+        logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
+        # work = dist.irecv(buffer, src)
 
-        self.inputs.append((work, buffer)) # .detach() ?
+        self.inputs.append((None, buffer)) # .detach() ?
+        return dist.P2POp(dist.irecv, buffer, src)
 
-    def recv_backward(self):
+    def recv_backward(self, options = {}):
         '''
         Receive and store one gradient to backward
         '''
-        if self.next is None: return
+        src = options["src"] if options and "src" in options.keys() else self.next
+        if src is None: return
 
         buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
 
-        work = dist.irecv(buffer, self.next)
-        logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {self.next}')
+        work = dist.irecv(buffer, src)
+        logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {src}')
         work.wait()
 
         metadata = TensorMetadata.from_tensor(buffer)
         buffer = metadata.get_buffer()
 
-        logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {self.next}')
-        work = dist.irecv(buffer, self.next)
+        logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
+        # work = dist.irecv(buffer, src)
 
-        self.grads.append((work, buffer))
+        self.grads.append((None, buffer))
+        return dist.P2POp(dist.irecv, buffer, src)
 
 class Pipeline():
     '''
@@ -272,6 +280,15 @@ def create_pipeline(layers, placement):
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
+
+    # Merge consecutive blocks that are on the same device (useful for hanayo-like schedules)
+    for i in range(len(blocks) - 1):
+        if blocks[i + 1].id == blocks[i].id + 1:
+            merged_block = PipelineBlock(nn.Sequential(blocks[i].model, blocks[i + 1].model), blocks[i].id, placement)
+            merged_block.previous = blocks[i].previous
+            merged_block.next = blocks[i + 1].next
+            blocks[i] = merged_block
+            blocks.pop(i + 1)
     
     return blocks
 
