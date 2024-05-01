@@ -52,7 +52,7 @@ class Engine():
             logger.debug(f'[Rank {self.rank}] - Waiting for work n°{i}')
             w.wait()
 
-    def train_step(self, batch, target, loss_fn, schedule, split_size = 1, viz_file = None):
+    def train_step(self, batch, target, loss_fn, schedule, split_size, viz_file = None):
         '''
         Perform forward + backward pass on a batch of data
         '''        
@@ -68,7 +68,7 @@ class Engine():
         
         comms = []
 
-        for (id_, op, *options) in schedule:
+        for (id_, op, mb, *options) in schedule:
             if str(id_) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing {op} on block {block}')
@@ -92,7 +92,7 @@ class Engine():
                     case Operations.RECV_FORWARD:
                         if block.previous is None:
                             block.inputs.append((None, next(splits)))
-                        w = block.recv_forward(*options)
+                        w = block.recv_forward(split_size[mb], *options)
                         comms.append(w)
                     case Operations.RECV_BACKWARD:
                         if block.next is None:
@@ -101,7 +101,7 @@ class Engine():
                             losses.append(loss)
                             i += 1
                             curr = nexti
-                        w = block.recv_backward(*options)
+                        w = block.recv_backward(split_size[mb], *options)
                         comms.append(w)
                     case _:
                         raise Exception(f'Unknown operation : {op}')

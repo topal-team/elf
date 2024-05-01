@@ -58,11 +58,11 @@ class TensorMetadata():
             t[1 + i] = s
         return t
     
-    def get_buffer(self):
+    def get_buffer(self, batch_size):
         '''
         Allocates a tensor with the right shape and dtype for this metadata
         '''
-        buffer = torch.empty(self.shape, dtype=self.dtype, device = self.device)
+        buffer = torch.empty([batch_size, *self.shape], dtype=self.dtype, device = self.device)
         return buffer
 
 class PipelineBlock():
@@ -75,6 +75,7 @@ class PipelineBlock():
         self.rank = placement[id_] # global rank
         self.model = model.cuda() if torch.cuda.is_available() else model
         self.id = id_ # rank in the model.
+        self.device = torch.cuda.current_device()
 
         # Queues of tensors to process
         self.inputs = deque() # Waiting for forward
@@ -87,6 +88,9 @@ class PipelineBlock():
         # Ranks where the previous/next blocks in the model are placed
         self.previous = None if self.id == 0 else placement[self.id - 1]
         self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
+
+        self.metadata = None
+        self.out_metadata = None
 
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
@@ -151,12 +155,12 @@ class PipelineBlock():
 
         activations = self.act_to_send.popleft()
 
-        metadata = TensorMetadata(activations).to_tensor()
-        dist.isend(metadata, dst)
+        # metadata = TensorMetadata(activations).to_tensor()
+        # dist.isend(metadata, dst)
 
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-        return dist.P2POp(dist.isend, activations, dst)
-        # dist.isend(activations, dst)
+        # return dist.P2POp(dist.isend, activations, dst)
+        dist.isend(activations, dst)
 
     def send_backward(self, options = {}):
         '''
@@ -167,54 +171,69 @@ class PipelineBlock():
 
         grads = self.grads_to_send.popleft()
 
-        metadata = TensorMetadata(grads).to_tensor()
-        dist.isend(metadata, dst)
+        # metadata = TensorMetadata(grads).to_tensor()
+        # dist.isend(metadata, dst)
 
         logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
         return dist.P2POp(dist.isend, grads, dst)
         # dist.isend(grads, dst)
 
-    def recv_forward(self, options = {}):
+    def recv_forward(self, mb_size, options = {}):
         '''
         Receive and store one activation to forward
         '''
         src = options["src"] if options and "src" in options.keys() else self.previous
         if src is None: return
 
-        buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        work = dist.irecv(buffer, src)
-        logger.debug(f'{self} - Waiting for metadata of activations from rank {src}')
-        work.wait()
-        metadata = TensorMetadata.from_tensor(buffer)
-        buffer = metadata.get_buffer()
+        # buffer = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
+        # work = dist.irecv(buffer, src)
+        # logger.debug(f'{self} - Waiting for metadata of activations from rank {src}')
+        # work.wait()
+        # metadata = TensorMetadata.from_tensor(buffer)
+        buffer = self.metadata.get_buffer(mb_size)
 
         logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
-        # work = dist.irecv(buffer, src)
 
         self.inputs.append((None, buffer)) # .detach() ?
-        return dist.P2POp(dist.irecv, buffer, src)
+        # return dist.P2POp(dist.irecv, buffer, src)
+        work = dist.irecv(buffer, src)
 
-    def recv_backward(self, options = {}):
+    def recv_backward(self, mb_size, options = {}):
         '''
         Receive and store one gradient to backward
         '''
         src = options["src"] if options and "src" in options.keys() else self.next
         if src is None: return
 
-        buffer = torch.empty(TensorMetadata.MAX_SIZE).cuda()
-        
-        work = dist.irecv(buffer, src)
-        logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {src}')
-        work.wait()
+        # buffer = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
 
-        metadata = TensorMetadata.from_tensor(buffer)
-        buffer = metadata.get_buffer()
+        # work = dist.irecv(buffer, src)
+        # logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {src}')
+        # work.wait()
+
+
+        # metadata = TensorMetadata.from_tensor(buffer)
+        buffer = self.out_metadata.get_buffer(mb_size)
 
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
         # work = dist.irecv(buffer, src)
 
         self.grads.append((None, buffer))
         return dist.P2POp(dist.irecv, buffer, src)
+    
+    def register_metadata(self):
+        if self.previous is not None:
+            metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
+            dist.recv(metadata, src = self.previous)
+
+        self.metadata = metadata
+        dummy = metadata.get_buffer()
+        y = self.model(dummy)
+
+        if self.next is not None:
+            out_metadata = TensorMetadata(y)
+            self.out_metadata = out_metadata
+            dist.send(out_metadata)
 
 class Pipeline():
     '''
@@ -268,10 +287,17 @@ class Pipeline():
         if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
             self.schedule = self.scheduler(self.placement, n_micro_batches)
             self.schedule = reorder_operations(self.schedule)
+            
+        # Full forward pass to register metadata used to allocate tensors later
+        if self.blocks[0].previous is None:
+            self.blocks[0].metadata = TensorMetadata(batch[0])
+        if self.blocks[-1].next is None:
+            self.blocks[-1].out_metadata = TensorMetadata(target[0])
+        for b in self.blocks:
+            b.register_metadata()
 
         result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
-        if result:
-            return torch.cat(result, dim=0), torch.tensor(losses, device = self.placement[-1]).sum()
+        if result: return torch.cat(result, dim=0)
         else: return None, None
 
 def create_pipeline(layers, placement):

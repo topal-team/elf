@@ -129,7 +129,8 @@ def test_pipeline(init_dist):
 
     # Test predefined placement
     pipe = Pipeline(model, placement = ['cpu', 'cpu'])
-    assert len(pipe.blocks) == 1
+
+    assert len(pipe.blocks) == 1 # Blocks should be merged together
 
     pipe = Pipeline(model, placement = [0, 1, 2])
     if rank == 1:
