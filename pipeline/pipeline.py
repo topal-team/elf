@@ -7,7 +7,6 @@ from .engine import Engine
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
-logger.setLevel(100)
 
 dtypes = [
     torch.float16,
