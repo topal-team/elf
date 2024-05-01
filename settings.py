@@ -1,5 +1,5 @@
 import torch
-from models.GPT import GPT, GPTXLConfig as GPTConf
+from models.GPT import GPT, GPTXXLConfig as GPTConf
 from models.resnet import ResNet, Bottleneck
 
 vocab_size = 3072

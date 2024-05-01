@@ -27,11 +27,11 @@ if __name__ == "__main__":
     pipe = Pipeline(model, placement = [0, 1, 2, 3], schedule = "afab")
     # Warmup
     for _ in range(5):
-        pipe(inputs.cuda(), torch.empty(0), lambda x,y,**_: x.sum(), profile = False)
+        pipe(inputs.cuda(), torch.empty(0), lambda x,y,**_: x.sum(), split_size=2, profile = None)
     
     torch.cuda.cudart().cudaProfilerStart()
 
-    pipe(inputs.cuda(), torch.empty(0), lambda x,y,**_: x.sum(), profile = True)
+    pipe(inputs.cuda(), torch.empty(0), lambda x,y,**_: x.sum(), split_size=2, profile = None)
 
     torch.cuda.cudart().cudaProfilerStop()
 
