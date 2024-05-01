@@ -4,6 +4,27 @@ import math
 import logging
 logger = logging.getLogger("schedule")
 
+def reorder_operations(operations):                       
+    # Define the target and source operations             
+    target_ops = {Operations.FORWARD, Operations.BACKWARD}
+    source_ops = {Operations.RECV_FORWARD, Operations.RECV_BACKWARD}                                                                                           
+                                                          
+    # We need to iterate while keeping track of indexes because we'll modify the list                                                                          
+    i = 0                                                 
+    while i < len(operations):                            
+        _, op, *_ = operations[i]                         
+        if op in target_ops:                              
+            # Look for the next source operation          
+            for j in range(i + 1, len(operations)):       
+                _, op_next, *_ = operations[j]            
+                if op_next in source_ops:                 
+                    # Move found operation to just before the current one                                                                                      
+                    operations.insert(i, operations.pop(j))            
+                    i += 1                                
+                    break                                 
+        i+=1                                            
+    return operations
+
 def generate_afab_schedule(placement, n_micro_batches, *options):
     '''
     All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
@@ -150,9 +171,10 @@ def check_schedule(schedule):
 if __name__ == "__main__":
     import torch
     from engine import Operations
-    placement = torch.tensor([0, 1, 1, 0])
-    schedule = generate_afab_schedule(placement, 2)
-    print(f'[Rank {os.getenv("RANK")}] - {2} micro batches : {check_schedule(schedule)} \n')
+    placement = torch.tensor([0, 1, 2, 3])
+    schedule = generate_afab_schedule(placement, 4)
+    schedule = reorder_operations(schedule)
+    print(f'[Rank {os.getenv("RANK")}] - {4} micro batches : {check_schedule(schedule)}\n')
     print(f'Rank {os.getenv("RANK")} - {schedule}')
     
 else:
