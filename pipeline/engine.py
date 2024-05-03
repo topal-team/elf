@@ -1,26 +1,12 @@
-from enum import Enum
 import torch.distributed as dist
 import time
 import os
 import matplotlib
 import matplotlib.pyplot as plt
+from schedule import Operations
 
 import logging
 logger = logging.getLogger("engine")
-
-class Operations(Enum):
-    RECV_FORWARD = 0
-    FORWARD = 1
-    SEND_FORWARD = 2
-    RECV_BACKWARD = 3
-    BACKWARD = 4
-    SEND_BACKWARD = 5
-    
-    def __repr__(self) -> str:
-        return self.name
-    
-    def __int__(self) -> int:
-        return self.value
 
 def op_to_str(op):
     '''
