@@ -224,9 +224,6 @@ class Pipeline():
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
             model = partition_model(model, placement)
-        else:
-            placement = placement * (len(model) // len(placement)) # repeat as many times as needed
-            placement = placement[:len(model)] # truncate
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
