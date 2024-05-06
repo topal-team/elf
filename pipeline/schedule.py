@@ -79,7 +79,7 @@ def graph_from_schedule(schedule):
         for j in reversed(range(i)):
             next_op = schedule[j]
             if next_op in [Operations.FORWARD, Operations.BACKWARD] or \
-                next_op.block_id != current_op.block_id:
+                next_op.block_id != current_op.block_id: # should be rank and not block_id
                 continue
             current_op.add_dependency(next_op)
             break
@@ -116,12 +116,12 @@ def reorder_operations(operations):
     # We need to iterate while keeping track of indexes because we'll modify the list
     i = 0
     while i < len(operations):
-        _, op, *_ = operations[i]
-        if op in target_ops:
+        current_op = operations[i]
+        if current_op.op in target_ops:
             # Look for the next source operation
             for j in range(i + 1, len(operations)):
-                _, op_next, *_ = operations[j]
-                if op_next in source_ops:
+                next_op = operations[j]
+                if next_op.op in source_ops:
                     # Move found operation to just before the current one
                     operations.insert(i, operations.pop(j))
                     i += 1
@@ -230,10 +230,6 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False):
             if (i - n_micro_batches - state) % (n_devices // 2) == 0 or (i - n_micro_batches - state) % n_micro_batches == 0:
                 b_b = (b_b - 1) % stages_per_device
 
-    if cycle := find_cycles(graph_from_schedule(schedule)):
-        print("ATTENTION Y'A DES CYCLES")
-        logger.warning(f'Found potential deadlocks in the schedule !')
-        print(cycle)
     if prefetching: return reorder_operations(schedule)
     return schedule
 
@@ -284,7 +280,8 @@ def check_schedule(schedule):
 if __name__ == "__main__":
     import torch
     placement = torch.tensor([0, 1, 2, 3])
-    schedule = generate_1f1b_schedule(placement, 4)
-    # schedule = reorder_operations(schedule)
-    # print(f'[Rank {os.getenv("RANK")}] - {4} micro batches : {check_schedule(schedule)}\n')
+    schedule = generate_1f1b_schedule(placement, 16, prefetching = True)
+    if cycle := find_cycles(graph_from_schedule(schedule)):
+        logger.warning(f'Found potential deadlocks in the schedule !')
+        print(cycle)
     print(f'Rank {os.getenv("RANK")} - {schedule}')
