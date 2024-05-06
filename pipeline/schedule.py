@@ -25,7 +25,6 @@ def reorder_operations(operations):
         i += 1
     return operations
 
-
 def generate_afab_schedule(placement, n_micro_batches, *options, prefetching = False):
     '''
     All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
@@ -37,18 +36,18 @@ def generate_afab_schedule(placement, n_micro_batches, *options, prefetching = F
     ids = [i for i in range(len(placement)) if placement[i] == rank]
 
     # All forward
-    for _ in range(n_micro_batches):
+    for i in range(n_micro_batches):
         for id_ in ids:
-            schedule.append((id_, Operations.RECV_FORWARD, *options))
-            schedule.append((id_, Operations.FORWARD, *options))
-            schedule.append((id_, Operations.SEND_FORWARD, *options))
+            schedule.append((id_, Operations.RECV_FORWARD, i, *options))
+            schedule.append((id_, Operations.FORWARD, i, *options))
+            schedule.append((id_, Operations.SEND_FORWARD, i, *options))
     
     # All backward
-    for _ in range(n_micro_batches):
+    for i in range(n_micro_batches):
         for id_ in reversed(ids):
-            schedule.append((id_, Operations.RECV_BACKWARD, *options))
-            schedule.append((id_, Operations.BACKWARD, *options))
-            schedule.append((id_, Operations.SEND_BACKWARD, *options))
+            schedule.append((id_, Operations.RECV_BACKWARD, i, *options))
+            schedule.append((id_, Operations.BACKWARD, i, *options))
+            schedule.append((id_, Operations.SEND_BACKWARD, i, *options))
     
     assert len(schedule) == n_micro_batches * len(ids) * 2 * 3
     if prefetching: return reorder_operations(schedule)

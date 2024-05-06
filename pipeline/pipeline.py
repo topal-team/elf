@@ -105,16 +105,15 @@ class PipelineBlock():
         
         work, x = self.inputs.popleft()
 
-        if work is not None: work.wait() # if properly managed, work should already be completed
+        # if work is not None: work.wait() # if properly managed, work should already be completed
         
         if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
             x.requires_grad = True
-            
-        logger.debug(f'{self} - Work received. Starting actual computation.')
 
-        if options and 'remat' in options.keys():
+        if options and ('remat' in options.keys()):
             with torch.no_grad(): y = self.model(x)        
         else:
+            logger.debug(f'{self} - Forwarding {x}')
             y = self.model(x)
             self.activations.append(y)
            
@@ -150,7 +149,7 @@ class PipelineBlock():
         '''
         Send one activation to the next layer in the model
         '''
-        dst = options["dst"] if options and "dst" in options.keys() else self.next
+        dst = options["dst"] if (options and "dst" in options.keys()) else self.next
         if dst is None or len(self.act_to_send) == 0: return
 
         activations = self.act_to_send.popleft()
@@ -159,8 +158,8 @@ class PipelineBlock():
         # dist.isend(metadata, dst)
 
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-        # return dist.P2POp(dist.isend, activations, dst)
-        dist.isend(activations, dst)
+        return dist.P2POp(dist.isend, activations, dst)
+        # dist.isend(activations, dst)
 
     def send_backward(self, options = {}):
         '''
@@ -190,13 +189,13 @@ class PipelineBlock():
         # logger.debug(f'{self} - Waiting for metadata of activations from rank {src}')
         # work.wait()
         # metadata = TensorMetadata.from_tensor(buffer)
+        
         buffer = self.metadata.get_buffer(mb_size)
 
         logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
 
         self.inputs.append((None, buffer)) # .detach() ?
-        # return dist.P2POp(dist.irecv, buffer, src)
-        work = dist.irecv(buffer, src)
+        return dist.P2POp(dist.irecv, buffer, src)
 
     def recv_backward(self, mb_size, options = {}):
         '''
@@ -211,10 +210,8 @@ class PipelineBlock():
         # logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {src}')
         # work.wait()
 
-
         # metadata = TensorMetadata.from_tensor(buffer)
         buffer = self.out_metadata.get_buffer(mb_size)
-
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
         # work = dist.irecv(buffer, src)
 
@@ -225,15 +222,15 @@ class PipelineBlock():
         if self.previous is not None:
             metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
             dist.recv(metadata, src = self.previous)
-
-        self.metadata = metadata
-        dummy = metadata.get_buffer()
+            self.metadata = TensorMetadata.from_tensor(metadata)
+            
+        dummy = self.metadata.get_buffer(1)
         y = self.model(dummy)
 
         if self.next is not None:
-            out_metadata = TensorMetadata(y)
+            out_metadata = TensorMetadata(y.squeeze(0)) # do not include batch size
             self.out_metadata = out_metadata
-            dist.send(out_metadata)
+            dist.send(out_metadata.to_tensor(), dst = self.next)
 
 class Pipeline():
     '''
@@ -286,7 +283,6 @@ class Pipeline():
             
         if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
             self.schedule = self.scheduler(self.placement, n_micro_batches)
-            self.schedule = reorder_operations(self.schedule)
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
@@ -295,6 +291,7 @@ class Pipeline():
             self.blocks[-1].out_metadata = TensorMetadata(target[0])
         for b in self.blocks:
             b.register_metadata()
+            logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
         result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
         if result: return torch.cat(result, dim=0)
@@ -320,13 +317,14 @@ def create_pipeline(layers, placement):
             blocks.pop(i + 1)
 
     # Init comms
+    '''
     t = torch.randn((1,), device = local_rank)
     for b in blocks:
         if b.previous is not None: dist.irecv(t, b.previous).wait()
         if b.next is not None: dist.isend(t, b.next).wait()
-
     dist.broadcast(t, src = placement[0]) # See doc on batch_isend_irecv, we need to call a collective before anything
-        
+    '''
+    
     return blocks
 
 def partition_model(model, placement):

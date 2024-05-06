@@ -15,6 +15,9 @@ def init_dist():
     torch.cuda.set_device(local_rank)
 
     dist.init_process_group(backend = "nccl")
+    # Init comms, see batch_isend_irecv doc
+    t = torch.empty((1,), device = local_rank)
+    dist.broadcast(t, src = 0)
     yield rank, local_rank, world_size
     dist.barrier()
     if dist.is_initialized():
@@ -48,9 +51,9 @@ def test_metadata():
     # Test buffer creation
     t = torch.empty((8, 5, 2), dtype = torch.int64)
     metadata = TensorMetadata(t)
-    buffer = metadata.get_buffer()
+    buffer = metadata.get_buffer(3)
     assert buffer.dtype == torch.int64
-    assert buffer.shape == torch.Size([8, 5, 2])
+    assert buffer.shape == torch.Size([3, 8, 5, 2])
 
     return
 
@@ -126,9 +129,12 @@ def test_pipeline(init_dist):
     # Test automatic placement + partitioning
     model = nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 4), nn.Linear(4, 5))
     pipe = Pipeline(model)
+    print("helooo")
 
     # Test predefined placement
     pipe = Pipeline(model, placement = ['cpu', 'cpu'])
+    
+    print(rank, len(pipe.blocks))
 
     assert len(pipe.blocks) == 1 # Blocks should be merged together
 
@@ -138,20 +144,22 @@ def test_pipeline(init_dist):
 
     # Test predefined partition
     pipe = Pipeline([l for l in model.children()], partition = None)
-    assert len(pipe.blocks) == 0 # not the right rank
+    assert len(pipe.blocks) == len(model.children())
     assert pipe.placement == list(range(len(model))) # default value
 
 @pytest.mark.multi
 def test_block_multi(init_dist):
     rank, local_rank, world_size = init_dist
-    if rank > 2:
-        dist.barrier()
-        if dist.is_initialized(): dist.destroy_process_group()
+    
+    if rank > 1:
+        return
 
     placement = [0, 1]
     model = nn.Linear(rank + 1, rank + 2, bias = False)
     block = PipelineBlock(model, rank, placement)
-
+    block.metadata = TensorMetadata(torch.ones((rank + 1,), device = local_rank))
+    block.out_metadata = TensorMetadata(torch.ones((rank + 2,), device = local_rank))
+    
     assert block.rank == rank
     if rank == 0:
         assert block.previous is None
@@ -160,7 +168,8 @@ def test_block_multi(init_dist):
         block.model.weight = nn.Parameter(torch.tensor([[2.0], [2.0]], device = local_rank))
 
         assert len(block.inputs) == 0
-        block.recv_forward() # Should do nothing as block has no previous
+        w = block.recv_forward(1) # Should do nothing as block has no previous
+        assert w is None
         assert len(block.inputs) == 0
         block.inputs.append((None, torch.ones((2, 1), device = local_rank)))
 
@@ -170,11 +179,30 @@ def test_block_multi(init_dist):
         assert len(block.act_to_send) == 1
         assert len(block.inputs) == 0
         assert len(block.inputs_to_keep) == 1
+
         assert torch.allclose(block.activations[0], torch.full((2, 2), 2.0, device = local_rank))
 
-        block.send_forward() # Should be matched by a recv_forward
+        w = block.send_forward() # Should be matched by a recv_forward
         assert len(block.act_to_send) == 0
+        
+        works = dist.batch_isend_irecv([w])
+        for w in works: w.wait()
+        
+        w2 = block.recv_backward(1)
+        assert len(block.grads) == 1
+        
+        works = dist.batch_isend_irecv([w2])
+        for w in works: w.wait()
 
+        block.backward()
+        assert len(block.grads) == 0
+        assert len(block.activations) == 0
+        assert len(block.inputs_to_keep) == 0
+        assert len(block.grads_to_send) == 1
+
+        w = block.send_backward()
+        assert w is None
+        
     elif rank == 1:
         assert block.previous == 0
         assert block.next is None
@@ -182,16 +210,40 @@ def test_block_multi(init_dist):
         block.model.weight = nn.Parameter(torch.tensor([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]], device = local_rank))
 
         assert len(block.inputs) == 0
-        block.recv_forward()
+
+        w = block.recv_forward(1)
+        works = dist.batch_isend_irecv([w])
+
+        for w in works: w.wait()
         assert len(block.inputs) == 1
 
         assert len(block.activations) == 0
         y = block.forward()
+        assert len(block.activations) == 1
         assert torch.allclose(y, torch.full((2, 3), 6.0, device = local_rank))
 
         assert len(block.act_to_send) == 0 # no next block, nothing to send
-        block.send_forward() # does nothing
+        w = block.send_forward() # does nothing
+        assert w is None
+        assert len(block.activations) == 1
         assert len(block.act_to_send) == 0
+
+        w = block.recv_backward(1) # does nothing either
+        assert w is None
+        assert len(block.grads) == 0
+        assert len(block.activations) == 1
+
+        block.grads.append((None, torch.ones((2, 3), device = local_rank)))
+
+        block.backward()
+        assert len(block.grads) == 0
+        assert len(block.activations) == 0
+        assert len(block.inputs_to_keep) == 0
+        assert len(block.grads_to_send) == 1
+
+        w = block.send_backward()
+        assert len(block.grads_to_send) == 0
+        works = dist.batch_isend_irecv([w])
 
 @pytest.mark.multi
 def test_pipe_creation_multi(init_dist):
