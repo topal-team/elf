@@ -1,3 +1,4 @@
+import torch
 import torch.distributed as dist
 import time
 import os
@@ -29,27 +30,6 @@ class Engine():
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
 
-    def _run_comms(self, all_comms):
-        comms = [c for c in all_comms if c is not None]
-        if len(comms) == 0: return
-        logger.debug(f'[Rank {self.rank}] - Running {len(comms)} communications : {[op_to_str(op) for op in comms]}')
-        if len(comms) > 1 and comms[0].op == dist.isend and \
-           comms[1].op == dist.irecv and \
-           comms[0].peer == comms[1].peer:
-            # To avoid deadlocks, we need to batch communications
-            works = dist.batch_isend_irecv(comms)
-            for i,w in enumerate(works):
-                logger.debug(f'[Rank {self.rank}] - Waiting for batched works {[op_to_str(op) for op in comms]}')
-                w.wait()
-        else: # Otherwise we can run every communication independently
-            for c in comms:
-                work = c.op(c.tensor, c.peer)
-                logger.debug(f'[Rank {self.rank}] - Waiting for work [{op_to_str(c)}]')
-                work.wait()
-        torch.cuda.synchronize()
-        all_comms.clear()
-        logger.debug(f'[Rank {self.rank}] - All comms finished !')
-
     def train_step(self, batch, target, loss_fn, schedule, split_size, viz_file = None):
         '''
         Perform forward + backward pass on a batch of data
@@ -63,34 +43,27 @@ class Engine():
         curr = 0
         if viz_file is not None:
             stats = []
-        
-        comms = []
-
-        for (id_, op, mb, *options) in schedule:
-            if str(id_) in self.id_to_block:
+            
+        for op in schedule:
+            if str(op.block_id) in self.id_to_block:
                 block = self.id_to_block[str(id_)]
                 logger.debug(f'Computing {op} on block {block}')
                 if viz_file is not None: stats.append((time.time(), id_, op))
                 match op:
                     case Operations.FORWARD:
-                        self._run_comms(comms)
-                        y = block.forward(*options)
+                        y = block.forward(*op.options)
                         if y is not None:
                             result.append(y)
                     case Operations.BACKWARD:
-                        self._run_comms(comms)
-                        block.backward(*options)
+                        block.backward(*op.options)
                     case Operations.SEND_FORWARD:
-                        w = block.send_forward(*options)
-                        comms.append(w)
+                        block.send_forward(*op.options)
                     case Operations.SEND_BACKWARD:
-                        w = block.send_backward(*options)
-                        comms.append(w)
+                        block.send_backward(*op.options)
                     case Operations.RECV_FORWARD:
                         if block.previous is None:
                             block.inputs.append((None, next(splits)))
-                        w = block.recv_forward(split_size[mb], *options)
-                        comms.append(w)
+                        block.recv_forward(split_size[op.mb_id], *op.options)
                     case Operations.RECV_BACKWARD:
                         if block.next is None:
                             nexti = curr + split_size[i]
@@ -100,14 +73,12 @@ class Engine():
                             logger.debug(f'{block} - Computed loss = {loss}')
                             i += 1
                             curr = nexti
-                        w = block.recv_backward(split_size[mb], *options)
-                        comms.append(w)
+                        block.recv_backward(split_size[op.mb_id], *op.options)
                     case _:
                         raise Exception(f'Unknown operation : {op}')
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         if viz_file is not None: stats.append((time.time(), self.rank, ".END"))
-        self._run_comms(comms) # flush comms
         dist.barrier()
         if viz_file is not None:
             for r in range(int(os.environ["WORLD_SIZE"])):

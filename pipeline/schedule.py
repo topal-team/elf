@@ -170,9 +170,6 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False):
     stages_per_device = n_stages // n_devices
 
     for rank in range(n_devices):
-    # rank = int(os.getenv("RANK"))
-
-
         fwds = [0] * stages_per_device
         bwds = [0] * stages_per_device
 

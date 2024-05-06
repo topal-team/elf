@@ -105,7 +105,7 @@ class PipelineBlock():
         
         work, x = self.inputs.popleft()
 
-        # if work is not None: work.wait() # if properly managed, work should already be completed
+        if work is not None: work.wait()
         
         if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
             x.requires_grad = True
@@ -138,7 +138,7 @@ class PipelineBlock():
             act = self.activations.popleft()
         work, grads = self.grads.popleft()
         
-        if work is not None: work.wait() # if properly managed, work should already be completed
+        if work is not None: work.wait()
         
         (act * grads).sum().backward() # Optimal ? Maybe setting the gradients directly is faster
 
@@ -158,8 +158,8 @@ class PipelineBlock():
         # dist.isend(metadata, dst)
 
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-        return dist.P2POp(dist.isend, activations, dst)
-        # dist.isend(activations, dst)
+        # return dist.P2POp(dist.isend, activations, dst)
+        dist.isend(activations, dst)
 
     def send_backward(self, options = {}):
         '''
@@ -174,8 +174,8 @@ class PipelineBlock():
         # dist.isend(metadata, dst)
 
         logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
-        return dist.P2POp(dist.isend, grads, dst)
-        # dist.isend(grads, dst)
+        # return dist.P2POp(dist.isend, grads, dst)
+        dist.isend(grads, dst)
 
     def recv_forward(self, mb_size, options = {}):
         '''
@@ -194,8 +194,9 @@ class PipelineBlock():
 
         logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
 
-        self.inputs.append((None, buffer)) # .detach() ?
-        return dist.P2POp(dist.irecv, buffer, src)
+        work = dist.irecv(buffer, src)
+        self.inputs.append((work, buffer)) # .detach() ?
+        # return dist.P2POp(dist.irecv, buffer, src)
 
     def recv_backward(self, mb_size, options = {}):
         '''
@@ -213,10 +214,10 @@ class PipelineBlock():
         # metadata = TensorMetadata.from_tensor(buffer)
         buffer = self.out_metadata.get_buffer(mb_size)
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
-        # work = dist.irecv(buffer, src)
+        work = dist.irecv(buffer, src)
 
-        self.grads.append((None, buffer))
-        return dist.P2POp(dist.irecv, buffer, src)
+        self.grads.append((work, buffer))
+        # return dist.P2POp(dist.irecv, buffer, src)
     
     def register_metadata(self):
         if self.previous is not None:
