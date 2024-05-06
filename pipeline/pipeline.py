@@ -218,6 +218,36 @@ class PipelineBlock():
 
         self.grads.append((work, buffer))
         # return dist.P2POp(dist.irecv, buffer, src)
+
+    def send_recv_next(self, mb_size, options = {}):
+        '''
+        Batched communications ; send & receive from previous rank
+        '''
+        peer = options["peer"] if options and "peer" in options.keys() else self.next
+        if peer is None: return
+
+        activations = self.act_to_send.popleft()
+        grads_buffer = self.out_metadata.get_buffer(mb_size)
+        work = dist.batch_isend_irecv(
+            dist.P2POp(dist.isend, activations, peer),
+            dist.P2POp(dist.irecv, grads_buffer, peer)
+        )
+        self.grads.append((work, grads_buffer))
+
+    def send_recv_previous(self, mb_size, options = {}):
+        '''
+        Batched communications ; send & receive from next rank
+        '''
+        peer = options["peer"] if options and "peer" in options.keys() else self.previous
+        if peer is None: return
+
+        buffer = self.metadata.get_buffer(mb_size)
+        grads = self.grads_to_send.popleft()
+        work = dist.batch_isend_irecv(
+            dist.P2POp(dist.isend, grads, peer),
+            dist.P2POp(dist.irecv, buffer, peer)
+        )        
+        self.inputs.append((work, buffer))
     
     def register_metadata(self):
         if self.previous is not None:
@@ -256,8 +286,6 @@ class Pipeline():
                 self.scheduler = generate_afab_schedule
             case '1f1b':
                 self.scheduler = generate_1f1b_schedule
-            case '1f1b2':
-                self.scheduler = generate_custom_1f1b_schedule
             case _:
                 raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b"].')
         

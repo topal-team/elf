@@ -38,37 +38,33 @@ class Operation():
 def graph_from_schedule(schedule):
     # For each one, add forward/backward dependencies (from the sequential nature)
     for operation in schedule:
+        def match_op(op, block_id, list_op):
+            return op.mb_id == operation.mb_id and op.block_id == block_id and op.op in list_op
+        
         match operation.op:
             case Operations.SEND_BACKWARD:
-                deps = [op for op in schedule if op.mb_id == operation.mb_id and (\
-                        (op.op == Operations.BACKWARD and op.block_id == operation.block_id) or \
-                            (op.op == Operations.RECV_BACKWARD and op.block_id == operation.block_id - 1))]
-                for d in deps:
-                    operation.add_dependency(d)
+                deps = [op for op in schedule if \
+                         match_op(op, operation.block_id, \
+                                    [Operations.BACKWARD]) or \
+                                    match_op(op, operation.block_id - 1, \
+                                    [Operations.RECV_BACKWARD])]
+                
             case Operations.BACKWARD:
-                condition = lambda op: op.block_id == operation.block_id and op.mb_id == operation.mb_id and \
-                      op.op in [Operations.RECV_BACKWARD, Operations.FORWARD]
-                deps = [op for op in schedule if condition(op)]
-                for d in deps:
-                    operation.add_dependency(d)
-            # case Operations.RECV_BACKWARD:
-            #     send_backward_op = next((op for op in schedule if op.block_id == operation.block_id + 1 and op.op == Operations.SEND_BACKWARD and op.mb_id == operation.mb_id), None)
-            #     if send_backward_op:
-            #         operation.add_dependency(send_backward_op)
+                deps = [op for op in schedule if match_op(op, operation.block_id, [Operations.RECV_BACKWARD, Operations.FORWARD])]
+            case Operations.RECV_BACKWARD:
+                deps = [op for op in schedule if match_op(op, operation.block_id + 1, [Operations.SEND_BACKWARD])]
             case Operations.SEND_FORWARD:
-                deps = [op for op in schedule if op.mb_id == operation.mb_id and (\
-                        (op.op == Operations.FORWARD and op.block_id == operation.block_id) or \
-                            (op.op == Operations.RECV_FORWARD and op.block_id == operation.block_id + 1))]
-                for d in deps:
-                    operation.add_dependency(d)
+                deps = [op for op in schedule if match_op(op, operation.block_id, [Operations.FORWARD]) or match_op(op, operation.block_id + 1, [Operations.RECV_FORWARD])]
             case Operations.FORWARD:
                 recv_forward_op = next((op for op in schedule if op.block_id == operation.block_id and op.op == Operations.RECV_FORWARD and op.mb_id == operation.mb_id), None)
                 if recv_forward_op:
                     operation.add_dependency(recv_forward_op)
-            # case Operations.RECV_FORWARD:
-            #     send_forward_op = next((op for op in schedule if op.block_id == operation.block_id - 1 and op.op == Operations.SEND_FORWARD and op.mb_id == operation.mb_id), None)
-            #     if send_forward_op:
-            #         operation.add_dependency(send_forward_op)        
+            case Operations.RECV_FORWARD:
+                deps = [op for op in schedule if match_op(op, operation.block_id - 1, [Operations.SEND_FORWARD])]
+            case _:
+                deps = []
+        for d in deps:
+            operation.add_dependency(d)
 
     # Then, add the schedule dependencies from communications
     ## WE NEED THE PLACEMENT HERE as a comm depends on the last comm on the same DEVICE, not BLOCK
@@ -84,7 +80,41 @@ def graph_from_schedule(schedule):
             current_op.add_dependency(next_op)
             break
 
-    return schedule[-1] # root of the entire graph
+    last_send_backward_ops = {}
+    for operation in schedule:
+        if operation.op == Operations.SEND_BACKWARD:
+            last_send_backward_ops[operation.mb_id] = operation
+    return last_send_backward_ops # roots of the entire graph
+
+def schedule_from_graph(graph):
+    def dfs(node, visited, stack):
+        # Mark the current node as visited
+        visited.add(node)
+        
+        # Recur for all the nodes dependent on this node
+        for dependent in node.dependencies:
+            if dependent not in visited:
+                dfs(dependent, visited, stack)
+        
+        # Push current node to stack which stores the result
+        stack.append(node)
+
+    visited = set()
+    stack = []
+    
+    # Call the recursive helper function to store Topological Sort
+    # starting from all nodes one by one
+    for root in graph.values():
+        dfs(root, visited, stack)
+
+
+
+
+
+        
+    
+    # Return contents of stack in reverse order
+    return stack
 
 def find_cycles(graph):
     def dfs(node, visited, stack):
@@ -96,6 +126,7 @@ def find_cycles(graph):
             if not visited[neighbor]:
                 if path := dfs(neighbor, visited, stack):
                     if len(path) > 1 and path[0] == path[-1]: return path
+                    # elif path[0] == node: return path + [neighbor, node] if len(path) > 1 else False
                     else: return path + [neighbor]
             elif stack[neighbor]:
                 return [neighbor]
@@ -103,10 +134,11 @@ def find_cycles(graph):
         stack[node] = False
         return False
 
-    visited = {graph: False}
-    stack = {graph: False}
-
-    return dfs(graph, visited, stack)
+    visited = {}
+    stack = {}
+    for root in graph.values():
+        dfs(root, visited, stack)
+    return False
 
 def reorder_operations(operations):
     # Define the target and source operations
@@ -155,8 +187,6 @@ def generate_afab_schedule(placement, n_micro_batches, *options, prefetching = F
                 schedule.append(Operation(id_, i, Operations.SEND_BACKWARD, *options))
     
     assert len(schedule) == n_micro_batches * n_stages * 2 * 3
-    if cycle := find_cycles(graph_from_schedule(schedule)):
-        logger.warning(f'Found potential deadlocks in the schedule ! Cycle : {cycle}')
     if prefetching: return reorder_operations(schedule)
     return schedule
 
@@ -227,39 +257,6 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False):
     if prefetching: return reorder_operations(schedule)
     return schedule
 
-def generate_custom_1f1b_schedule(placement, n_micro_batches):
-    '''
-    One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
-    '''
-    schedule = []
-    n_stages = len(placement)
-    n_devices = int(max(placement)) + 1
-    stages_per_device = len(placement) // n_devices
-    
-    for d in range(n_devices):
-        # we assume blocks are placed sequentially among every device, e.g. [0, 1, 2, 0, 1, 2]
-        # and there are at least as many micro batches as there are devices
-        offset = d * (stages_per_device * n_micro_batches * 2 * 3)
-
-        for i in range(n_micro_batches * stages_per_device):
-            b = ((i // min(n_micro_batches, n_devices)) % stages_per_device)
-            schedule.append((b * n_devices + d, Operations.RECV_FORWARD))
-            schedule.append((b * n_devices + d, Operations.FORWARD))
-            schedule.append((b * n_devices + d, Operations.SEND_FORWARD))
-
-        magic = n_stages + (n_devices - d - 1) - d
-        magic = min(magic, n_micro_batches * stages_per_device)
-        for i in range(n_micro_batches * stages_per_device):
-            b = stages_per_device - ((i // min(n_micro_batches, math.ceil(n_devices / 2))) % stages_per_device) - 1
-            schedule.insert(offset + (magic * 3), (b * n_devices + d, Operations.RECV_BACKWARD))
-            schedule.insert(offset + (magic * 3) + 1, (b * n_devices + d, Operations.BACKWARD))
-            schedule.insert(offset + (magic * 3) + 2, (b * n_devices + d, Operations.SEND_BACKWARD))
-            magic += 4
-
-    assert len(schedule) == n_micro_batches * n_stages * 2 * 3
-
-    return schedule
-
 def check_schedule(schedule):
     counts = [0] * len(Operations)
     for (_, op, *_) in schedule:
@@ -274,8 +271,19 @@ def check_schedule(schedule):
 if __name__ == "__main__":
     import torch
     placement = torch.tensor([0, 1, 2, 3])
-    schedule = generate_1f1b_schedule(placement, 16, prefetching = True)
-    if cycle := find_cycles(graph_from_schedule(schedule)):
+    schedule = generate_afab_schedule(placement, 4, prefetching = False)
+    graph = graph_from_schedule(schedule)
+    if cycle := find_cycles(graph):
         logger.warning(f'Found potential deadlocks in the schedule !')
         print(cycle)
-    print(f'Rank {os.getenv("RANK")} - {schedule}')
+        print()
+    
+    new_schedule = schedule_from_graph(graph)
+    for rank in range(len(placement)):
+        local_schedule = list(filter(lambda op: placement[op.block_id] == rank, schedule))
+        local_new_schedule = list(filter(lambda op: placement[op.block_id] == rank, new_schedule))
+        print(f'Rank {rank}')
+        print(local_schedule)
+        print()
+        print(local_new_schedule)
+        assert local_schedule == local_new_schedule
