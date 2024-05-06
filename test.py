@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import os
-from pipeline.pipeline import Pipeline
+from pipeline import Pipeline
 from argparse import ArgumentParser
 
 import logging

@@ -113,7 +113,7 @@ class PipelineBlock():
         if options and ('remat' in options.keys()):
             with torch.no_grad(): y = self.model(x)        
         else:
-            logger.debug(f'{self} - Forwarding {x}')
+            logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
             y = self.model(x)
             self.activations.append(y)
            
@@ -283,7 +283,7 @@ class Pipeline():
             n_micro_batches = len(split_size)
             
         if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
-            self.schedule = self.scheduler(self.placement, n_micro_batches)
+            self.schedule = self.scheduler(self.placement, n_micro_batches, prefetching = True)
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:

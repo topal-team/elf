@@ -4,7 +4,7 @@ import time
 import os
 import matplotlib
 import matplotlib.pyplot as plt
-from schedule import Operations
+from .schedule import Operations
 
 import logging
 logger = logging.getLogger("engine")
@@ -46,10 +46,10 @@ class Engine():
             
         for op in schedule:
             if str(op.block_id) in self.id_to_block:
-                block = self.id_to_block[str(id_)]
+                block = self.id_to_block[str(op.block_id)]
                 logger.debug(f'Computing {op} on block {block}')
                 if viz_file is not None: stats.append((time.time(), id_, op))
-                match op:
+                match op.op:
                     case Operations.FORWARD:
                         y = block.forward(*op.options)
                         if y is not None:
@@ -67,7 +67,6 @@ class Engine():
                     case Operations.RECV_BACKWARD:
                         if block.next is None:
                             nexti = curr + split_size[i]
-                            logger.debug(f'{block} - Heyoooo starting loss computation')
                             loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
                             losses.append(loss)
                             logger.debug(f'{block} - Computed loss = {loss}')
@@ -98,13 +97,8 @@ def compute_loss(block, output, target, loss_fn):
     '''
     output = output.detach()
     output.requires_grad = True
-    print(f'output : {output}')
-    print(f'target : {target}')
-    logger.debug(f'{block} - computiiiiin {output}, {target}')
     loss = loss_fn(output, target, reduction="sum")
-    logger.debug(f'{block} - loss = {loss} !! ')
     loss.backward()
-    logger.debug(f'{block} - backwarded')
     block.grads.append((None, output.grad.data))
     return loss
 
