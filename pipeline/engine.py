@@ -1,4 +1,3 @@
-import torch
 import torch.distributed as dist
 import time
 import os
@@ -29,6 +28,13 @@ class Engine():
         self.rank = self.blocks[0].rank if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
+        self.comms = []
+
+    def _run_comms(self):
+        if len(self.comms) == 0: return
+        works = dist.batch_isend_irecv(self.comms)
+        for w in works: w.wait()
+        self.comms.clear()
 
     def train_step(self, batch, target, loss_fn, schedule, split_size, viz_file = None):
         '''
@@ -51,19 +57,24 @@ class Engine():
                 if viz_file is not None: stats.append((time.time(), id_, op))
                 match op:
                     case Operations.FORWARD:
+                        self._run_comms()
                         y = block.forward(*op.options)
                         if y is not None:
                             result.append(y)
                     case Operations.BACKWARD:
+                        self._run_comms()
                         block.backward(*op.options)
                     case Operations.SEND_FORWARD:
-                        block.send_forward(*op.options)
+                        if comm := block.send_forward(*op.options):
+                            self.comms.append(comm)
                     case Operations.SEND_BACKWARD:
-                        block.send_backward(*op.options)
+                        if comm := block.send_backward(*op.options):
+                            self.comms.append(comm)
                     case Operations.RECV_FORWARD:
                         if block.previous is None:
                             block.inputs.append((None, next(splits)))
-                        block.recv_forward(split_size[op.mb_id], *op.options)
+                        if comm := block.recv_forward(split_size[op.mb_id], *op.options):
+                            self.comms.append(comm)
                     case Operations.RECV_BACKWARD:
                         if block.next is None:
                             nexti = curr + split_size[i]
@@ -73,12 +84,14 @@ class Engine():
                             logger.debug(f'{block} - Computed loss = {loss}')
                             i += 1
                             curr = nexti
-                        block.recv_backward(split_size[op.mb_id], *op.options)
+                        if comm := block.recv_backward(split_size[op.mb_id], *op.options):
+                            self.comms.append(comm)
                     case _:
                         raise Exception(f'Unknown operation : {op}')
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         if viz_file is not None: stats.append((time.time(), self.rank, ".END"))
+        self._run_comms()
         dist.barrier()
         if viz_file is not None:
             for r in range(int(os.environ["WORLD_SIZE"])):
