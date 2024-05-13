@@ -7,24 +7,18 @@ def test_afab():
     placement = [0, 1]
     n_micro_batches = 2
 
-    os.environ["RANK"] = "0"
     schedule = generate_afab_schedule(placement, n_micro_batches)
 
     assert schedule == [
-        (0, Operations.RECV_FORWARD), (0, Operations.FORWARD), (0, Operations.SEND_FORWARD),
-        (0, Operations.RECV_FORWARD), (0, Operations.FORWARD), (0, Operations.SEND_FORWARD),
-        (0, Operations.RECV_BACKWARD), (0, Operations.BACKWARD), (0, Operations.SEND_BACKWARD),
-        (0, Operations.RECV_BACKWARD), (0, Operations.BACKWARD), (0, Operations.SEND_BACKWARD),
-    ]
+        Operation(0, 0, OperationType.RECV_FORWARD, 0), Operation(0, 0, OperationType.FORWARD, 0), Operation(0, 0, OperationType.SEND_FORWARD, 0),
+        Operation(0, 1, OperationType.RECV_FORWARD, 0), Operation(0, 1, OperationType.FORWARD, 0), Operation(0, 1, OperationType.SEND_FORWARD, 0),
+        Operation(0, 0, OperationType.RECV_BACKWARD, 0), Operation(0, 0, OperationType.BACKWARD, 0), Operation(0, 0, OperationType.SEND_BACKWARD, 0),
+        Operation(0, 1, OperationType.RECV_BACKWARD, 0), Operation(0, 1, OperationType.BACKWARD, 0), Operation(0, 1, OperationType.SEND_BACKWARD, 0),
 
-    os.environ["RANK"] = "1"
-    schedule = generate_afab_schedule(placement, n_micro_batches)
-
-    assert schedule == [
-        (1, Operations.RECV_FORWARD), (1, Operations.FORWARD), (1, Operations.SEND_FORWARD),
-        (1, Operations.RECV_FORWARD), (1, Operations.FORWARD), (1, Operations.SEND_FORWARD),
-        (1, Operations.RECV_BACKWARD), (1, Operations.BACKWARD), (1, Operations.SEND_BACKWARD),
-        (1, Operations.RECV_BACKWARD), (1, Operations.BACKWARD), (1, Operations.SEND_BACKWARD),
+        Operation(1, 0, OperationType.RECV_FORWARD, 1), Operation(1, 0, OperationType.FORWARD, 1), Operation(1, 0, OperationType.SEND_FORWARD, 1),
+        Operation(1, 1, OperationType.RECV_FORWARD, 1), Operation(1, 1, OperationType.FORWARD, 1), Operation(1, 1, OperationType.SEND_FORWARD, 1),
+        Operation(1, 0, OperationType.RECV_BACKWARD, 1), Operation(1, 0, OperationType.BACKWARD, 1), Operation(1, 0, OperationType.SEND_BACKWARD, 1),
+        Operation(1, 1, OperationType.RECV_BACKWARD, 1), Operation(1, 1, OperationType.BACKWARD, 1), Operation(1, 1, OperationType.SEND_BACKWARD, 1),
     ]
 
 @pytest.mark.single
@@ -32,31 +26,30 @@ def test_1f1b():
     placement = [0, 1]
     n_micro_batches = 4
 
-    os.environ["RANK"] = "0"
     schedule = generate_1f1b_schedule(placement, n_micro_batches)
+    schedule0 = list(filter(lambda op: op.rank == 0, schedule))
 
-    assert schedule == [
-        (0, Operations.RECV_FORWARD), (0, Operations.FORWARD), (0, Operations.SEND_FORWARD),
-        (0, Operations.RECV_FORWARD), (0, Operations.FORWARD), (0, Operations.SEND_FORWARD),
-        (0, Operations.RECV_BACKWARD), (0, Operations.BACKWARD), (0, Operations.SEND_BACKWARD),
-        (0, Operations.RECV_FORWARD), (0, Operations.FORWARD), (0, Operations.SEND_FORWARD),
-        (0, Operations.RECV_BACKWARD), (0, Operations.BACKWARD), (0, Operations.SEND_BACKWARD),
-        (0, Operations.RECV_FORWARD), (0, Operations.FORWARD), (0, Operations.SEND_FORWARD),
-        (0, Operations.RECV_BACKWARD), (0, Operations.BACKWARD), (0, Operations.SEND_BACKWARD),
-        (0, Operations.RECV_BACKWARD), (0, Operations.BACKWARD), (0, Operations.SEND_BACKWARD)
+    assert schedule0 == [
+        Operation(0, 0, OperationType.RECV_FORWARD, 0), Operation(0, 0, OperationType.FORWARD, 0), Operation(0, 0, OperationType.SEND_FORWARD, 0),
+        Operation(0, 1, OperationType.RECV_FORWARD, 0), Operation(0, 1, OperationType.FORWARD, 0), Operation(0, 1, OperationType.SEND_FORWARD, 0),
+        Operation(0, 0, OperationType.RECV_BACKWARD, 0), Operation(0, 0, OperationType.BACKWARD, 0), Operation(0, 0, OperationType.SEND_BACKWARD, 0),
+        Operation(0, 2, OperationType.RECV_FORWARD, 0), Operation(0, 2, OperationType.FORWARD, 0), Operation(0, 2, OperationType.SEND_FORWARD, 0),
+        Operation(0, 1, OperationType.RECV_BACKWARD, 0), Operation(0, 1, OperationType.BACKWARD, 0), Operation(0, 1, OperationType.SEND_BACKWARD, 0),
+        Operation(0, 3, OperationType.RECV_FORWARD, 0), Operation(0, 3, OperationType.FORWARD, 0), Operation(0, 3, OperationType.SEND_FORWARD, 0),
+        Operation(0, 2, OperationType.RECV_BACKWARD, 0), Operation(0, 2, OperationType.BACKWARD, 0), Operation(0, 2, OperationType.SEND_BACKWARD, 0),
+        Operation(0, 3, OperationType.RECV_BACKWARD, 0), Operation(0, 3, OperationType.BACKWARD, 0), Operation(0, 3, OperationType.SEND_BACKWARD, 0)
     ]
 
-    os.environ["RANK"] = "1"
-    schedule = generate_1f1b_schedule(placement, n_micro_batches)
+    schedule1 = list(filter(lambda op: op.rank == 1, schedule))
 
     # Send/Recv are swapped on odd devices to avoid deadlocks :)
-    assert schedule == [
-        (1, Operations.RECV_FORWARD), (1, Operations.FORWARD), (1, Operations.RECV_BACKWARD),
-        (1, Operations.SEND_FORWARD), (1, Operations.BACKWARD), (1, Operations.RECV_FORWARD),
-        (1, Operations.SEND_BACKWARD), (1, Operations.FORWARD), (1, Operations.RECV_BACKWARD),
-        (1, Operations.SEND_FORWARD), (1, Operations.BACKWARD), (1, Operations.RECV_FORWARD),
-        (1, Operations.SEND_BACKWARD), (1, Operations.FORWARD), (1, Operations.RECV_BACKWARD),
-        (1, Operations.SEND_FORWARD), (1, Operations.BACKWARD), (1, Operations.RECV_FORWARD),
-        (1, Operations.SEND_BACKWARD), (1, Operations.FORWARD), (1, Operations.RECV_BACKWARD),
-        (1, Operations.SEND_FORWARD), (1, Operations.BACKWARD), (1, Operations.SEND_BACKWARD),
+    assert schedule1 == [
+        Operation(1, 0, OperationType.RECV_FORWARD, 1), Operation(1, 0, OperationType.FORWARD, 1), Operation(1, 0, OperationType.SEND_FORWARD, 1), 
+        Operation(1, 0, OperationType.RECV_BACKWARD, 1), Operation(1, 0, OperationType.BACKWARD, 1), Operation(1, 0, OperationType.SEND_BACKWARD, 1),
+        Operation(1, 1, OperationType.RECV_FORWARD, 1), Operation(1, 1, OperationType.FORWARD, 1), Operation(1, 1, OperationType.SEND_FORWARD, 1),
+        Operation(1, 1, OperationType.RECV_BACKWARD, 1), Operation(1, 1, OperationType.BACKWARD, 1), Operation(1, 1, OperationType.SEND_BACKWARD, 1), 
+        Operation(1, 2, OperationType.RECV_FORWARD, 1), Operation(1, 2, OperationType.FORWARD, 1), Operation(1, 2, OperationType.SEND_FORWARD, 1), 
+        Operation(1, 2, OperationType.RECV_BACKWARD, 1), Operation(1, 2, OperationType.BACKWARD, 1), Operation(1, 2, OperationType.SEND_BACKWARD, 1),
+        Operation(1, 3, OperationType.RECV_FORWARD, 1), Operation(1, 3, OperationType.FORWARD, 1), Operation(1, 3, OperationType.SEND_FORWARD, 1), 
+        Operation(1, 3, OperationType.RECV_BACKWARD, 1), Operation(1, 3, OperationType.BACKWARD, 1), Operation(1, 3, OperationType.SEND_BACKWARD, 1),
     ]

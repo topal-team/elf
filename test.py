@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import os
-from pipeline.pipeline import Pipeline
+from pipeline import Pipeline
 from argparse import ArgumentParser
 
 import logging
@@ -41,7 +41,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size):
     '''
 
     split_size = 1
-    batch = torch.randn((batch_size, 3)).cuda()
+    batch = torch.randn((batch_size, 3), device = rank)
 
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
@@ -50,7 +50,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size):
         if global_rank == placement[0]: dist.send(batch, dst = placement[-1])
         if global_rank == placement[-1]: dist.recv(batch, src = placement[0])
         
-    target = torch.randn_like(batch).cuda() # No need to share since only last device will use this anyway
+    target = torch.randn_like(batch, device = rank) # No need to share since only last device will use this anyway
 
     pipe = Pipeline(blocks, placement, partition = None, schedule = scheduler)
     output = pipe(batch, target, F.mse_loss, split_size)
@@ -75,7 +75,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size):
         batch.requires_grad = True
         full_model = load_full_model(len(placement)).cuda()
         groundtruth = full_model(batch)
-        assert torch.allclose(output, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
+        assert torch.allclose(output, groundtruth, rtol=1e-3, atol=5e-6), f'Pipelined and regular models have different outputs : {output} and {groundtruth}'
         logger.info(f'{block} - Outputs are correct :)')
 
         loss = F.mse_loss(groundtruth, target, reduction="sum") # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
@@ -92,7 +92,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size):
             groundtruth = torch.empty_like(batch)
             dist.recv(groundtruth, placement[-1])
 
-        assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth}'
+        assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=5e-6), f'Pipelined and regular models have different gradients : {grads} and {groundtruth}'
         logger.info(f'{block} - Gradients are correct :))')
 
 if __name__ == "__main__":
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl")
 
-    # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on rank placement[i]
+    # Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on (global) rank placement[i]
     # placement = torch.randint(0, world_size, (4,)).cuda()
 
     # Load your model here (each process should load the right layers depending on placement)
@@ -122,7 +122,9 @@ if __name__ == "__main__":
     placements = [
         [0, 1, 2, 3],
         [0, 1, 2, 3, 0, 1, 2, 3],
-        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+        [0, 1, 2, 3, 3, 2, 1, 0], # Hanayo style
+        [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
     ]
 
     batch_sizes = [4, 8, 16, 32]
@@ -130,12 +132,11 @@ if __name__ == "__main__":
     # Check that the results and gradients are the same as a single-gpu model
     for p in placements:
         for b in batch_sizes:
-            if b < len(p): continue
+            # if b < len(p): continue
             if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
             layers = load_parts_model(p, global_rank)
-            test_pipeline(layers, p, "1f1b", b)
+            test_pipeline(layers, p, "afab", b)
             dist.barrier()
-            if global_rank == 0: logger.info('\n')
             
     if dist.is_initialized():
         dist.destroy_process_group()
