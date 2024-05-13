@@ -154,9 +154,6 @@ class PipelineBlock():
 
         activations = self.act_to_send.popleft()
 
-        # metadata = TensorMetadata(activations).to_tensor()
-        # dist.isend(metadata, dst)
-
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
         if "batch" in options.keys(): return dist.P2POp(dist.isend, activations, dst)
         else: dist.isend(activations, dst)
@@ -170,9 +167,6 @@ class PipelineBlock():
 
         grads = self.grads_to_send.popleft()
 
-        # metadata = TensorMetadata(grads).to_tensor()
-        # dist.isend(metadata, dst)
-
         logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
         if "batch" in options.keys(): return dist.P2POp(dist.isend, grads, dst)
         else: dist.isend(grads, dst)
@@ -184,12 +178,6 @@ class PipelineBlock():
         src = options["src"] if options and "src" in options.keys() else self.previous
         if src is None: return
 
-        # buffer = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
-        # work = dist.irecv(buffer, src)
-        # logger.debug(f'{self} - Waiting for metadata of activations from rank {src}')
-        # work.wait()
-        # metadata = TensorMetadata.from_tensor(buffer)
-        
         buffer = self.metadata.get_buffer(mb_size)
 
         logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
@@ -208,13 +196,6 @@ class PipelineBlock():
         src = options["src"] if options and "src" in options.keys() else self.next
         if src is None: return
 
-        # buffer = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
-
-        # work = dist.irecv(buffer, src)
-        # logger.debug(f'{self} - Waiting for metadata for gradients from layer {self.id + 1} on rank {src}')
-        # work.wait()
-
-        # metadata = TensorMetadata.from_tensor(buffer)
         buffer = self.out_metadata.get_buffer(mb_size)
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
 
@@ -329,15 +310,6 @@ def create_pipeline(layers, placement):
             blocks.pop(i + 1)
         i += 1
 
-    # Init comms
-    '''
-    t = torch.randn((1,), device = local_rank)
-    dist.broadcast(t, src = placement[0]) # See doc on batch_isend_irecv, we need to call a collective before anything
-    for b in blocks:
-        if b.previous is not None: dist.irecv(t, b.previous).wait()
-        if b.next is not None: dist.isend(t, b.next).wait()
-    '''
-    
     return blocks
 
 def partition_model(model, placement):

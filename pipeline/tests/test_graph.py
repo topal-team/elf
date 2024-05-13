@@ -1,10 +1,10 @@
 import pytest
-from ..schedule import Operation, Operations, graph_from_schedule
+from ..graph import Operation, OperationType, graph_from_schedule
 
 @pytest.mark.single
 def test_graph_creation():
     # Simple example
-    schedule = [Operation(0, 0, Operations.FORWARD, 0), Operation(0, 0, Operations.BACKWARD, 0)]
+    schedule = [Operation(0, 0, OperationType.FORWARD, 0), Operation(0, 0, OperationType.BACKWARD, 0)]
     graph = graph_from_schedule(schedule)
 
     assert isinstance(graph, dict)
@@ -12,22 +12,22 @@ def test_graph_creation():
     assert isinstance(g, Operation)
     assert g.block_id == 0
     assert g.mb_id == 0
-    assert g.op == Operations.BACKWARD
+    assert g.op == OperationType.BACKWARD
     assert len(g.dependencies) == 1
 
     g = g.dependencies[0]
     assert g.block_id == 0
     assert g.mb_id == 0
-    assert g.op == Operations.FORWARD
+    assert g.op == OperationType.FORWARD
     assert len(g.dependencies) == 0
 
-    schedule = [Operation(0, 0, Operations.RECV_FORWARD, 0), Operation(0, 0, Operations.FORWARD, 0), Operation(0, 0, Operations.SEND_FORWARD, 0), Operation(0, 0, Operations.RECV_BACKWARD, 0), Operation(0, 0, Operations.BACKWARD, 0), Operation(0, 0, Operations.SEND_BACKWARD, 0)]
+    schedule = [Operation(0, 0, OperationType.RECV_FORWARD, 0), Operation(0, 0, OperationType.FORWARD, 0), Operation(0, 0, OperationType.SEND_FORWARD, 0), Operation(0, 0, OperationType.RECV_BACKWARD, 0), Operation(0, 0, OperationType.BACKWARD, 0), Operation(0, 0, OperationType.SEND_BACKWARD, 0)]
     graph = graph_from_schedule(schedule)
 
     g = graph[(0, 0)]
     assert g.block_id == 0
     assert g.mb_id == 0
-    assert g.op == Operations.SEND_BACKWARD
+    assert g.op == OperationType.SEND_BACKWARD
     assert len(g.dependencies) == 2 # RECV_BACKWARD, BACKWARD
     uniq = {}
     stack = [g]

@@ -3,7 +3,7 @@ import time
 import os
 import matplotlib
 import matplotlib.pyplot as plt
-from .schedule import Operations
+from .schedule import OperationType
 
 import logging
 logger = logging.getLogger("engine")
@@ -33,6 +33,7 @@ class Engine():
     def _run_comms(self):
         if len(self.comms) == 0: return
         works = dist.batch_isend_irecv(self.comms)
+        logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
         for w in works: w.wait()
         self.comms.clear()
 
@@ -56,26 +57,26 @@ class Engine():
                 logger.debug(f'Computing {op} on block {block}')
                 if viz_file is not None: stats.append((time.time(), id_, op))
                 match op.op:
-                    case Operations.FORWARD:
+                    case OperationType.FORWARD:
                         self._run_comms()
                         y = block.forward(op.options)
                         if y is not None:
                             result.append(y)
-                    case Operations.BACKWARD:
+                    case OperationType.BACKWARD:
                         self._run_comms()
                         block.backward(op.options)
-                    case Operations.SEND_FORWARD:
+                    case OperationType.SEND_FORWARD:
                         if comm := block.send_forward(op.options):
                             self.comms.append(comm)
-                    case Operations.SEND_BACKWARD:
+                    case OperationType.SEND_BACKWARD:
                         if comm := block.send_backward(op.options):
                             self.comms.append(comm)
-                    case Operations.RECV_FORWARD:
+                    case OperationType.RECV_FORWARD:
                         if block.previous is None:
                             block.inputs.append((None, next(splits)))
                         if comm := block.recv_forward(split_size[op.mb_id], op.options):
                             self.comms.append(comm)
-                    case Operations.RECV_BACKWARD:
+                    case OperationType.RECV_BACKWARD:
                         if block.next is None:
                             nexti = curr + split_size[i]
                             loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
@@ -131,12 +132,12 @@ def visualize(path):
             operations[rank].append((times, id_op.strip()))
 
     colors = {
-        str(Operations.RECV_FORWARD): "gold",
-        str(Operations.FORWARD): "springgreen",
-        str(Operations.SEND_FORWARD): "orange",
-        str(Operations.RECV_BACKWARD): "plum",
-        str(Operations.BACKWARD): "red",
-        str(Operations.SEND_BACKWARD): "fuchsia",
+        str(OperationType.RECV_FORWARD): "gold",
+        str(OperationType.FORWARD): "springgreen",
+        str(OperationType.SEND_FORWARD): "orange",
+        str(OperationType.RECV_BACKWARD): "plum",
+        str(OperationType.BACKWARD): "red",
+        str(OperationType.SEND_BACKWARD): "fuchsia",
         ".END": "black"
     }
 
