@@ -24,8 +24,8 @@ class Operation():
         self.block_id = block_id
         self.op = op
         self.mb_id = mb_id
-        self.options = options
         self.rank = rank
+        self.options = options
         self.dependencies = []
 
     def add_dependency(self, node):
@@ -37,6 +37,12 @@ class Operation():
     def __repr__(self) -> str:
         return str(self)
     
+    def __eq__(self, __value: object) -> bool:
+        return __value.op == self.op and __value.mb_id == self.mb_id and \
+            __value.rank == self.rank and __value.options == self.options
+    
+    def __hash__(self) -> int:
+        return hash((self.block_id, self.block_id, self.rank, self.op))
 
 def print_graph(graph, level = 0):
     print("| " * level + str(graph))
@@ -80,17 +86,16 @@ def graph_from_schedule(schedule):
             continue
         for j in reversed(range(i)):
             last_op = schedule[j]
-            if last_op in [Operations.FORWARD, Operations.BACKWARD] or \
+            if last_op.op in [Operations.FORWARD, Operations.BACKWARD] or \
                 last_op.rank != current_op.rank:
                 continue
             current_op.add_dependency(last_op)
             break
 
-    last_send_backward_ops = {}
+    last_ops = {}
     for operation in schedule:
-        if operation.op == Operations.SEND_BACKWARD:
-            last_send_backward_ops[(operation.rank, operation.mb_id)] = operation
-    return last_send_backward_ops # roots of the entire graph
+        last_ops[(operation.rank, operation.mb_id)] = operation
+    return last_ops # roots of the entire graph
 
 def schedule_from_graph(graph):
     def dfs(node, visited, stack):

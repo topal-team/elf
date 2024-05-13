@@ -75,7 +75,7 @@ class PipelineBlock():
         self.rank = placement[id_] # global rank
         self.model = model.cuda() if torch.cuda.is_available() else model
         self.id = id_ # rank in the model.
-        self.device = torch.cuda.current_device()
+        self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
         # Queues of tensors to process
         self.inputs = deque() # Waiting for forward
