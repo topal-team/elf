@@ -158,8 +158,8 @@ class PipelineBlock():
         # dist.isend(metadata, dst)
 
         logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-        # return dist.P2POp(dist.isend, activations, dst)
-        dist.isend(activations, dst)
+        if "batch" in options.keys(): return dist.P2POp(dist.isend, activations, dst)
+        else: dist.isend(activations, dst)
 
     def send_backward(self, options = {}):
         '''
@@ -174,8 +174,8 @@ class PipelineBlock():
         # dist.isend(metadata, dst)
 
         logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
-        # return dist.P2POp(dist.isend, grads, dst)
-        dist.isend(grads, dst)
+        if "batch" in options.keys(): return dist.P2POp(dist.isend, grads, dst)
+        else: dist.isend(grads, dst)
 
     def recv_forward(self, mb_size, options = {}):
         '''
@@ -194,9 +194,12 @@ class PipelineBlock():
 
         logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
 
-        work = dist.irecv(buffer, src)
-        self.inputs.append((work, buffer)) # .detach() ?
-        # return dist.P2POp(dist.irecv, buffer, src)
+        if "batch" in options.keys():
+            self.inputs.append((None, buffer))
+            return dist.P2POp(dist.irecv, buffer, src)
+        else:
+            work = dist.irecv(buffer, src)
+            self.inputs.append((work, buffer)) # .detach() ?
 
     def recv_backward(self, mb_size, options = {}):
         '''
@@ -214,10 +217,13 @@ class PipelineBlock():
         # metadata = TensorMetadata.from_tensor(buffer)
         buffer = self.out_metadata.get_buffer(mb_size)
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
-        work = dist.irecv(buffer, src)
 
-        self.grads.append((work, buffer))
-        # return dist.P2POp(dist.irecv, buffer, src)
+        if "batch" in options.keys():
+            self.grads.append((None, buffer))
+            return dist.P2POp(dist.irecv, buffer, src)
+        else:
+            work = dist.irecv(buffer, src)
+            self.grads.append((work, buffer))
     
     def register_metadata(self):
         if self.previous is not None:
@@ -226,11 +232,13 @@ class PipelineBlock():
             self.metadata = TensorMetadata.from_tensor(metadata)
             
         dummy = self.metadata.get_buffer(1)
+        dummy[:] = 1 # avoid problems with embeddings :)
         y = self.model(dummy)
 
+        out_metadata = TensorMetadata(y.squeeze(0)) # do not include batch size
+        self.out_metadata = out_metadata
+        
         if self.next is not None:
-            out_metadata = TensorMetadata(y.squeeze(0)) # do not include batch size
-            self.out_metadata = out_metadata
             dist.send(out_metadata.to_tensor(), dst = self.next)
 
 class Pipeline():
@@ -256,8 +264,6 @@ class Pipeline():
                 self.scheduler = generate_afab_schedule
             case '1f1b':
                 self.scheduler = generate_1f1b_schedule
-            case '1f1b2':
-                self.scheduler = generate_custom_1f1b_schedule
             case _:
                 raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b"].')
         
@@ -282,14 +288,17 @@ class Pipeline():
             assert sum(split_size) == batch.size(0), f'Splits do not cover the entire batch'
             n_micro_batches = len(split_size)
             
-        if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
-            self.schedule = self.scheduler(self.placement, n_micro_batches, prefetching = True)
+        if len(self.schedule) != (n_micro_batches * len(self.placement) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
+
+            self.schedule = self.scheduler(self.placement, n_micro_batches)
+            cycles = find_cycles(graph_from_schedule(self.schedule))
+            if cycles: logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
+            for c in cycles:
+                fix_cycle(c)
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
             self.blocks[0].metadata = TensorMetadata(batch[0])
-        if self.blocks[-1].next is None:
-            self.blocks[-1].out_metadata = TensorMetadata(target[0])
         for b in self.blocks:
             b.register_metadata()
             logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
@@ -309,21 +318,23 @@ def create_pipeline(layers, placement):
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
 
     # Merge consecutive blocks that are on the same device (useful for hanayo-like schedules)
-    for i in range(len(blocks) - 1):
+    i = 0
+    while i < len(blocks) - 1:
         if blocks[i + 1].id == blocks[i].id + 1:
             merged_block = PipelineBlock(nn.Sequential(blocks[i].model, blocks[i + 1].model), blocks[i].id, placement)
             merged_block.previous = blocks[i].previous
             merged_block.next = blocks[i + 1].next
             blocks[i] = merged_block
             blocks.pop(i + 1)
+        i += 1
 
     # Init comms
-    '''
     t = torch.randn((1,), device = local_rank)
+    dist.broadcast(t, src = placement[0]) # See doc on batch_isend_irecv, we need to call a collective before anything
+    '''
     for b in blocks:
         if b.previous is not None: dist.irecv(t, b.previous).wait()
         if b.next is not None: dist.isend(t, b.next).wait()
-    dist.broadcast(t, src = placement[0]) # See doc on batch_isend_irecv, we need to call a collective before anything
     '''
     
     return blocks

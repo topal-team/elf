@@ -4,10 +4,10 @@ from models.resnet import ResNet, Bottleneck
 
 vocab_size = 3072
 placement = [0, 1, 2, 3, 0, 1, 2, 3]
-schedule = "afab"
+schedule = "1f1b"
 
 batch_size = 64
-split_sizes = [1, 2, 4, 8, 16, 32]
+split_sizes = [1, 2, 4, 8, 16]
 block_size = 64
 iters = 15
 
