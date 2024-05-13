@@ -62,7 +62,7 @@ class TensorMetadata():
         '''
         Allocates a tensor with the right shape and dtype for this metadata
         '''
-        buffer = torch.empty([batch_size, *self.shape], dtype=self.dtype, device = self.device)
+        buffer = torch.empty((batch_size, *self.shape), dtype = self.dtype, device = self.device)
         return buffer
 
 class PipelineBlock():
@@ -304,7 +304,8 @@ class Pipeline():
             logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
         result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
-        if result: return torch.cat(result, dim=0)
+        if len(result) != 0:
+            return torch.cat(result, dim = 0), torch.tensor(losses, device = torch.cuda.current_device()).sum(dim = 0, keepdim = True)
         else: return None, None
 
 def create_pipeline(layers, placement):
@@ -329,9 +330,9 @@ def create_pipeline(layers, placement):
         i += 1
 
     # Init comms
+    '''
     t = torch.randn((1,), device = local_rank)
     dist.broadcast(t, src = placement[0]) # See doc on batch_isend_irecv, we need to call a collective before anything
-    '''
     for b in blocks:
         if b.previous is not None: dist.irecv(t, b.previous).wait()
         if b.next is not None: dist.isend(t, b.next).wait()

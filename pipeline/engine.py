@@ -110,7 +110,7 @@ def compute_loss(block, output, target, loss_fn):
     '''
     output = output.detach()
     output.requires_grad = True
-    loss = loss_fn(output, target, reduction="sum")
+    loss = loss_fn(output, target, reduction = "sum")
     loss.backward()
     block.grads.append((None, output.grad.data))
     return loss

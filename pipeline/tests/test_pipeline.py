@@ -13,15 +13,15 @@ def init_dist():
     local_rank = int(os.getenv("LOCAL_RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
     torch.cuda.set_device(local_rank)
-
-    dist.init_process_group(backend = "nccl")
-    # Init comms, see batch_isend_irecv doc
-    t = torch.empty((1,), device = local_rank)
-    dist.broadcast(t, src = 0)
-    yield rank, local_rank, world_size
-    dist.barrier()
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    try:
+        if not dist.is_initialized():
+            dist.init_process_group(backend = "nccl")
+        
+        yield rank, local_rank, world_size
+    finally:
+        if dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()
 
 @pytest.mark.single
 def test_metadata():
@@ -54,8 +54,6 @@ def test_metadata():
     buffer = metadata.get_buffer(3)
     assert buffer.dtype == torch.int64
     assert buffer.shape == torch.Size([3, 8, 5, 2])
-
-    return
 
 class FakeWorker():
     def __init__(self, done):
@@ -123,35 +121,11 @@ def test_block():
     assert len(block.grads_to_send) == 1
 
 @pytest.mark.multi
-def test_pipeline(init_dist):
-    rank, local_rank, world_size = init_dist
-
-    # Test automatic placement + partitioning
-    model = nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 4), nn.Linear(4, 5))
-    pipe = Pipeline(model)
-    print("helooo")
-
-    # Test predefined placement
-    pipe = Pipeline(model, placement = ['cpu', 'cpu'])
-    
-    print(rank, len(pipe.blocks))
-
-    assert len(pipe.blocks) == 1 # Blocks should be merged together
-
-    pipe = Pipeline(model, placement = [0, 1, 2])
-    if rank == 1:
-        assert len(pipe.blocks) == 1
-
-    # Test predefined partition
-    pipe = Pipeline([l for l in model.children()], partition = None)
-    assert len(pipe.blocks) == len(model.children())
-    assert pipe.placement == list(range(len(model))) # default value
-
-@pytest.mark.multi
 def test_block_multi(init_dist):
     rank, local_rank, world_size = init_dist
     
     if rank > 1:
+        pytest.skip("This test only needs 2 processes")
         return
 
     placement = [0, 1]
@@ -183,18 +157,15 @@ def test_block_multi(init_dist):
         assert torch.allclose(block.activations[0], torch.full((2, 2), 2.0, device = local_rank))
 
         w = block.send_forward() # Should be matched by a recv_forward
+        assert w is None
         assert len(block.act_to_send) == 0
         
-        works = dist.batch_isend_irecv([w])
-        for w in works: w.wait()
-        
-        w2 = block.recv_backward(1)
+        w = block.recv_backward(1)
+        assert w is None
         assert len(block.grads) == 1
-        
-        works = dist.batch_isend_irecv([w2])
-        for w in works: w.wait()
 
-        block.backward()
+        y = block.backward()
+        assert y is None # only the last block should return its result
         assert len(block.grads) == 0
         assert len(block.activations) == 0
         assert len(block.inputs_to_keep) == 0
@@ -212,9 +183,7 @@ def test_block_multi(init_dist):
         assert len(block.inputs) == 0
 
         w = block.recv_forward(1)
-        works = dist.batch_isend_irecv([w])
-
-        for w in works: w.wait()
+        assert w is None
         assert len(block.inputs) == 1
 
         assert len(block.activations) == 0
@@ -242,21 +211,41 @@ def test_block_multi(init_dist):
         assert len(block.grads_to_send) == 1
 
         w = block.send_backward()
+        assert w is None
         assert len(block.grads_to_send) == 0
-        works = dist.batch_isend_irecv([w])
 
 @pytest.mark.multi
-def test_pipe_creation_multi(init_dist):
+def test_pipeline_creation_multi(init_dist):
     rank, local_rank, world_size = init_dist
 
     if world_size < 4:
-        dist.barrier()
-        if dist.is_initialized(): dist.destroy_process_group()
         pytest.skip(f'This test needs 4 gpus (and 4 processes) to run.')
+        return
 
+    # Test automatic placement + partitioning
     model = nn.Sequential(
         nn.Linear(1, 1), nn.Linear(1, 1), nn.Linear(1, 1), nn.Linear(1, 1)
     )
+    pipe = Pipeline(model)
+
+    # Test predefined placement
+    pipe = Pipeline(model, placement = [2, 3])
+    if rank == 2 or rank == 3: assert len(pipe.blocks) == 1
+    else: assert len(pipe.blocks) == 0
+
+    pipe = Pipeline(model, placement = [1, 2, 1, 2])
+    if rank == 1 or rank == 2: assert len(pipe.blocks) == 2
+    else: assert len(pipe.blocks) == 0
+
+    pipe = Pipeline(model, placement = [1, 2, 2, 3])
+    if rank == 0: assert len(pipe.blocks) == 0
+    else: assert len(pipe.blocks) == 1 # Blocks should be merged together
+
+    # Test predefined partition
+    layers = [l for l in model.children()] 
+    pipe = Pipeline(layers, partition = None)
+    assert len(pipe.blocks) == 1 # they get merged
+    assert pipe.placement == list(range(len(model))) # default value
 
     # Default
     pipe = Pipeline(model)
@@ -274,9 +263,9 @@ def test_pipe_creation_multi(init_dist):
         assert b1.next == 1
 
         assert b2.id == 2
-        assert b1.previous == 1
-        assert b1.next == 1
-    if rank == 1:
+        assert b2.previous == 1
+        assert b2.next == 1
+    elif rank == 1:
         assert len(pipe.blocks) == 2
         b1, b2 = pipe.blocks[0], pipe.blocks[1]
         assert b1.rank == b2.rank == rank
@@ -285,8 +274,8 @@ def test_pipe_creation_multi(init_dist):
         assert b1.next == 0
 
         assert b2.id == 3
-        assert b1.previous == 0
-        assert b1.next is None
+        assert b2.previous == 0
+        assert b2.next is None
     else:
         assert len(pipe.blocks) == 0
 
@@ -300,15 +289,14 @@ def test_pipe_creation_multi(init_dist):
 def test_pipe_correctness_multi(init_dist):
     rank, local_rank, world_size = init_dist
 
-    if world_size < 2:
-        dist.barrier()
-        if dist.is_initialized(): dist.destroy_process_group()
-        pytest.skip(f'This test needs at least 2 gpus (and processes) to run.')
+    if world_size < 4:
+        pytest.skip(f'This test needs at least 4 gpus (and processes) to run.')
+        return
 
     model = nn.Linear(3, 3, bias = False).cuda()
-    model.weight.data = torch.full((3, 3), rank, device = local_rank, dtype = torch.float32)
-    pipe = Pipeline([model], placement = [0, 1], partition = None)
-    last = 1
+    model.weight.data = torch.full((3, 3), rank + 1, device = local_rank, dtype = torch.float32)
+    pipe = Pipeline([model], placement = [0, 1, 2, 3], partition = None)
+    last = 3
 
     inputs = torch.randn((4, 3), device = local_rank)
     targets = torch.randn((4, 3), device = local_rank)
@@ -317,9 +305,9 @@ def test_pipe_correctness_multi(init_dist):
         dist.send(y, 0)
         dist.send(loss, 0)
         dist.send(targets, 0)
-    if rank == 0:
+    elif rank == 0:
         y = torch.empty_like(targets)
-        loss = torch.empty((1,), device = local_rank)
+        loss = torch.empty((1), device = local_rank)
         dist.recv(y, last)
         dist.recv(loss, last)
         dist.recv(targets, last)
