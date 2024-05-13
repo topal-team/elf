@@ -1,26 +1,22 @@
-from enum import Enum
 import torch.distributed as dist
 import time
 import os
 import matplotlib
 import matplotlib.pyplot as plt
+from .schedule import OperationType
 
 import logging
 logger = logging.getLogger("engine")
 
-class Operations(Enum):
-    RECV_FORWARD = 0
-    FORWARD = 1
-    SEND_FORWARD = 2
-    RECV_BACKWARD = 3
-    BACKWARD = 4
-    SEND_BACKWARD = 5
-    
-    def __repr__(self) -> str:
-        return self.name
-    
-    def __int__(self) -> int:
-        return self.value
+def op_to_str(op):
+    '''
+    Pretty print for dist.P2POp
+    '''
+    match op.op:
+        case dist.isend:
+            return f'Send to {op.peer}'
+        case dist.irecv:
+            return f'Receive from {op.peer}'
 
 class Engine():
     '''
@@ -32,51 +28,70 @@ class Engine():
         self.rank = self.blocks[0].rank if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
         self.id_to_block = {str(b.id): b for b in self.blocks}
+        self.comms = []
 
-    def train_step(self, batch, target, loss_fn, schedule, split_size = 1, viz_file = None):
+    def _run_comms(self):
+        if len(self.comms) == 0: return
+        works = dist.batch_isend_irecv(self.comms)
+        logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
+        for w in works: w.wait()
+        self.comms.clear()
+
+    def train_step(self, batch, target, loss_fn, schedule, split_size, viz_file = None):
         '''
         Perform forward + backward pass on a batch of data
-        '''        
+        '''
         splits = iter(batch.split(split_size, dim=0))
 
         result = []
+        losses = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
         curr = 0
         if viz_file is not None:
             stats = []
-        
-        for (id_, op, *options) in schedule:
-            if str(id_) in self.id_to_block:
-                block = self.id_to_block[str(id_)]
+            
+        for op in schedule:
+            if str(op.block_id) in self.id_to_block:
+                block = self.id_to_block[str(op.block_id)]
                 logger.debug(f'Computing {op} on block {block}')
                 if viz_file is not None: stats.append((time.time(), id_, op))
-                match op:
-                    case Operations.FORWARD:
-                        y = block.forward(*options)
-                        if y is not None: result.append(y)
-                    case Operations.BACKWARD:
-                        block.backward(*options)
-                    case Operations.SEND_FORWARD:
-                        block.send_forward()
-                    case Operations.SEND_BACKWARD:
-                        block.send_backward()
-                    case Operations.RECV_FORWARD:
+                match op.op:
+                    case OperationType.FORWARD:
+                        self._run_comms()
+                        y = block.forward(op.options)
+                        if y is not None:
+                            result.append(y)
+                    case OperationType.BACKWARD:
+                        self._run_comms()
+                        block.backward(op.options)
+                    case OperationType.SEND_FORWARD:
+                        if comm := block.send_forward(op.options):
+                            self.comms.append(comm)
+                    case OperationType.SEND_BACKWARD:
+                        if comm := block.send_backward(op.options):
+                            self.comms.append(comm)
+                    case OperationType.RECV_FORWARD:
                         if block.previous is None:
                             block.inputs.append((None, next(splits)))
-                        block.recv_forward()
-                    case Operations.RECV_BACKWARD:
+                        if comm := block.recv_forward(split_size[op.mb_id], op.options):
+                            self.comms.append(comm)
+                    case OperationType.RECV_BACKWARD:
                         if block.next is None:
                             nexti = curr + split_size[i]
-                            compute_loss(block, result[i], target[curr:nexti], loss_fn)
+                            loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
+                            losses.append(loss)
+                            logger.debug(f'{block} - Computed loss = {loss}')
                             i += 1
                             curr = nexti
-                        block.recv_backward()
+                        if comm := block.recv_backward(split_size[op.mb_id], op.options):
+                            self.comms.append(comm)
                     case _:
                         raise Exception(f'Unknown operation : {op}')
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         if viz_file is not None: stats.append((time.time(), self.rank, ".END"))
+        self._run_comms()
         dist.barrier()
         if viz_file is not None:
             for r in range(int(os.environ["WORLD_SIZE"])):
@@ -88,8 +103,7 @@ class Engine():
                             outfile.write(f'{self.rank}:{t}:{id_},{op}\n')
 
                 dist.barrier()
-        return result
-
+        return result, losses
 
 def compute_loss(block, output, target, loss_fn):
     '''
@@ -97,9 +111,10 @@ def compute_loss(block, output, target, loss_fn):
     '''
     output = output.detach()
     output.requires_grad = True
-    loss = loss_fn(output, target, reduction="sum")
+    loss = loss_fn(output, target, reduction = "sum")
     loss.backward()
     block.grads.append((None, output.grad.data))
+    return loss
 
 def visualize(path):
     '''
@@ -117,12 +132,12 @@ def visualize(path):
             operations[rank].append((times, id_op.strip()))
 
     colors = {
-        str(Operations.RECV_FORWARD): "gold",
-        str(Operations.FORWARD): "springgreen",
-        str(Operations.SEND_FORWARD): "orange",
-        str(Operations.RECV_BACKWARD): "plum",
-        str(Operations.BACKWARD): "red",
-        str(Operations.SEND_BACKWARD): "fuchsia",
+        str(OperationType.RECV_FORWARD): "gold",
+        str(OperationType.FORWARD): "springgreen",
+        str(OperationType.SEND_FORWARD): "orange",
+        str(OperationType.RECV_BACKWARD): "plum",
+        str(OperationType.BACKWARD): "red",
+        str(OperationType.SEND_BACKWARD): "fuchsia",
         ".END": "black"
     }
 
