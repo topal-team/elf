@@ -24,7 +24,7 @@ The object ``Pipeline`` from ``pipeline`` provides a simple API to automatically
 ```py
 from pipeline import Pipeline
 pipe = Pipeline(model)
-y = pipe(inputs)
+y, loss = pipe(inputs, targets, loss_fn)
 ```
 
 There are several arguments to modify its behaviour :
@@ -34,7 +34,7 @@ There are several arguments to modify its behaviour :
 
 ### Write your own schedule
 
-You can define your own schedule if you want to perform tests or use an unimplemented one. In order to do that, you simply have to write a function that takes as argument a ``placement`` and a number of micro batches ``n_micro_batches``, and returns the right sequence of operations as ``(block_id, op, [options])`` for the current device. Then, register it in the ``Pipeline`` class in ``pipeline.py``.
+You can define your own schedule if you want to perform tests or use an unimplemented one. In order to do that, you simply have to write a function that takes as argument a ``placement`` and a number of micro batches ``n_micro_batches``, and returns the right sequence of operations (see the ``Operation`` class in ``graph.py``). Then, register it in the ``Pipeline`` class in ``pipeline.py``.
 
 ### Change the pipeline behaviour
 
