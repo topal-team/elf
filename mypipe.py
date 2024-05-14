@@ -37,7 +37,7 @@ if __name__ == "__main__":
     for size in split_sizes:
         if (batch_size // size) % len(placement) != 0:
             if global_rank == 0: logger.warning(f'The number of micro batches should be a multiple of the number of stages ! Got {batch_size // size} and {len(placement)}. Skipping.')
-            continue
+            # continue
         if global_rank == 0: logger.info(f'Beginning bench for micro batches of size {size}')
 
         pipe = Pipeline(model, placement, schedule = schedule)
@@ -50,11 +50,11 @@ if __name__ == "__main__":
         
         iter_times = []
         for i in range(iters):
-            if global_rank == 0: logger.info(f'Iter {i}')
             start = time.time()
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
             end = time.time()
             iter_times.append(end - start)
+            if global_rank == 0: logger.info(f'Iter {i} : {end - start:.2f}s')
         t = sorted(iter_times)[iters // 2] # median
         if global_rank == 0:
             print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Median : {t:.3f}s')

@@ -3,8 +3,8 @@ from models.GPT import GPT, GPTXXLConfig as GPTConf
 from models.resnet import ResNet, Bottleneck
 
 vocab_size = 3072
-placement = [0, 1, 2, 3, 0, 1, 2, 3]
-schedule = "1f1b"
+placement = [0, 1, 2, 3, 3, 2, 1, 0]
+schedule = "hanayo"
 
 batch_size = 64
 split_sizes = [1, 2, 4, 8, 16]

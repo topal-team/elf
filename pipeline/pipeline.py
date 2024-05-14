@@ -275,7 +275,7 @@ class Pipeline():
 
             self.schedule = self.scheduler(self.placement, n_micro_batches)
             cycles = find_cycles(graph_from_schedule(self.schedule))
-            if cycles: logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
+            if cycles and self.blocks[0].rank == 0: logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
             for c in cycles:
                 fix_cycle(c)
             
