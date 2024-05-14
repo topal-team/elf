@@ -1,5 +1,3 @@
-import torch
-
 import logging
 logger = logging.getLogger("schedule")
 
@@ -99,36 +97,70 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False):
     if prefetching: return reorder_operations(schedule)
     return schedule
 
-def check_schedule(schedule):
-    counts = [0] * len(OperationType)
-    for (_, op, *_) in schedule:
-        counts[int(op)] += 1 # dirty indexing trick
-        if int(op) != 0 and op != OperationType.RECV_BACKWARD \
-                and counts[int(op) - 1] < counts[int(op)]: # Unfortunately, because of the asynchronous comms we cannot really check for recv_backward/send_forward order
-            return False, f"The order of operations is wrong !"
-    if not all (c == counts[0] for c in counts): 
-        return False, "Number of operations does not match !"
-    return True, "Schedule is correct :D"
+def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False):
+    schedule = []
+    n_devices = max(placement) + 1
+    n_stages = len(placement)
+    n_waves = n_stages // n_devices
+
+    for rank in range(n_devices):
+        ids = [i for i in range(len(placement)) if placement[i] == rank]
+        # Warmup Phase
+        i = 0
+        while i < n_micro_batches and i < (n_devices - rank):
+            schedule.append(Operation(ids[0], i, OperationType.RECV_FORWARD, rank))
+            schedule.append(Operation(ids[0], i, OperationType.FORWARD, rank))
+            schedule.append(Operation(ids[0], i, OperationType.SEND_FORWARD, rank))
+            i += 1
+        
+        # Steady
+        for i in range(n_micro_batches * n_waves):
+            if i % 2 == 0 and (i//2 < n_micro_batches):
+                schedule.append(Operation(ids[1], i // 2, OperationType.RECV_FORWARD, rank))
+                schedule.append(Operation(ids[1], i // 2, OperationType.FORWARD, rank))
+                schedule.append(Operation(ids[1], i // 2, OperationType.SEND_FORWARD, rank))
+            elif i//2 + n_devices - rank < n_micro_batches:
+                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.RECV_FORWARD, rank))
+                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.FORWARD, rank))
+                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.SEND_FORWARD, rank))
+            elif (i//2) < n_micro_batches:
+                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.RECV_BACKWARD, rank))
+                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.BACKWARD, rank))
+                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.SEND_BACKWARD, rank))
+
+        # Cooldown
+        todo = n_micro_batches * (n_waves - 1) - (n_devices - rank)
+        for i in range(n_micro_batches * n_waves):
+            if i % 2 == 0:
+                schedule.append(Operation(ids[0], i // 2, OperationType.RECV_BACKWARD, rank))
+                schedule.append(Operation(ids[0], i // 2, OperationType.BACKWARD, rank))
+                schedule.append(Operation(ids[0], i // 2, OperationType.SEND_BACKWARD, rank))
+            elif todo > 0:
+                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.RECV_BACKWARD, rank))
+                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.BACKWARD, rank))
+                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.SEND_BACKWARD, rank))
+                todo -= 1
+
+    if prefetching: return reorder_operations(schedule)
+    return schedule
 
 if __name__ == "__main__":
-    import torch
     from graph import *
-    placement = torch.tensor([0, 1, 2, 3])
-    schedule = generate_1f1b_schedule(placement, 4, prefetching = False)
-    graph = graph_from_schedule(schedule)
-    if cycles := find_cycles(graph):
-        logger.warning(f'Found potential deadlocks in the schedule !')
-        for c in cycles: print(c)
-        print()
+    placement = [0, 1, 2, 3, 3, 2, 1, 0]
+    schedule = generate_hanayo_schedule(placement, 4)
+    # graph = graph_from_schedule(schedule)
+    # if cycles := find_cycles(graph):
+    #     logger.warning(f'Found potential deadlocks in the schedule !')
+    #     for c in cycles: print(c)
+    #     print()
     
-    new_schedule = schedule_from_graph(graph)
-    for rank in range(len(placement)):
-        local_schedule = list(filter(lambda op: op.block_id == rank, schedule))
-        local_new_schedule = list(filter(lambda op: op.block_id == rank, new_schedule))
-        print(f'\nBlock {rank}\n')
-        print(local_schedule)
-        print()
-        print(local_new_schedule)
-        assert local_schedule == local_new_schedule
+    # new_schedule = schedule_from_graph(graph)
+    for rank in range(max(placement) + 1):
+        local_schedule = list(filter(lambda op: op.rank == rank, schedule))
+        # local_new_schedule = list(filter(lambda op: op.block_id == rank, new_schedule))
+        print(f'Rank {rank}')
+        print(local_schedule, "\n")
+        # print(local_new_schedule)
+        # assert local_schedule == local_new_schedule
 else:
     from .graph import *

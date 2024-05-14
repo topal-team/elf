@@ -245,6 +245,8 @@ class Pipeline():
                 self.scheduler = generate_afab_schedule
             case '1f1b':
                 self.scheduler = generate_1f1b_schedule
+            case 'hanayo':
+                self.scheduler = generate_hanayo_schedule
             case _:
                 raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b"].')
         
