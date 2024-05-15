@@ -28,6 +28,10 @@ class Engine():
         self.comms = []
 
     def _run_comms(self):
+        '''
+        Run all currently batched communications for this device
+        Internal function, this should not be used by the user
+        '''
         if len(self.comms) == 0: return
         works = dist.batch_isend_irecv(self.comms)
         logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
@@ -37,6 +41,9 @@ class Engine():
     def train_step(self, batch, target, loss_fn, schedule, split_size, profile = None):
         '''
         Perform forward + backward pass on a batch of data
+        batch: input data, only used on the first block of the pipeline
+        target: groundtruth, only used on the last block of the pipeline
+        loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own it needs to take the same parameter "reduction = 'sum'" as torch ones. 
         '''
         splits = iter(batch.split(split_size, dim=0))
 

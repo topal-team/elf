@@ -6,7 +6,6 @@ logger = logging.getLogger("schedule")
 def generate_afab_schedule(placement, n_micro_batches, *options, prefetching = False):
     '''
     All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
-    Supports any model placement
     '''
     schedule = []
     n_stages = len(placement)
@@ -29,7 +28,7 @@ def generate_afab_schedule(placement, n_micro_batches, *options, prefetching = F
                 schedule.append(Operation(id_, i, OperationType.SEND_BACKWARD, rank, *options))
     
     assert len(schedule) == n_micro_batches * n_stages * 2 * 3
-    if prefetching: return reorder_operations(schedule)
+    if prefetching: return enable_prefetching(schedule)
     return schedule
 
 def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False):
@@ -96,19 +95,8 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False):
             if (i - n_micro_batches - state) % (n_devices // 2) == 0 or (i - n_micro_batches - state) % n_micro_batches == 0:
                 b_b = (b_b - 1) % stages_per_device
 
-    if prefetching: return reorder_operations(schedule)
+    if prefetching: return enable_prefetching(schedule)
     return schedule
-
-def check_schedule(schedule):
-    counts = [0] * len(OperationType)
-    for (_, op, *_) in schedule:
-        counts[int(op)] += 1 # dirty indexing trick
-        if int(op) != 0 and op != OperationType.RECV_BACKWARD \
-                and counts[int(op) - 1] < counts[int(op)]: # Unfortunately, because of the asynchronous comms we cannot really check for recv_backward/send_forward order
-            return False, f"The order of operations is wrong !"
-    if not all (c == counts[0] for c in counts): 
-        return False, "Number of operations does not match !"
-    return True, "Schedule is correct :D"
 
 if __name__ == "__main__":
     import torch

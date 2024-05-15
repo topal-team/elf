@@ -98,6 +98,7 @@ class PipelineBlock():
     def forward(self, options = {}):
         '''
         Perform the forward pass for one tensor of activations and register it as computed
+        Returns the result if this is the last block of the pipeline, otherwise None
         '''
         if len(self.inputs) == 0: return
 
@@ -148,6 +149,7 @@ class PipelineBlock():
     def send_forward(self, options = {}):
         '''
         Send one activation to the next layer in the model
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         dst = options["dst"] if (options and "dst" in options.keys()) else self.next
         if dst is None or len(self.act_to_send) == 0: return
@@ -161,6 +163,7 @@ class PipelineBlock():
     def send_backward(self, options = {}):
         '''
         Send one gradient to the previous layer in the model
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         dst = options["dst"] if options and "dst" in options.keys() else self.previous
         if dst is None or len(self.grads_to_send) == 0: return
@@ -174,6 +177,7 @@ class PipelineBlock():
     def recv_forward(self, mb_size, options = {}):
         '''
         Receive and store one activation to forward
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         src = options["src"] if options and "src" in options.keys() else self.previous
         if src is None: return
@@ -192,6 +196,7 @@ class PipelineBlock():
     def recv_backward(self, mb_size, options = {}):
         '''
         Receive and store one gradient to backward
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         src = options["src"] if options and "src" in options.keys() else self.next
         if src is None: return
@@ -207,6 +212,10 @@ class PipelineBlock():
             self.grads.append((work, buffer))
     
     def register_metadata(self):
+        '''
+        Performs a pseudo forward pass to register the input and output shapes
+        !! We assume that every micro batch has the same shape, except for the micro batch size !!
+        '''
         if self.previous is not None:
             metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
             dist.recv(metadata, src = self.previous)
@@ -230,9 +239,9 @@ class Pipeline():
     def __init__(self, model, placement = "auto", partition = "auto", schedule = "afab"):
         '''
         model: torch module
-        placement: ranks on which each model block should be placed
-        partition: if your model is already partitioned, set to None. Otherwise leave the default, which will try to create balanced blocks according to their number of parameters
-        schedule: pipeline algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b")
+        placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
+        partition: if your model is already partitioned, set to None. Otherwise leave the default ("auto"), which will try to create balanced blocks according to their number of parameters
+        schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b")
         '''
         if not dist.is_initialized() or "RANK" not in os.environ.keys():
             logger.warning(f'Trying to create a pipeline but no multi-gpu distributed setup has been found.')
@@ -294,7 +303,6 @@ def create_pipeline(layers, placement):
     Transforms a list of layers placed on different devices to a working pipeline
     '''
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
-    local_rank = int(os.getenv("LOCAL_RANK")) if "LOCAL_RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
