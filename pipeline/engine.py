@@ -1,3 +1,8 @@
+'''
+Coordinates the execution of a schedule on a list of blocks at a device/rank level.
+Takes care of feeding the input to the first block and computing the loss on the last block.
+'''
+
 import torch
 import torch.distributed as dist
 from .schedule import OperationType
@@ -16,10 +21,6 @@ def op_to_str(op):
             return f'Receive from {op.peer}'
 
 class Engine():
-    '''
-    Schedule is a list of tuples (block id, operation)
-    It is supposed to be feasible and correct
-    '''
     def __init__(self, blocks):
         self.blocks = blocks
         self.rank = self.blocks[0].rank if blocks else None
@@ -38,12 +39,15 @@ class Engine():
         for w in works: w.wait()
         self.comms.clear()
 
-    def train_step(self, batch, target, loss_fn, schedule, split_size, profile = None):
+    def train_step(self, batch, target, loss_fn, schedule, split_size, profile = False):
         '''
         Perform forward + backward pass on a batch of data
         batch: input data, only used on the first block of the pipeline
         target: groundtruth, only used on the last block of the pipeline
         loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own it needs to take the same parameter "reduction = 'sum'" as torch ones. 
+        schedule: list of operations. For more info, look at ``schedule.py``
+        split_size: list of micro batch sizes. The list should cover the entire batch, i.e. sum(split_size) == batch_size
+        profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
         '''
         splits = iter(batch.split(split_size, dim=0))
 
@@ -57,7 +61,7 @@ class Engine():
             if str(op.block_id) in self.id_to_block:
                 block = self.id_to_block[str(op.block_id)]
                 logger.debug(f'Computing {op} on block {block}')
-                if profile is not None:
+                if profile:
                     torch.cuda.nvtx.range_push(f'{block}:{op}')
                 match op.op:
                     case OperationType.FORWARD:
@@ -92,9 +96,9 @@ class Engine():
                     case _:
                         raise Exception(f'Unknown operation : {op}')
         
-            if profile is not None:
+            if profile:
                 torch.cuda.nvtx.range_pop()
-                
+
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         self._run_comms()
         dist.barrier()

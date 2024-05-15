@@ -1,3 +1,9 @@
+'''
+Manage different types of schedule. All scheduling algorithm (GPipe, 1f1b, ...) are defined here.
+A schedule is a list of operations (see Operation in ``graph.py``) that will be executed in order by each device.
+Every rank should generate the entire schedule for all ranks, in order to detect and fix cycles/deadlocks.
+'''
+
 import torch
 
 import logging

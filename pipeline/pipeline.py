@@ -1,3 +1,7 @@
+'''
+Core pipeline objects. Define the user interface (Pipeline) and the behaviour of individual stages (PipelineBlock), by managing the p2p communications and data queues.
+'''
+
 import os
 import torch
 import torch.nn as nn
@@ -262,11 +266,11 @@ class Pipeline():
         self.engine = Engine(self.blocks)
         self.schedule = []
 
-    def __call__(self, batch, target, loss_fn, split_size = 1, profile = None):
+    def __call__(self, batch, target, loss_fn, split_size = 1, profile = False):
         '''
         Execute the schedule on a batch of data
         split_size: either int for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or list of micro batch sizes
-        profile: activate nvidia profiling. Set to None (default) to disable
+        profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
         '''
         if isinstance(split_size, int):
             n_micro_batches = batch.size(0) // split_size
