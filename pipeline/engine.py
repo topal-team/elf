@@ -92,8 +92,9 @@ class Engine():
                     case _:
                         raise Exception(f'Unknown operation : {op}')
         
-        if profile is not None:
-            torch.cuda.nvtx.range_pop()
+            if profile is not None:
+                torch.cuda.nvtx.range_pop()
+                
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         self._run_comms()
         dist.barrier()
