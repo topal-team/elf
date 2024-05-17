@@ -3,6 +3,7 @@ Core pipeline objects. Define the user interface (Pipeline) and the behaviour of
 '''
 
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -96,6 +97,8 @@ class PipelineBlock():
         self.metadata = None
         self.out_metadata = None
 
+        self.idle_time = 0
+
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
 
@@ -110,7 +113,11 @@ class PipelineBlock():
         
         work, x = self.inputs.popleft()
 
-        if work is not None: work.wait()
+        if work is not None:
+            start = time.time()
+            work.wait()
+            end = time.time()
+            self.idle_time += end - start
         
         if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
             x.requires_grad = True
@@ -143,7 +150,11 @@ class PipelineBlock():
             act = self.activations.popleft()
         work, grads = self.grads.popleft()
         
-        if work is not None: work.wait()
+        if work is not None:
+            start = time.time()
+            work.wait()
+            end = time.time()
+            self.idle_time += end - start
         
         (act * grads).sum().backward() # Optimal ? Maybe setting the gradients directly is faster
 

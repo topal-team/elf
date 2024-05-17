@@ -3,6 +3,7 @@ Coordinates the execution of a schedule on a list of blocks at a device/rank lev
 Takes care of feeding the input to the first block and computing the loss on the last block.
 '''
 
+import time
 import torch
 import torch.distributed as dist
 from .schedule import OperationType
@@ -34,10 +35,13 @@ class Engine():
         Internal function, this should not be used by the user
         '''
         if len(self.comms) == 0: return
+        start = time.time()
         works = dist.batch_isend_irecv(self.comms)
         logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
         for w in works: w.wait()
+        end = time.time()
         self.comms.clear()
+        return end - start
 
     def train_step(self, batch, target, loss_fn, schedule, split_size, profile = False):
         '''
@@ -51,11 +55,15 @@ class Engine():
         '''
         splits = iter(batch.split(split_size, dim=0))
 
+        idle_time = 0
+
         result = []
         losses = []
         i = 0 # TODO: change that ! maybe they're not computed in the same order
         # Add a micro_batch_id to the schedule nodes ?
         curr = 0
+
+        pipe_start = time.time()
             
         for op in schedule:
             if str(op.block_id) in self.id_to_block:
@@ -65,12 +73,12 @@ class Engine():
                     torch.cuda.nvtx.range_push(f'{block}:{op}')
                 match op.op:
                     case OperationType.FORWARD:
-                        self._run_comms()
+                        idle_time += self._run_comms()
                         y = block.forward(op.options)
                         if y is not None:
                             result.append(y)
                     case OperationType.BACKWARD:
-                        self._run_comms()
+                        idle_time += self._run_comms()
                         block.backward(op.options)
                     case OperationType.SEND_FORWARD:
                         if comm := block.send_forward(op.options):
@@ -100,8 +108,17 @@ class Engine():
                 torch.cuda.nvtx.range_pop()
 
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
-        self._run_comms()
+        idle_time += self._run_comms()
+        start = time.time()
         dist.barrier()
+        end = time.time()
+        idle_time += (end - start)
+        for block in self.blocks:
+            idle_time += block.idle_time
+            block.idle_time = 0
+
+        self.idle_time = idle_time
+        self.total_time = end - pipe_start
 
         return result, losses
 

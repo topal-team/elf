@@ -54,6 +54,7 @@ if __name__ == "__main__":
             if global_rank == 0: logger.info(f'Iter {i}')
             start = time.time()
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
+            print(f'Rank {global_rank} - Total time = {pipe.engine.total_time}, idle time = {pipe.engine.idle_time}')
             end = time.time()
             iter_times.append(end - start)
         t = sorted(iter_times)[iters // 2] # median
