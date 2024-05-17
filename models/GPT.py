@@ -76,6 +76,11 @@ class GPTXXLConfig(GPTConfig):
     n_head = 32
     n_embd = 2560
 
+class GPTHanayoConfig(GPTConfig):
+    n_layer = 128
+    n_head = 16
+    n_embd = 1024
+    
 class GPTXXXLConfig(GPTConfig):
     """ GPT3-XL like network roughly 6.7B params """
     n_layer = 32

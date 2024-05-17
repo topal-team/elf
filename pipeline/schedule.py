@@ -109,7 +109,7 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False):
         i = 0
         while i < n_micro_batches and i < (n_devices - rank):
             schedule.append(Operation(ids[0], i, OperationType.RECV_FORWARD, rank))
-            schedule.append(Operation(ids[0], i, OperationType.FORWARD, rank, {'remat': True}))
+            schedule.append(Operation(ids[0], i, OperationType.FORWARD, rank))
             schedule.append(Operation(ids[0], i, OperationType.SEND_FORWARD, rank))
             i += 1
         
@@ -117,15 +117,15 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False):
         for i in range(n_micro_batches * n_waves):
             if i % 2 == 0 and (i//2 < n_micro_batches):
                 schedule.append(Operation(ids[1], i // 2, OperationType.RECV_FORWARD, rank))
-                schedule.append(Operation(ids[1], i // 2, OperationType.FORWARD, rank, {'remat': True}))
+                schedule.append(Operation(ids[1], i // 2, OperationType.FORWARD, rank))
                 schedule.append(Operation(ids[1], i // 2, OperationType.SEND_FORWARD, rank))
             elif i//2 + n_devices - rank < n_micro_batches:
                 schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.RECV_FORWARD, rank))
-                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.FORWARD, rank, {'remat': True}))
+                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.FORWARD, rank))
                 schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.SEND_FORWARD, rank))
             elif (i//2) < n_micro_batches:
                 schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.RECV_BACKWARD, rank))
-                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.BACKWARD, rank, {'remat': True}))
+                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.BACKWARD, rank))
                 schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.SEND_BACKWARD, rank))
 
         # Cooldown
@@ -133,11 +133,11 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False):
         for i in range(n_micro_batches * n_waves):
             if i % 2 == 0:
                 schedule.append(Operation(ids[0], i // 2, OperationType.RECV_BACKWARD, rank))
-                schedule.append(Operation(ids[0], i // 2, OperationType.BACKWARD, rank, {'remat': True}))
+                schedule.append(Operation(ids[0], i // 2, OperationType.BACKWARD, rank))
                 schedule.append(Operation(ids[0], i // 2, OperationType.SEND_BACKWARD, rank))
             elif todo > 0:
                 schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.RECV_BACKWARD, rank))
-                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.BACKWARD, rank, {'remat': True}))
+                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.BACKWARD, rank))
                 schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.SEND_BACKWARD, rank))
                 todo -= 1
 

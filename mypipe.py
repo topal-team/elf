@@ -43,7 +43,7 @@ if __name__ == "__main__":
         pipe = Pipeline(model, placement, schedule = schedule)
         
         # Warmup
-        for i in range(5):
+        for i in range(3):
             if global_rank == 0: logger.info(f'Warmup {i}')
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
         torch.cuda.reset_peak_memory_stats()
@@ -56,9 +56,15 @@ if __name__ == "__main__":
             iter_times.append(end - start)
             if global_rank == 0: logger.info(f'Iter {i} : {end - start:.2f}s')
         t = sorted(iter_times)[iters // 2] # median
+        mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank == 0 else None
+        dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device = rank), mems, 0)
         if global_rank == 0:
             print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Median : {t:.3f}s')
-            f.write(f'{size},{t},{torch.cuda.max_memory_allocated() / (2**30)}\n')
+            f.write(f'{size},{t}')
+            for m in mems:
+                f.write(f',{m}')
+            f.write('\n')
+            
         times.append(t)
 
     if global_rank == 0: f.close()

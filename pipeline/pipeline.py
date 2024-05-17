@@ -310,6 +310,7 @@ def create_pipeline(layers, placement):
             merged_block.next = blocks[i + 1].next
             blocks[i] = merged_block
             blocks.pop(i + 1)
+            i -= 1
         i += 1
 
     return blocks
