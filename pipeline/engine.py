@@ -34,7 +34,7 @@ class Engine():
         Run all currently batched communications for this device
         Internal function, this should not be used by the user
         '''
-        if len(self.comms) == 0: return
+        if len(self.comms) == 0: return 0
         start = time.time()
         works = dist.batch_isend_irecv(self.comms)
         logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')

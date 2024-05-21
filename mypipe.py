@@ -36,31 +36,38 @@ if __name__ == "__main__":
 
     times = []
     for size in split_sizes:
-        if (batch_size // size) % len(placement) != 0:
-            if global_rank == 0: logger.warning(f'The number of micro batches should be a multiple of the number of stages ! Got {batch_size // size} and {len(placement)}. Skipping.')
-            continue
+        #if (batch_size // size) % len(placement) != 0:
+            # if global_rank == 0: logger.warning(f'The number of micro batches should be a multiple of the number of stages ! Got {batch_size // size} and {len(placement)}. Skipping.')
+            # continue
         if global_rank == 0: logger.info(f'Beginning bench for micro batches of size {size}')
 
         pipe = Pipeline(model, placement, schedule = schedule)
         
         # Warmup
-        for i in range(5):
+        for i in range(3):
             if global_rank == 0: logger.info(f'Warmup {i}')
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
         torch.cuda.reset_peak_memory_stats()
         
         iter_times = []
+        idles = []
         for i in range(iters):
             if global_rank == 0: logger.info(f'Iter {i}')
             start = time.time()
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
-            print(f'Rank {global_rank} - Total time = {pipe.engine.total_time}, idle time = {pipe.engine.idle_time}')
             end = time.time()
             iter_times.append(end - start)
+            idles.append(pipe.engine.idle_time / pipe.engine.total_time)
         t = sorted(iter_times)[iters // 2] # median
+        i = sorted(idles)[iters // 2] # median
+        mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank is 0 else None
+        dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device = rank), mems, 0)
         if global_rank == 0:
             print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Median : {t:.3f}s')
-            f.write(f'{size},{t},{torch.cuda.max_memory_allocated() / (2**30)}\n')
+            f.write(f'{size},{t},{i}')
+            for m in mems:
+                f.write(f',{m}')
+            f.write('\n')
         times.append(t)
 
     torch.cuda.cudart().cudaProfilerStop()
