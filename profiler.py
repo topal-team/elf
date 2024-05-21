@@ -24,14 +24,14 @@ if __name__ == "__main__":
     torch.cuda.set_device(int(os.getenv("LOCAL_RANK")))
     dist.init_process_group(backend = "nccl")
 
-    pipe = Pipeline(model, placement = [0, 1, 2, 3], schedule = "afab")
+    pipe = Pipeline(model, placement = [0, 1, 2, 3, 3, 2, 1, 0], schedule = "hanayo")
     # Warmup
     for _ in range(5):
         pipe(inputs.cuda(), torch.empty(0), lambda x,y,**_: x.sum(), split_size=2, profile = None)
     
     torch.cuda.cudart().cudaProfilerStart()
 
-    pipe(inputs.cuda(), torch.empty(0), lambda x,y,**_: x.sum(), split_size=2, profile = None)
+    pipe(inputs.cuda(), torch.empty(0), lambda x,y,**_: x.sum(), split_size=2, profile = True)
 
     torch.cuda.cudart().cudaProfilerStop()
 

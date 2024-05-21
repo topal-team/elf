@@ -13,10 +13,11 @@ if __name__ == "__main__":
     inputs = inputs.cuda()
     
     sequential = PipelineGPT(model, devices = placement, vocab_size = vocab_size, input_shape = inputs.shape)
+    devices = [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
 
     f = open("torchpipe.out", "w")
 
-    split_sizes = [1, 2, 4, 8, 16, 32]
+    split_sizes = [1, 2, 4, 8, 16]
     times = []
     for size in split_sizes:
         pipelined = Pipe(sequential, chunks = batch_size // size, checkpoint = 'never')
@@ -27,7 +28,8 @@ if __name__ == "__main__":
             loss = y.sum()
             loss.backward()
 
-        torch.cuda.reset_peak_memory_stats()
+        for d in devices:
+            torch.cuda.reset_peak_memory_stats()
         iter_times = []
         for _ in range(iters):
             start = time.time()
@@ -37,6 +39,9 @@ if __name__ == "__main__":
             end = time.time()
             iter_times.append(end - start)
         t = sorted(iter_times)[iters // 2] # median
-        f.write(f'{size},{t}\n')
+        f.write(f'{size},{t}')
+        for d in devices:
+            f.write(f',{torch.cuda.max_memory_allocated(d) / (2**30)}')
+        f.write('\n')
         print(f'Time taken by torch pipe (size {size}) : {end - start:.2f}s. Median : {t:.3f}s')
         times.append(t)

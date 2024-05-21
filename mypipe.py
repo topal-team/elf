@@ -52,7 +52,6 @@ if __name__ == "__main__":
         iter_times = []
         idles = []
         for i in range(iters):
-            if global_rank == 0: logger.info(f'Iter {i}')
             start = time.time()
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
             end = time.time()

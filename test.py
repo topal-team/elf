@@ -53,7 +53,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size):
     target = torch.randn_like(batch, device = rank) # No need to share since only last device will use this anyway
 
     pipe = Pipeline(blocks, placement, partition = None, schedule = scheduler)
-    output = pipe(batch, target, F.mse_loss, split_size)
+    output, _ = pipe(batch, target, F.mse_loss, split_size)
     blocks = pipe.blocks # we shouldn't access directly the internal modules but it's for the purpose of testing
     grads = None
     if global_rank == placement[0]:
@@ -120,9 +120,6 @@ if __name__ == "__main__":
     # Load your model here (each process should load the right layers depending on placement)
 
     placements = [
-        [0, 1, 2, 3],
-        [0, 1, 2, 3, 0, 1, 2, 3],
-        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
         [0, 1, 2, 3, 3, 2, 1, 0], # Hanayo style
         [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
     ]
@@ -135,7 +132,7 @@ if __name__ == "__main__":
             # if b < len(p): continue
             if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
             layers = load_parts_model(p, global_rank)
-            test_pipeline(layers, p, "afab", b)
+            test_pipeline(layers, p, "hanayo", b)
             dist.barrier()
             
     if dist.is_initialized():

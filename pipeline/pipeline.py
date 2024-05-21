@@ -269,6 +269,8 @@ class Pipeline():
                 self.scheduler = generate_afab_schedule
             case '1f1b':
                 self.scheduler = generate_1f1b_schedule
+            case 'hanayo':
+                self.scheduler = generate_hanayo_schedule
             case _:
                 raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b"].')
         
@@ -297,7 +299,7 @@ class Pipeline():
 
             self.schedule = self.scheduler(self.placement, n_micro_batches)
             cycles = find_cycles(graph_from_schedule(self.schedule))
-            if cycles: logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
+            if cycles and self.blocks[0].rank == 0: logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
             for c in cycles:
                 fix_cycle(c)
             
@@ -331,6 +333,7 @@ def create_pipeline(layers, placement):
             merged_block.next = blocks[i + 1].next
             blocks[i] = merged_block
             blocks.pop(i + 1)
+            i -= 1
         i += 1
 
     return blocks
