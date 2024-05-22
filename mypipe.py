@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 import os
 import time
+import numpy as np
 from pipeline.pipeline import Pipeline
 from argparse import ArgumentParser
 from settings import *
@@ -57,13 +58,29 @@ if __name__ == "__main__":
             end = time.time()
             iter_times.append(end - start)
             idles.append(pipe.engine.idle_time / pipe.engine.total_time)
+            
         t = sorted(iter_times)[iters // 2] # median
         i = sorted(idles)[iters // 2] # median
-        mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank is 0 else None
+        
+        std = np.std(iter_times)
+        if std > (t / 20):
+            logger.warning(f'Very high standard deviation for iter times ! ({std} for t = {t}) Something is probably wrong')
+        std = np.std(idles)
+        if std > (i / 20):
+            logger.warning(f'Very high standard deviation for idle times ! ({std} for i = {i}) Something is probably wrong')
+        
+        mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank == 0 else None
         dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device = rank), mems, 0)
+        
+        itimes = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank == 0 else None
+        dist.gather(torch.tensor(i, device = rank), itimes, 0)
+        
         if global_rank == 0:
-            print(f'Time taken by custom pipe (size {size}) : {end - start:.2f}s. Median : {t:.3f}s')
-            f.write(f'{size},{t},{i}')
+            print(f'Size {size} :\n\tMedian time : {t:.3f}s\n\tIdle time : {i:.3f}s or {100 * i / t:.1f}% of total time')
+            
+            f.write(f'{size},{t}')
+            for i in itimes:
+                f.write(f',{i}')
             for m in mems:
                 f.write(f',{m}')
             f.write('\n')
