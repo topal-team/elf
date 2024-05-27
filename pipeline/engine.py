@@ -59,8 +59,7 @@ class Engine():
 
         result = []
         losses = []
-        i = 0 # TODO: change that ! maybe they're not computed in the same order
-        # Add a micro_batch_id to the schedule nodes ?
+        i = 0
         curr = 0
 
         pipe_start = time.time()
@@ -68,7 +67,7 @@ class Engine():
         for op in schedule:
             if str(op.block_id) in self.id_to_block:
                 block = self.id_to_block[str(op.block_id)]
-                logger.debug(f'Computing {op} on block {block}')
+                logger.debug(f'Executing {op} on block {block}')
                 if profile:
                     torch.cuda.nvtx.range_push(f'{block}:{op}')
                 match op.op:

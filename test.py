@@ -11,7 +11,7 @@ logger = logging.getLogger(f'main')
 logging.basicConfig(level = logging.DEBUG)
 
 def create_model():
-    all_layers = [nn.Linear(3, 3, bias=False) for i in range(32)]
+    all_layers = [nn.Linear(3000, 3000, bias=False) for i in range(32)]
 
     model = nn.Sequential(*all_layers)
     torch.save(model, "test-model.pt")
@@ -41,7 +41,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size):
     '''
 
     split_size = 1
-    batch = torch.randn((batch_size, 3), device = rank)
+    batch = torch.randn((batch_size, 3000), device = rank)
 
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
@@ -120,11 +120,13 @@ if __name__ == "__main__":
     # Load your model here (each process should load the right layers depending on placement)
 
     placements = [
-        [0, 1, 2, 3, 3, 2, 1, 0], # Hanayo style
-        [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
+        [0, 1, 2, 3],
+        [0, 1, 2, 3, 0, 1, 2, 3],
+        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
     ]
 
     batch_sizes = [4, 8, 16, 32]
+    schedule = "1f1b"
 
     # Check that the results and gradients are the same as a single-gpu model
     for p in placements:
@@ -132,7 +134,7 @@ if __name__ == "__main__":
             # if b < len(p): continue
             if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
             layers = load_parts_model(p, global_rank)
-            test_pipeline(layers, p, "hanayo", b)
+            test_pipeline(layers, p, schedule, b)
             dist.barrier()
             
     if dist.is_initialized():

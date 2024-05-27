@@ -23,7 +23,7 @@ if __name__ == "__main__":
         pipelined = Pipe(sequential, chunks = batch_size // size, checkpoint = 'never')
     
         # Warmup
-        for _ in range(3):
+        for _ in range(5):
             y = pipelined(inputs.clone()).local_value()[0]
             loss = y.sum()
             loss.backward()

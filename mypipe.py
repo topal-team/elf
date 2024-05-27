@@ -28,9 +28,14 @@ if __name__ == "__main__":
     global_rank = int(os.environ["RANK"])
     
     torch.cuda.set_device(rank)
+    fileout = "results.csv"
+    
     dist.init_process_group(backend="nccl")
 
-    if global_rank == 0: f = open("mypipe.out", "w")
+    if global_rank == 0:
+        with open(fileout, "w") as f:
+            f.write('mb_size,total_time,idle_ratio_0,idle_ratio_1,idle_ratio_2,idle_ratio_3,mem_0,mem_1,mem_2,mem_3\n')
+        
     torch.cuda.cudart().cudaProfilerStart()
     
     inputs = inputs.cuda()
@@ -45,11 +50,12 @@ if __name__ == "__main__":
         pipe = Pipeline(model, placement, schedule = schedule)
         
         # Warmup
-        for i in range(3):
-            if global_rank == 0: logger.info(f'Warmup {i}')
+        if global_rank == 0: logger.info(f'Warming up')
+        for i in range(5):
             _ = pipe(inputs.clone(), torch.empty(0), lambda x,y,**_: x.sum(), size)
         torch.cuda.reset_peak_memory_stats()
-        
+
+        if global_rank == 0: logger.info(f'Benchmark')
         iter_times = []
         idles = []
         for i in range(iters):
@@ -63,11 +69,11 @@ if __name__ == "__main__":
         i = sorted(idles)[iters // 2] # median
         
         std = np.std(iter_times)
-        if std > (t / 20):
-            logger.warning(f'Very high standard deviation for iter times ! ({std} for t = {t}) Something is probably wrong')
+        if std > (t / 50):
+            logger.warning(f'High standard deviation for iter times ! ({std} for t = {t}, or {100 * std / t}%). Something is probably wrong')
         std = np.std(idles)
-        if std > (i / 20):
-            logger.warning(f'Very high standard deviation for idle times ! ({std} for i = {i}) Something is probably wrong')
+        if std > (i / 50):
+            logger.warning(f'High standard deviation for idle times ! ({std} for i = {i}, or {100 * std / i}%). Something is probably wrong')
         
         mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank == 0 else None
         dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device = rank), mems, 0)
@@ -77,13 +83,15 @@ if __name__ == "__main__":
         
         if global_rank == 0:
             print(f'Size {size} :\n\tMedian time : {t:.3f}s\n\tIdle time : {i:.3f}s or {100 * i / t:.1f}% of total time')
-            
-            f.write(f'{size},{t}')
-            for i in itimes:
-                f.write(f',{i}')
-            for m in mems:
-                f.write(f',{m}')
-            f.write('\n')
+
+            with open(fileout, "a") as f:
+                f.write(f'{size},{t}')
+                for i in itimes:
+                    f.write(f',{i}')
+                for m in mems:
+                    f.write(f',{m}')
+                f.write('\n')
+                f.flush()
         times.append(t)
 
     torch.cuda.cudart().cudaProfilerStop()
