@@ -7,6 +7,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from torch.autograd.variable import Variable
 from .schedule import *
 from .engine import Engine
 from collections import deque
@@ -24,6 +25,11 @@ dtypes = [
     torch.bool
 ]
 
+def deallocate_tensor(t):
+    if t._base is not None:
+        return # useless to deallocate a view as it will not do anything
+    t.data = torch.empty((1,), device = t.device, dtype = t.dtype)
+     
 class TensorMetadata():
     '''
     Informations about Tensors that are sent and received in p2p communication
@@ -106,7 +112,7 @@ class PipelineBlock():
         '''
         Perform the forward pass for one tensor of activations and register it as computed
         Returns the result if this is the last block of the pipeline, otherwise None
-        '''
+        '''        
         if len(self.inputs) == 0: return
         
         work, x = self.inputs.popleft()
@@ -114,6 +120,7 @@ class PipelineBlock():
         if work is not None:
             start = time.time()
             work.wait()
+            if options.get("time"): torch.cuda.synchronize()
             end = time.time()
             self.idle_time += end - start
         
@@ -151,7 +158,6 @@ class PipelineBlock():
         elif options.get('offload'):
             act = self.activations.popleft().cuda()
             # x = x.cuda()
-            # if x.requires_grad: x.retain_grad = True # Not a leaf because of data movements, but we need its gradients
         else:
             act = self.activations.popleft()
         work, grads = self.grads.popleft()
@@ -159,12 +165,22 @@ class PipelineBlock():
         if work is not None:
             start = time.time()
             work.wait()
+            if options.get("time"): torch.cuda.synchronize()
             end = time.time()
             self.idle_time += end - start
-            
-        grads.requires_grad = False
         
-        (act * grads).sum().backward() # Optimal ? Maybe setting the gradients directly is faster
+        # Tensor data may have been deallocated after being sent
+        # PyTorch checks that grads and data have the same shape with default .backward(), so we bypass by directly calling the cpp backend
+        # see https://github.com/NVIDIA/Megatron-LM/blob/0650d8335d45162845398a97880374b81c4d84b1/megatron/core/pipeline_parallel/schedules.py#L142
+        Variable._execution_engine.run_backward(
+            tensors = (act,),
+            grad_tensors = (grads,),
+            keep_graph = False,
+            create_graph = False,
+            inputs = tuple(),
+            allow_unreachable = True,
+            accumulate_grad = True
+        )
 
         if x.requires_grad:
             self.grads_to_send.append(x.grad.data)
@@ -174,6 +190,16 @@ class PipelineBlock():
         Send one activation to the next layer in the model
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
+        def callback_free(future):
+            '''
+            Once the activation has been sent, we don't need the actual data, only its grad function
+            This is a callback to free the data when the p2p send is done
+            see https://github.com/NVIDIA/Megatron-LM/blob/0650d8335d45162845398a97880374b81c4d84b1/megatron/core/pipeline_parallel/schedules.py#L107
+            '''
+            tensors = future.value()
+            for t in tensors:
+                deallocate_tensor(t)
+            
         dst = options.get("dst") or self.next
         if dst is None or len(self.act_to_send) == 0: return
 
@@ -182,7 +208,8 @@ class PipelineBlock():
         if options.get("batch"): return dist.P2POp(dist.isend, activations, dst)
         else:
             logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-            dist.isend(activations, dst)
+            future = dist.isend(activations, dst).get_future()
+            future.then(callback_free)
 
     def send_backward(self, options = {}):
         '''
@@ -288,7 +315,7 @@ class Pipeline():
         self.engine = Engine(self.blocks)
         self.schedule = []
 
-    def __call__(self, batch, target, loss_fn, split_size = 1, profile = False):
+    def __call__(self, batch, target, loss_fn, split_size = 1, profile = False, **options):
         '''
         Execute the schedule on a batch of data
         split_size: either int for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or list of micro batch sizes
@@ -306,7 +333,7 @@ class Pipeline():
             
         if len(self.schedule) != (n_micro_batches * len(self.placement) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
 
-            self.schedule = self.scheduler(self.placement, n_micro_batches, offload=True)
+            self.schedule = self.scheduler(self.placement, n_micro_batches, options = options)
             cycles = find_cycles(graph_from_schedule(self.schedule))
             if cycles and self.blocks[0].rank == 0: logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
             for c in cycles:
