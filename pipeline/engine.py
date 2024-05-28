@@ -1,3 +1,4 @@
+import torch
 import torch.distributed as dist
 import time
 import os
@@ -35,6 +36,7 @@ class Engine():
         works = dist.batch_isend_irecv(self.comms)
         logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
         for w in works: w.wait()
+        torch.cuda.synchronize()
         self.comms.clear()
 
     def train_step(self, batch, target, loss_fn, schedule, split_size, viz_file = None):
@@ -52,42 +54,49 @@ class Engine():
             stats = []
             
         for op in schedule:
-            if str(op.block_id) in self.id_to_block:
-                block = self.id_to_block[str(op.block_id)]
-                logger.debug(f'Computing {op} on block {block}')
-                if viz_file is not None: stats.append((time.time(), id_, op))
-                match op.op:
-                    case OperationType.FORWARD:
-                        self._run_comms()
-                        y = block.forward(op.options)
-                        if y is not None:
-                            result.append(y)
-                    case OperationType.BACKWARD:
-                        self._run_comms()
-                        block.backward(op.options)
-                    case OperationType.SEND_FORWARD:
-                        if comm := block.send_forward(op.options):
-                            self.comms.append(comm)
-                    case OperationType.SEND_BACKWARD:
-                        if comm := block.send_backward(op.options):
-                            self.comms.append(comm)
-                    case OperationType.RECV_FORWARD:
-                        if block.previous is None:
-                            block.inputs.append((None, next(splits)))
-                        if comm := block.recv_forward(split_size[op.mb_id], op.options):
-                            self.comms.append(comm)
-                    case OperationType.RECV_BACKWARD:
-                        if block.next is None:
-                            nexti = curr + split_size[i]
-                            loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
-                            losses.append(loss)
-                            logger.debug(f'{block} - Computed loss = {loss}')
-                            i += 1
-                            curr = nexti
-                        if comm := block.recv_backward(split_size[op.mb_id], op.options):
-                            self.comms.append(comm)
-                    case _:
-                        raise Exception(f'Unknown operation : {op}')
+            block = self.id_to_block.get(str(op.block_id))
+            if block is None: continue # not my job
+
+            logger.debug(f'Computing {op} on block {block} with options {op.options}')
+            if viz_file is not None: stats.append((time.time(), id_, op))
+            match op.op:
+                case OperationType.FORWARD:
+                    self._run_comms()
+                    y = block.forward(op.options)
+                    if y is not None:
+                        result.append(y)
+                case OperationType.BACKWARD:
+                    self._run_comms()
+                    block.backward(op.options)
+                case OperationType.SEND_FORWARD:
+                    if (op.options.get("dst") or block.next) == block.rank:
+                        next_block = self.id_to_block.get(str(op.block_id + 1))
+                        next_block.inputs.append((None, block.act_to_send.popleft().detach()))
+                    if comm := block.send_forward(op.options):
+                        self.comms.append(comm)
+                case OperationType.SEND_BACKWARD:
+                    if (op.options.get("src") or block.previous) == block.rank:
+                        next_block = self.id_to_block.get(str(op.block_id - 1))
+                        next_block.grads.append((None, block.grads_to_send.popleft().detach()))
+                    if comm := block.send_backward(op.options):
+                        self.comms.append(comm)
+                case OperationType.RECV_FORWARD:
+                    if block.previous is None:
+                        block.inputs.append((None, next(splits)))
+                    if comm := block.recv_forward(split_size[op.mb_id], op.options):
+                        self.comms.append(comm)
+                case OperationType.RECV_BACKWARD:
+                    if block.next is None:
+                        nexti = curr + split_size[i]
+                        loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
+                        losses.append(loss)
+                        logger.debug(f'{block} - Computed loss = {loss}')
+                        i += 1
+                        curr = nexti
+                    if comm := block.recv_backward(split_size[op.mb_id], op.options):
+                        self.comms.append(comm)
+                case _:
+                    raise Exception(f'Unknown operation : {op}')
         
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
         if viz_file is not None: stats.append((time.time(), self.rank, ".END"))

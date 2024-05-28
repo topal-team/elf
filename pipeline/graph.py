@@ -15,7 +15,7 @@ class OperationType(Enum):
         return self.value
 
 class Operation():
-    def __init__(self, block_id, mb_id, op, rank, options = {}):
+    def __init__(self, block_id, mb_id, op, rank, **options):
         self.block_id = block_id
         self.op = op
         self.mb_id = mb_id
@@ -47,29 +47,23 @@ def print_graph(graph, level = 0):
 def graph_from_schedule(schedule):
     # For each one, add forward/backward dependencies (from the sequential nature)
     for operation in schedule:
-        def match_op(op, block_id, list_op):
-            return op.mb_id == operation.mb_id and op.block_id == block_id and op.op in list_op
+        def match_op(op, block_id, op_type):
+            return op.mb_id == operation.mb_id and op.block_id == block_id and op.op == op_type
         
         match operation.op:
-            case OperationType.SEND_BACKWARD:
-                deps = [op for op in schedule if \
-                         match_op(op, operation.block_id, \
-                                    [OperationType.BACKWARD]) or \
-                                    match_op(op, operation.block_id - 1, \
-                                    [OperationType.RECV_BACKWARD])]
-                
-            case OperationType.BACKWARD:
-                deps = [op for op in schedule if match_op(op, operation.block_id, [OperationType.RECV_BACKWARD, OperationType.FORWARD])]
-            # case OperationType.RECV_BACKWARD:
-            #     deps = [op for op in schedule if match_op(op, operation.block_id + 1, [OperationType.SEND_BACKWARD])]
             case OperationType.SEND_FORWARD:
-                deps = [op for op in schedule if match_op(op, operation.block_id, [OperationType.FORWARD]) or match_op(op, operation.block_id + 1, [OperationType.RECV_FORWARD])]
+                deps = [op for op in schedule if match_op(op, operation.block_id + 1, OperationType.RECV_FORWARD)]
             case OperationType.FORWARD:
-                deps = [op for op in schedule if match_op(op, operation.block_id, [OperationType.RECV_FORWARD])]
-            # case OperationType.RECV_FORWARD:
-            #     deps = [op for op in schedule if match_op(op, operation.block_id - 1, [OperationType.SEND_FORWARD])]
+                deps = [op for op in schedule if match_op(op, operation.block_id, OperationType.RECV_FORWARD) or 
+                        match_op(op, operation.block_id - 1, OperationType.SEND_FORWARD)]
+            case OperationType.SEND_BACKWARD:
+                deps = [op for op in schedule if match_op(op, operation.block_id - 1, OperationType.RECV_BACKWARD)]
+            case OperationType.BACKWARD:
+                deps = [op for op in schedule if match_op(op, operation.block_id, OperationType.RECV_BACKWARD) or
+                        match_op(op, operation.block_id + 1, OperationType.SEND_BACKWARD)]
             case _:
                 deps = []
+                
         for d in deps:
             operation.add_dependency(d)
 
@@ -81,7 +75,8 @@ def graph_from_schedule(schedule):
             continue
         for j in reversed(range(i)):
             last_op = schedule[j]
-            if last_op.op in [OperationType.FORWARD, OperationType.BACKWARD] or \
+            # Only send operations are blocking
+            if last_op.op in [OperationType.RECV_FORWARD, OperationType.RECV_BACKWARD, OperationType.FORWARD, OperationType.BACKWARD] or \
                 last_op.rank != current_op.rank:
                 continue
             current_op.add_dependency(last_op)
@@ -97,7 +92,6 @@ def schedule_from_graph(graph):
         # Mark the current node as visited
         if node in visited: return
         visited.add(node)
-        # print(f'Visiting {node}')
         
         # Recur for all the nodes dependent on this node
         for dependent in node.dependencies:
@@ -105,7 +99,6 @@ def schedule_from_graph(graph):
                 dfs(dependent, visited, stack)
         
         # Push current node to stack which stores the result
-        # print(f'Appending {node} to stack')
         stack.append(node)
 
     visited = set()

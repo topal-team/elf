@@ -101,45 +101,51 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False):
     schedule = []
     n_devices = max(placement) + 1
     n_stages = len(placement)
-    n_waves = n_stages // n_devices
+    n_waves = n_stages // (n_devices * 2)
 
+    ids = [[i for i in range(n_stages) if placement[i] == rank] for rank in range(n_devices)]
+
+    done = [0 for _ in range(n_devices)] # mb computed forward :)
+    enod = [0 for _ in range(n_devices)] # mb computed backward (:
+
+    # Warmup
     for rank in range(n_devices):
-        ids = [i for i in range(len(placement)) if placement[i] == rank]
-        # Warmup Phase
-        i = 0
-        while i < n_micro_batches and i < (n_devices - rank):
-            schedule.append(Operation(ids[0], i, OperationType.RECV_FORWARD, rank))
-            schedule.append(Operation(ids[0], i, OperationType.FORWARD, rank))
-            schedule.append(Operation(ids[0], i, OperationType.SEND_FORWARD, rank))
-            i += 1
-        
-        # Steady
-        for i in range(n_micro_batches * n_waves):
-            if i % 2 == 0 and (i//2 < n_micro_batches):
-                schedule.append(Operation(ids[1], i // 2, OperationType.RECV_FORWARD, rank))
-                schedule.append(Operation(ids[1], i // 2, OperationType.FORWARD, rank))
-                schedule.append(Operation(ids[1], i // 2, OperationType.SEND_FORWARD, rank))
-            elif i//2 + n_devices - rank < n_micro_batches:
-                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.RECV_FORWARD, rank))
-                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.FORWARD, rank))
-                schedule.append(Operation(ids[0], (i//2) + n_devices - rank, OperationType.SEND_FORWARD, rank))
-            elif (i//2) < n_micro_batches:
-                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.RECV_BACKWARD, rank))
-                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.BACKWARD, rank))
-                schedule.append(Operation(ids[1], (i - 2 * rank) // 2, OperationType.SEND_BACKWARD, rank))
+        done[rank] = min(n_devices - rank, n_micro_batches)
+        for i in range(done[rank]):
+            schedule.append(Operation(ids[rank][0], i, OperationType.RECV_FORWARD, rank))
+            schedule.append(Operation(ids[rank][0], i, OperationType.FORWARD, rank))
+            schedule.append(Operation(ids[rank][0], i, OperationType.SEND_FORWARD, rank))
 
-        # Cooldown
-        todo = n_micro_batches * (n_waves - 1) - (n_devices - rank)
-        for i in range(n_micro_batches * n_waves):
-            if i % 2 == 0:
-                schedule.append(Operation(ids[0], i // 2, OperationType.RECV_BACKWARD, rank))
-                schedule.append(Operation(ids[0], i // 2, OperationType.BACKWARD, rank))
-                schedule.append(Operation(ids[0], i // 2, OperationType.SEND_BACKWARD, rank))
-            elif todo > 0:
-                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.RECV_BACKWARD, rank))
-                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.BACKWARD, rank))
-                schedule.append(Operation(ids[1], n_micro_batches - todo, OperationType.SEND_BACKWARD, rank))
-                todo -= 1
+    for w in range(n_waves):
+        for mb in range(n_micro_batches):
+            for rank in reversed(range(n_devices)):
+                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.RECV_FORWARD, rank))
+                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.FORWARD, rank))
+                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.SEND_FORWARD, rank))
+            
+                if done[rank] < n_micro_batches * n_waves:
+                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.RECV_FORWARD, rank))
+                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.FORWARD, rank))
+                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.SEND_FORWARD, rank))
+                    done[rank] += 1
+                else:
+                    schedule.append(Operation(ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.RECV_BACKWARD, rank))
+                    schedule.append(Operation(ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.BACKWARD, rank))
+                    schedule.append(Operation(ids[rank][- 1- 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank))
+                    enod[rank] += 1
+
+    for w in range(n_waves):
+        for mb in range(n_micro_batches):
+            for rank in reversed(range(n_devices)):
+                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.RECV_BACKWARD, rank))
+                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.BACKWARD, rank))
+                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.SEND_BACKWARD, rank))
+
+                if enod[rank] < n_micro_batches * n_waves:
+                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.RECV_BACKWARD, rank))
+                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.BACKWARD, rank))
+                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank))
+                    enod[rank] += 1
 
     if prefetching: return reorder_operations(schedule)
     return schedule
@@ -147,12 +153,12 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False):
 if __name__ == "__main__":
     from graph import *
     placement = [0, 1, 2, 3, 3, 2, 1, 0]
-    schedule = generate_hanayo_schedule(placement, 4)
-    # graph = graph_from_schedule(schedule)
-    # if cycles := find_cycles(graph):
-    #     logger.warning(f'Found potential deadlocks in the schedule !')
-    #     for c in cycles: print(c)
-    #     print()
+    schedule = generate_hanayo_schedule(placement, 2)
+    graph = graph_from_schedule(schedule)
+    if cycles := find_cycles(graph):
+        logger.warning(f'Found potential deadlocks in the schedule !')
+        for c in cycles: print(c)
+        print()
     
     # new_schedule = schedule_from_graph(graph)
     for rank in range(max(placement) + 1):

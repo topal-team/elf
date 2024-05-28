@@ -11,7 +11,7 @@ logger = logging.getLogger(f'main')
 logging.basicConfig(level = logging.DEBUG)
 
 def create_model():
-    all_layers = [nn.Linear(3, 3, bias=False) for i in range(32)]
+    all_layers = [nn.Linear(3000, 3000, bias=False) for i in range(32)]
 
     model = nn.Sequential(*all_layers)
     torch.save(model, "test-model.pt")
@@ -34,14 +34,13 @@ def load_parts_model(placement, global_rank, path="test-model.pt"):
     blocks = [children[idx] for idx in indices]
     return blocks
 
-def test_pipeline(blocks, placement, scheduler, batch_size):
+def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
     '''
     Test that a schedule computes the forward & backward passes correctly
     To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
     '''
 
-    split_size = 1
-    batch = torch.randn((batch_size, 3), device = rank)
+    batch = torch.randn((batch_size, 3000), device = rank)
 
     # Pipelined model will use the batch from its first rank
     # While full model will use the batch from the last rank of the pipelined model
@@ -120,21 +119,24 @@ if __name__ == "__main__":
     # Load your model here (each process should load the right layers depending on placement)
 
     placements = [
-        [0, 1, 2, 3, 3, 2, 1, 0], # Hanayo style
-        [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
+        [0, 1, 2, 3, 3, 2, 1, 0], # Hanayo style 1-Wave
+        [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0], # 2-Waves
+        [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0] # 3-Waves
     ]
 
-    batch_sizes = [4, 8, 16, 32]
+    batch_sizes = [1, 2, 4, 8, 16, 32]    
 
     # Check that the results and gradients are the same as a single-gpu model
     for p in placements:
+        layers = load_parts_model(p, global_rank)
         for b in batch_sizes:
-            # if b < len(p): continue
-            if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b}')
-            layers = load_parts_model(p, global_rank)
-            test_pipeline(layers, p, "hanayo", b)
-            dist.barrier()
-            if global_rank == 0: logger.info('\n')
+            split_sizes = [s for s in batch_sizes if s <= b]
+            for s in split_sizes:
+                # if b < len(p): continue
+                if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b} and split size {s}')
+                test_pipeline(layers, p, "hanayo", b, s)
+                dist.barrier()
+                if global_rank == 0: logger.info('\n')
             
     if dist.is_initialized():
         dist.destroy_process_group()

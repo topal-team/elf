@@ -65,6 +65,9 @@ class TensorMetadata():
         buffer = torch.empty((batch_size, *self.shape), dtype = self.dtype, device = self.device)
         return buffer
 
+    def __repr__(self):
+        return f'TensorMetadata({self.shape})'
+
 class PipelineBlock():
     '''
     Manages one layer/group of contiguous layers placed on one device
@@ -99,8 +102,6 @@ class PipelineBlock():
         '''
         Perform the forward pass for one tensor of activations and register it as computed
         '''
-        if len(self.inputs) == 0: return
-
         logger.debug(f'{self} - Computing one forward')
         
         work, x = self.inputs.popleft()
@@ -128,7 +129,6 @@ class PipelineBlock():
         Perform the backward pass for one tensor of gradients and register it as computed
         Backward assumes activations AND grads to be on top of the queue
         '''
-        if len(self.grads) == 0: return
         logger.debug(f'{self} - Computing one backward')
 
         x = self.inputs_to_keep.popleft()
@@ -150,7 +150,7 @@ class PipelineBlock():
         Send one activation to the next layer in the model
         '''
         dst = options["dst"] if (options and "dst" in options.keys()) else self.next
-        if dst is None or len(self.act_to_send) == 0: return
+        if dst is None or dst == self.rank: return
 
         activations = self.act_to_send.popleft()
 
@@ -163,7 +163,7 @@ class PipelineBlock():
         Send one gradient to the previous layer in the model
         '''
         dst = options["dst"] if options and "dst" in options.keys() else self.previous
-        if dst is None or len(self.grads_to_send) == 0: return
+        if dst is None or dst == self.rank: return
 
         grads = self.grads_to_send.popleft()
 
@@ -176,7 +176,7 @@ class PipelineBlock():
         Receive and store one activation to forward
         '''
         src = options["src"] if options and "src" in options.keys() else self.previous
-        if src is None: return
+        if src is None or src == self.rank: return
 
         buffer = self.metadata.get_buffer(mb_size)
 
@@ -194,7 +194,7 @@ class PipelineBlock():
         Receive and store one gradient to backward
         '''
         src = options["src"] if options and "src" in options.keys() else self.next
-        if src is None: return
+        if src is None or src == self.rank: return
 
         buffer = self.out_metadata.get_buffer(mb_size)
         logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
@@ -207,7 +207,7 @@ class PipelineBlock():
             self.grads.append((work, buffer))
     
     def register_metadata(self):
-        if self.previous is not None:
+        if self.previous is not None and self.previous != self.rank:
             metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
             dist.recv(metadata, src = self.previous)
             self.metadata = TensorMetadata.from_tensor(metadata)
@@ -215,11 +215,11 @@ class PipelineBlock():
         dummy = self.metadata.get_buffer(1)
         dummy[:] = 1 # avoid problems with embeddings :)
         y = self.model(dummy)
-
+        
         out_metadata = TensorMetadata(y.squeeze(0)) # do not include batch size
         self.out_metadata = out_metadata
         
-        if self.next is not None:
+        if self.next is not None and self.next != self.rank:
             dist.send(out_metadata.to_tensor(), dst = self.next)
 
 class Pipeline():
@@ -271,18 +271,26 @@ class Pipeline():
             assert sum(split_size) == batch.size(0), f'Splits do not cover the entire batch'
             n_micro_batches = len(split_size)
             
-        if len(self.schedule) != (n_micro_batches * len(self.placement) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
+        if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
 
             self.schedule = self.scheduler(self.placement, n_micro_batches)
             cycles = find_cycles(graph_from_schedule(self.schedule))
-            if cycles and self.blocks[0].rank == 0: logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
+            if cycles and dist.get_rank() == 0:
+                logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
+                for c in cycles: logger.debug(f'Cycle : {c}')
             for c in cycles:
                 fix_cycle(c)
+            # Remove all operations that are not ours
+            ids = list(map(lambda b: b.id, self.blocks)) # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
+            self.schedule = list(filter(lambda op: op.block_id in ids, self.schedule))
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
             self.blocks[0].metadata = TensorMetadata(batch[0])
-        for b in self.blocks:
+        for i in range(len(self.blocks)):
+            b = self.blocks[i]
+            if i > 0 and self.blocks[i - 1].rank == b.rank:
+                b.metadata = self.blocks[i - 1].out_metadata
             b.register_metadata()
             logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
@@ -302,9 +310,11 @@ def create_pipeline(layers, placement):
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
 
     # Merge consecutive blocks that are on the same device (useful for hanayo-like schedules)
+    '''
     i = 0
     while i < len(blocks) - 1:
-        if blocks[i + 1].id == blocks[i].id + 1:
+        if blocks[i].rank == rank and blocks[i + 1].id == blocks[i].id + 1:
+            print(f'Merging block {blocks[i]} and {blocks[i + 1]}')
             merged_block = PipelineBlock(nn.Sequential(blocks[i].model, blocks[i + 1].model), blocks[i].id, placement)
             merged_block.previous = blocks[i].previous
             merged_block.next = blocks[i + 1].next
@@ -312,7 +322,7 @@ def create_pipeline(layers, placement):
             blocks.pop(i + 1)
             i -= 1
         i += 1
-
+    '''
     return blocks
 
 def partition_model(model, placement):
