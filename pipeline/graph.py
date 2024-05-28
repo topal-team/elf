@@ -4,6 +4,7 @@ This is helpful to do static analysis before execution, for instance to prevent 
 '''
 
 from enum import Enum
+import sys
 
 class OperationType(Enum):
     RECV_FORWARD = 0
@@ -146,6 +147,7 @@ def find_cycles(graph):
     Detects cycles in a schedule graph by performing a depth-first search.
     Returns a list of paths that form a cycle
     '''
+    # sys.setrecursionlimit(3000) # sometimes needed when the graph is big
     def dfs(node, visited, stack, depth = 1, current_path = []):
         visited[node] = True
         stack[node] = depth  # To avoid cycles of length 2, we store the distance

@@ -171,18 +171,7 @@ class PipelineBlock():
             end = time.time()
             self.idle_time += end - start
         
-        # Tensor data may have been deallocated after being sent
-        # PyTorch checks that grads and data have the same shape with default .backward(), so we bypass by directly calling the cpp backend
-        # see https://github.com/NVIDIA/Megatron-LM/blob/0650d8335d45162845398a97880374b81c4d84b1/megatron/core/pipeline_parallel/schedules.py#L142
-        Variable._execution_engine.run_backward(
-            tensors = (act,),
-            grad_tensors = (grads,),
-            keep_graph = False,
-            create_graph = False,
-            inputs = tuple(),
-            allow_unreachable = True,
-            accumulate_grad = True
-        )
+        act.backward(grads)
 
         if x.requires_grad:
             self.grads_to_send.append(x.grad.data)
@@ -200,8 +189,7 @@ class PipelineBlock():
         if options.get("batch"): return dist.P2POp(dist.isend, activations, dst)
         else:
             logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-            future = dist.isend(activations, dst).get_future()
-            future.then(callback_free)
+            dist.isend(activations, dst)
 
     def send_backward(self, options = {}):
         '''

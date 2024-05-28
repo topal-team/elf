@@ -107,7 +107,7 @@ def test_block():
     assert len(block.inputs_to_keep) == 1
 
     # Test backward pass
-    block.grads.append((FakeWorker(True), torch.tensor([3.], device = device)))
+    block.grads.append((FakeWorker(True), torch.tensor(3., device = device)))
 
     block.backward()
     expected_grads_weights = torch.tensor([6., 12.], device = device)

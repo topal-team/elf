@@ -22,16 +22,16 @@ def generate_afab_schedule(placement, n_micro_batches, prefetching = False, opti
         ids = [i for i in range(len(placement)) if placement[i] == rank]
         for i in range(n_micro_batches):
             for id_ in ids:
-                schedule.append(Operation(id_, i, OperationType.RECV_FORWARD, rank, options))
-                schedule.append(Operation(id_, i, OperationType.FORWARD, rank, options))
-                schedule.append(Operation(id_, i, OperationType.SEND_FORWARD, rank, options))
+                schedule.append(Operation(id_, i, OperationType.RECV_FORWARD, rank, **options))
+                schedule.append(Operation(id_, i, OperationType.FORWARD, rank, **options))
+                schedule.append(Operation(id_, i, OperationType.SEND_FORWARD, rank, **options))
         
         # All backward
         for i in range(n_micro_batches):
             for id_ in reversed(ids):
-                schedule.append(Operation(id_, i, OperationType.RECV_BACKWARD, rank, options))
-                schedule.append(Operation(id_, i, OperationType.BACKWARD, rank, options))
-                schedule.append(Operation(id_, i, OperationType.SEND_BACKWARD, rank, options))
+                schedule.append(Operation(id_, i, OperationType.RECV_BACKWARD, rank, **options))
+                schedule.append(Operation(id_, i, OperationType.BACKWARD, rank, **options))
+                schedule.append(Operation(id_, i, OperationType.SEND_BACKWARD, rank, **options))
     
     assert len(schedule) == n_micro_batches * n_stages * 2 * 3
     if prefetching: return enable_prefetching(schedule)
@@ -55,9 +55,9 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, opti
         # Warmup phase : each device can compute until the micro batch forward is finished (n_stages), but it can only start after it was forwarded through all the previous layers (rank)
         while i < (stages_per_device * n_micro_batches) and i < (n_stages - rank):
             i += 1
-            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.RECV_FORWARD, rank, options))
-            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.FORWARD, rank, options))
-            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.SEND_FORWARD, rank, options))
+            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.RECV_FORWARD, rank, **options))
+            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.FORWARD, rank, **options))
+            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.SEND_FORWARD, rank, **options))
             fwds[b_f] += 1
 
             # each layer has time to compute n_devices micro batches before work arrives for the next layer
@@ -73,18 +73,18 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, opti
         # Steady state
         while i < (stages_per_device * n_micro_batches):
             i += 1
-            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.RECV_BACKWARD, rank, options))
-            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.BACKWARD, rank, options))
-            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.SEND_BACKWARD, rank, options))
+            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.RECV_BACKWARD, rank, **options))
+            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.BACKWARD, rank, **options))
+            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.SEND_BACKWARD, rank, **options))
             bwds[b_b] += 1
 
             # Same as before, except that we can compute 2x less micro batches because half of the time is spent doing forwards
             if (i - state) % (n_devices // 2) == 0 or (i - state) % n_micro_batches == 0:
                 b_b = (b_b - 1) % stages_per_device
 
-            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.RECV_FORWARD, rank, options))
-            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.FORWARD, rank, options))
-            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.SEND_FORWARD, rank, options))
+            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.RECV_FORWARD, rank, **options))
+            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.FORWARD, rank, **options))
+            schedule.append(Operation(b_f * n_devices + rank, fwds[b_f], OperationType.SEND_FORWARD, rank, **options))
             fwds[b_f] += 1
 
             if (i >= n_stages and i % (n_devices // 2) == 0) or (i % n_micro_batches) == 0:
@@ -92,9 +92,9 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, opti
 
         while i < (stages_per_device * n_micro_batches * 2 - (stages_per_device * n_micro_batches - state)):
             i += 1
-            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.RECV_BACKWARD, rank, options))
-            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.BACKWARD, rank, options))
-            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.SEND_BACKWARD, rank, options))
+            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.RECV_BACKWARD, rank, **options))
+            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.BACKWARD, rank, **options))
+            schedule.append(Operation(b_b * n_devices + rank, bwds[b_b], OperationType.SEND_BACKWARD, rank, **options))
             bwds[b_b] += 1
 
             # Finish all backwards
@@ -119,39 +119,39 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False, op
     for rank in range(n_devices):
         done[rank] = min(n_devices - rank, n_micro_batches)
         for i in range(done[rank]):
-            schedule.append(Operation(ids[rank][0], i, OperationType.RECV_FORWARD, rank))
-            schedule.append(Operation(ids[rank][0], i, OperationType.FORWARD, rank))
-            schedule.append(Operation(ids[rank][0], i, OperationType.SEND_FORWARD, rank))
+            schedule.append(Operation(ids[rank][0], i, OperationType.RECV_FORWARD, rank, **options))
+            schedule.append(Operation(ids[rank][0], i, OperationType.FORWARD, rank, **options))
+            schedule.append(Operation(ids[rank][0], i, OperationType.SEND_FORWARD, rank, **options))
 
     for w in range(n_waves):
         for mb in range(n_micro_batches):
             for rank in reversed(range(n_devices)):
-                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.RECV_FORWARD, rank))
-                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.FORWARD, rank))
-                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.SEND_FORWARD, rank))
+                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.RECV_FORWARD, rank, **options))
+                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.FORWARD, rank, **options))
+                schedule.append(Operation(ids[rank][2 * w + 1], mb, OperationType.SEND_FORWARD, rank, **options))
             
                 if done[rank] < n_micro_batches * n_waves:
-                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.RECV_FORWARD, rank))
-                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.FORWARD, rank))
-                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.SEND_FORWARD, rank))
+                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.RECV_FORWARD, rank, **options))
+                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.FORWARD, rank, **options))
+                    schedule.append(Operation(ids[rank][2 * (done[rank] // n_micro_batches)], done[rank] % n_micro_batches, OperationType.SEND_FORWARD, rank, **options))
                     done[rank] += 1
                 else:
-                    schedule.append(Operation(ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.RECV_BACKWARD, rank))
-                    schedule.append(Operation(ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.BACKWARD, rank))
-                    schedule.append(Operation(ids[rank][- 1- 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank))
+                    schedule.append(Operation(ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.RECV_BACKWARD, rank, **options))
+                    schedule.append(Operation(ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.BACKWARD, rank, **options))
+                    schedule.append(Operation(ids[rank][- 1- 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank, **options))
                     enod[rank] += 1
 
     for w in range(n_waves):
         for mb in range(n_micro_batches):
             for rank in reversed(range(n_devices)):
-                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.RECV_BACKWARD, rank))
-                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.BACKWARD, rank))
-                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.SEND_BACKWARD, rank))
+                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.RECV_BACKWARD, rank, **options))
+                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.BACKWARD, rank, **options))
+                schedule.append(Operation(ids[rank][-2 * (w + 1)], mb, OperationType.SEND_BACKWARD, rank, **options))
 
                 if enod[rank] < n_micro_batches * n_waves:
-                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.RECV_BACKWARD, rank))
-                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.BACKWARD, rank))
-                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank))
+                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.RECV_BACKWARD, rank, **options))
+                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.BACKWARD, rank, **options))
+                    schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank, **options))
                     enod[rank] += 1
 
     if prefetching: return reorder_operations(schedule)

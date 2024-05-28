@@ -69,10 +69,10 @@ if __name__ == "__main__":
         i = sorted(idles)[iters // 2] # median
         
         std = np.std(iter_times)
-        if std > (t / 50):
+        if std > (t / 20):
             logger.warning(f'High standard deviation for iter times ! ({std} for t = {t}s, or {100 * std / t:.2f}%).')
         std = np.std(np.array(idles) / np.array(iter_times))
-        if std > ((i / t) / 50): # i and t are not necessarily from the same iteration :/
+        if std > ((i / t) / 20): # i and t are not necessarily from the same iteration :/
             logger.warning(f'High standard deviation for idle times ! ({std} for i = {i}%, or {100 * std / i:.2f}%).')
         
         mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank == 0 else None

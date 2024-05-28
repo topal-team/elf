@@ -125,8 +125,7 @@ if __name__ == "__main__":
 
     schedule = "hanayo"
     batch_sizes = [1, 2, 4, 8, 16, 32]    
-    
-    
+        
     # Check that the results and gradients are the same as a single-gpu model
     for p in placements:
         layers = load_parts_model(p, global_rank)
