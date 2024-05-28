@@ -1,3 +1,8 @@
+'''
+Manipulate graphs corresponding to schedules.
+This is helpful to do static analysis before execution, for instance to prevent dependencies cycles.
+'''
+
 from enum import Enum
 
 class OperationType(Enum):
@@ -15,13 +20,17 @@ class OperationType(Enum):
         return self.value
 
 class Operation():
+
     def __init__(self, block_id, mb_id, op, rank, **options):
+        '''
+        Computation or communication unit. Operations are the elements contained in the schedule, and give all the informations needed for a block to execute it, except the data itself.
+        '''
         self.block_id = block_id
-        self.op = op
-        self.mb_id = mb_id
+        self.op = op # type of the operation (see OperationType enum)
+        self.mb_id = mb_id # micro batch id in the batch
         self.rank = rank
         self.options = options
-        self.dependencies = []
+        self.dependencies = [] # Operations that need to be completed for the process to run this operation without blocking
 
     def add_dependency(self, node):
         self.dependencies.append(node)
@@ -40,11 +49,19 @@ class Operation():
         return hash((self.block_id, self.block_id, self.rank, self.op))
 
 def print_graph(graph, level = 0):
+    '''
+    Pretty print for a schedule graph
+    '''
     print("| " * level + str(graph))
     for d in graph.dependencies:
         print_graph(d, level + 1)
 
 def graph_from_schedule(schedule):
+    '''
+    Build the graph representing a schedule
+    All nodes are Operation, with dependencies filled according to the schedule
+    Returns a dictionary containing the roots of the graph (there are multiple ones)
+    '''
     # For each one, add forward/backward dependencies (from the sequential nature)
     for operation in schedule:
         def match_op(op, block_id, op_type):
@@ -88,6 +105,9 @@ def graph_from_schedule(schedule):
     return last_ops # roots of the entire graph
 
 def schedule_from_graph(graph):
+    '''
+    Constructs a schedule as a list of Operation from its graph equivalent
+    '''
     def dfs(node, visited, stack):
         # Mark the current node as visited
         if node in visited: return
@@ -113,11 +133,19 @@ def schedule_from_graph(graph):
     return stack
 
 def fix_cycle(cycle):
+    '''
+    Mark all operations in a cycle as needing to be batched
+    This fixes deadlocks in communications
+    '''
     for op in cycle:
         if op.op not in [OperationType.FORWARD, OperationType.BACKWARD]:
             op.options["batch"] = True
 
 def find_cycles(graph):
+    '''
+    Detects cycles in a schedule graph by performing a depth-first search.
+    Returns a list of paths that form a cycle
+    '''
     def dfs(node, visited, stack, depth = 1, current_path = []):
         visited[node] = True
         stack[node] = depth  # To avoid cycles of length 2, we store the distance
@@ -147,7 +175,12 @@ def find_cycles(graph):
 
     return all_cycles
 
-def reorder_operations(operations):
+def enable_prefetching(operations):
+    '''
+    Modifies a schedule to add prefetching
+    Prefetching is a technique that aims to overlap computation and communication by starting to receive the data for the next micro batch before starting the computation for the current one
+    !! Experimental, currently often makes the schedule block !!
+    '''
     # Define the target and source operations
     target_ops = {OperationType.FORWARD, OperationType.BACKWARD}
     source_ops = {OperationType.RECV_FORWARD, OperationType.RECV_BACKWARD}

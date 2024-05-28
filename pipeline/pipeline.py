@@ -1,7 +1,13 @@
+'''
+Core pipeline objects. Define the user interface (Pipeline) and the behaviour of individual stages (PipelineBlock), by managing the p2p communications and data queues.
+'''
+
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from torch.autograd.variable import Variable
 from .schedule import *
 from .engine import Engine
 from collections import deque
@@ -19,6 +25,11 @@ dtypes = [
     torch.bool
 ]
 
+def deallocate_tensor(t):
+    if t._base is not None:
+        return # useless to deallocate a view as it will not do anything
+    t.data = torch.empty((1,), device = t.device, dtype = t.dtype)
+     
 class TensorMetadata():
     '''
     Informations about Tensors that are sent and received in p2p communication
@@ -77,7 +88,7 @@ class PipelineBlock():
         # Block infos
         self.rank = placement[id_] # global rank
         self.model = model.cuda() if torch.cuda.is_available() else model
-        self.id = id_ # rank in the model.
+        self.id = id_ # rank in the model
         self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
         # Queues of tensors to process
@@ -95,6 +106,8 @@ class PipelineBlock():
         self.metadata = None
         self.out_metadata = None
 
+        self.idle_time = 0
+
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
 
@@ -106,19 +119,28 @@ class PipelineBlock():
         
         work, x = self.inputs.popleft()
 
-        if work is not None: work.wait()
+        if work is not None:
+            start = time.time()
+            work.wait()
+            if options.get("time"): torch.cuda.synchronize()
+            end = time.time()
+            self.idle_time += end - start
         
         if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
             x.requires_grad = True
 
-        if options and ('remat' in options.keys()):
-            with torch.no_grad(): y = self.model(x)        
+        logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
+        if  options.get('remat'):
+            with torch.no_grad(): y = self.model(x)
+        elif options.get('offload'):
+            y = self.model(x)
+            self.activations.append(y.cpu())
+            # x = x.cpu()
         else:
-            logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
             y = self.model(x)
             self.activations.append(y)
            
-        self.act_to_send.append(y)
+        self.act_to_send.append(y.data)
         self.inputs_to_keep.append(x)
 
         if self.next is None:
@@ -132,15 +154,35 @@ class PipelineBlock():
         logger.debug(f'{self} - Computing one backward')
 
         x = self.inputs_to_keep.popleft()
-        if options and 'remat' in options:
+
+        if options.get('remat'):
             act = self.model(x)
+        elif options.get('offload'):
+            act = self.activations.popleft().cuda()
+            # x = x.cuda()
         else:
             act = self.activations.popleft()
         work, grads = self.grads.popleft()
         
-        if work is not None: work.wait()
+        if work is not None:
+            start = time.time()
+            work.wait()
+            if options.get("time"): torch.cuda.synchronize()
+            end = time.time()
+            self.idle_time += end - start
         
-        (act * grads).sum().backward() # Optimal ? Maybe setting the gradients directly is faster
+        # Tensor data may have been deallocated after being sent
+        # PyTorch checks that grads and data have the same shape with default .backward(), so we bypass by directly calling the cpp backend
+        # see https://github.com/NVIDIA/Megatron-LM/blob/0650d8335d45162845398a97880374b81c4d84b1/megatron/core/pipeline_parallel/schedules.py#L142
+        Variable._execution_engine.run_backward(
+            tensors = (act,),
+            grad_tensors = (grads,),
+            keep_graph = False,
+            create_graph = False,
+            inputs = tuple(),
+            allow_unreachable = True,
+            accumulate_grad = True
+        )
 
         if x.requires_grad:
             self.grads_to_send.append(x.grad.data)
@@ -148,65 +190,75 @@ class PipelineBlock():
     def send_forward(self, options = {}):
         '''
         Send one activation to the next layer in the model
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
-        dst = options["dst"] if (options and "dst" in options.keys()) else self.next
+        dst = options.get("dst") or self.next
         if dst is None or dst == self.rank: return
 
         activations = self.act_to_send.popleft()
 
-        logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-        if "batch" in options.keys(): return dist.P2POp(dist.isend, activations, dst)
-        else: dist.isend(activations, dst)
+        if options.get("batch"): return dist.P2POp(dist.isend, activations, dst)
+        else:
+            logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
+            future = dist.isend(activations, dst).get_future()
+            future.then(callback_free)
 
     def send_backward(self, options = {}):
         '''
         Send one gradient to the previous layer in the model
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
-        dst = options["dst"] if options and "dst" in options.keys() else self.previous
+        dst = options.get("dst") or self.previous
         if dst is None or dst == self.rank: return
 
         grads = self.grads_to_send.popleft()
 
-        logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
-        if "batch" in options.keys(): return dist.P2POp(dist.isend, grads, dst)
-        else: dist.isend(grads, dst)
+        if options.get("batch"): return dist.P2POp(dist.isend, grads, dst)
+        else:
+            logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
+            dist.isend(grads, dst)
 
     def recv_forward(self, mb_size, options = {}):
         '''
         Receive and store one activation to forward
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
-        src = options["src"] if options and "src" in options.keys() else self.previous
+        src = options.get("src") or self.previous
         if src is None or src == self.rank: return
 
         buffer = self.metadata.get_buffer(mb_size)
 
-        logger.debug(f'{self} - Waiting for activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
-
-        if "batch" in options.keys():
+        if options.get("batch"):
             self.inputs.append((None, buffer))
             return dist.P2POp(dist.irecv, buffer, src)
         else:
+            logger.debug(f'{self} - Starting to receive activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
             work = dist.irecv(buffer, src)
             self.inputs.append((work, buffer)) # .detach() ?
 
     def recv_backward(self, mb_size, options = {}):
         '''
         Receive and store one gradient to backward
+        If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
-        src = options["src"] if options and "src" in options.keys() else self.next
+        src = options.get("src") or self.next
         if src is None or src == self.rank: return
 
         buffer = self.out_metadata.get_buffer(mb_size)
-        logger.debug(f'{self} - Waiting for gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
 
-        if "batch" in options.keys():
+        if options.get("batch"):
             self.grads.append((None, buffer))
             return dist.P2POp(dist.irecv, buffer, src)
         else:
+            logger.debug(f'{self} - Starting to receive gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
             work = dist.irecv(buffer, src)
             self.grads.append((work, buffer))
     
     def register_metadata(self):
+        '''
+        Performs a pseudo forward pass to register the input and output shapes
+        !! We assume that every micro batch has the same shape, except for the micro batch size !!
+        '''
         if self.previous is not None and self.previous != self.rank:
             metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
             dist.recv(metadata, src = self.previous)
@@ -230,9 +282,9 @@ class Pipeline():
     def __init__(self, model, placement = "auto", partition = "auto", schedule = "afab"):
         '''
         model: torch module
-        placement: ranks on which each model block should be placed
-        partition: if your model is already partitioned, set to None. Otherwise leave the default, which will try to create balanced blocks according to their number of parameters
-        schedule: pipeline algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b")
+        placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
+        partition: if your model is already partitioned, set to None. Otherwise leave the default ("auto"), which will try to create balanced blocks according to their number of parameters
+        schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b")
         '''
         if not dist.is_initialized() or "RANK" not in os.environ.keys():
             logger.warning(f'Trying to create a pipeline but no multi-gpu distributed setup has been found.')
@@ -255,11 +307,11 @@ class Pipeline():
         self.engine = Engine(self.blocks)
         self.schedule = []
 
-    def __call__(self, batch, target, loss_fn, split_size = 1, viz_file = None):
+    def __call__(self, batch, target, loss_fn, split_size = 1, profile = False, **options):
         '''
         Execute the schedule on a batch of data
         split_size: either int for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or list of micro batch sizes
-        viz_file: path to a file to write informations about the execution. Set to None (default) to disable
+        profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
         '''
         if isinstance(split_size, int):
             n_micro_batches = batch.size(0) // split_size
@@ -273,7 +325,7 @@ class Pipeline():
             
         if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
 
-            self.schedule = self.scheduler(self.placement, n_micro_batches)
+            self.schedule = self.scheduler(self.placement, n_micro_batches, options = options)
             cycles = find_cycles(graph_from_schedule(self.schedule))
             if cycles and dist.get_rank() == 0:
                 logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
@@ -294,17 +346,21 @@ class Pipeline():
             b.register_metadata()
             logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
-        result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, viz_file)
+        result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
         if len(result) != 0:
             return torch.cat(result, dim = 0), torch.tensor(losses, device = torch.cuda.current_device()).sum(dim = 0, keepdim = True)
         else: return None, None
+
+    def parameters(self):
+        return [{
+            'params': block.model.parameters()
+        } for block in self.blocks]
 
 def create_pipeline(layers, placement):
     '''
     Transforms a list of layers placed on different devices to a working pipeline
     '''
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
-    local_rank = int(os.getenv("LOCAL_RANK")) if "LOCAL_RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
@@ -360,7 +416,7 @@ def partition_model(model, placement):
         if accum_numel >= delim_numel:
             delim_numel += phase_numel
             phases.append([])
-
+            
     # pack all remaining layers into the last phase
     while len(phases) > len(placement):
         phases[-2].extend(phases[-1])

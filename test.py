@@ -39,7 +39,6 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
     Test that a schedule computes the forward & backward passes correctly
     To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
     '''
-
     batch = torch.randn((batch_size, 3000), device = rank)
 
     # Pipelined model will use the batch from its first rank
@@ -124,15 +123,16 @@ if __name__ == "__main__":
         [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0] # 3-Waves
     ]
 
+    schedule = "hanayo"
     batch_sizes = [1, 2, 4, 8, 16, 32]    
-
+    
+    
     # Check that the results and gradients are the same as a single-gpu model
     for p in placements:
         layers = load_parts_model(p, global_rank)
         for b in batch_sizes:
             split_sizes = [s for s in batch_sizes if s <= b]
             for s in split_sizes:
-                # if b < len(p): continue
                 if global_rank == 0: logger.info(f'Testing placement {p} with batch size {b} and split size {s}')
                 test_pipeline(layers, p, "hanayo", b, s)
                 dist.barrier()

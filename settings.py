@@ -3,11 +3,12 @@ from models.GPT import GPT, GPTHanayoConfig as GPTConf
 from models.resnet import ResNet, Bottleneck
 
 vocab_size = 3072
-placement = [0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
+
+placement = [0, 1, 2, 3, 3, 2, 1, 0]
 schedule = "hanayo"
 
 batch_size = 64
-split_sizes = [1, 2, 4, 8, 16]
+split_sizes = [1, 2, 4, 8, 16, 32, 64]
 block_size = 64
 iters = 5
 

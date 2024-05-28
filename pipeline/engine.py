@@ -1,9 +1,12 @@
+'''
+Coordinates the execution of a schedule on a list of blocks at a device/rank level.
+Takes care of feeding the input to the first block and computing the loss on the last block.
+'''
+
 import torch
 import torch.distributed as dist
 import time
-import os
-import matplotlib
-import matplotlib.pyplot as plt
+import torch.distributed as dist
 from .schedule import OperationType
 
 import logging
@@ -20,10 +23,6 @@ def op_to_str(op):
             return f'Receive from {op.peer}'
 
 class Engine():
-    '''
-    Schedule is a list of tuples (block id, operation)
-    It is supposed to be feasible and correct
-    '''
     def __init__(self, blocks):
         self.blocks = blocks
         self.rank = self.blocks[0].rank if blocks else None
@@ -32,41 +31,55 @@ class Engine():
         self.comms = []
 
     def _run_comms(self):
-        if len(self.comms) == 0: return
+        '''
+        Run all currently batched communications for this device
+        Internal function, this should not be used by the user
+        '''
+        if len(self.comms) == 0: return 0
+        start = time.time()
         works = dist.batch_isend_irecv(self.comms)
         logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
         for w in works: w.wait()
-        torch.cuda.synchronize()
+        end = time.time()
         self.comms.clear()
+        return end - start
 
-    def train_step(self, batch, target, loss_fn, schedule, split_size, viz_file = None):
+    def train_step(self, batch, target, loss_fn, schedule, split_size, profile = False):
         '''
         Perform forward + backward pass on a batch of data
+        batch: input data, only used on the first block of the pipeline
+        target: groundtruth, only used on the last block of the pipeline
+        loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own it needs to take the same parameter "reduction = 'sum'" as torch ones. 
+        schedule: list of operations. For more info, look at ``schedule.py``
+        split_size: list of micro batch sizes. The list should cover the entire batch, i.e. sum(split_size) == batch_size
+        profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
         '''
         splits = iter(batch.split(split_size, dim=0))
 
+        idle_time = 0
+
         result = []
         losses = []
-        i = 0 # TODO: change that ! maybe they're not computed in the same order
-        # Add a micro_batch_id to the schedule nodes ?
+        i = 0
         curr = 0
-        if viz_file is not None:
-            stats = []
+
+        pipe_start = time.time()
             
         for op in schedule:
             block = self.id_to_block.get(str(op.block_id))
             if block is None: continue # not my job
 
             logger.debug(f'Computing {op} on block {block} with options {op.options}')
-            if viz_file is not None: stats.append((time.time(), id_, op))
+            if profile:
+                torch.cuda.nvtx.range_push(f'{block}:{op}')
             match op.op:
                 case OperationType.FORWARD:
-                    self._run_comms()
+                    idle_time += self._run_comms()
                     y = block.forward(op.options)
                     if y is not None:
                         result.append(y)
                 case OperationType.BACKWARD:
-                    self._run_comms()
+                    idle_time += self._run_comms()
                     block.backward(op.options)
                 case OperationType.SEND_FORWARD:
                     if (op.options.get("dst") or block.next) == block.rank:
@@ -98,20 +111,22 @@ class Engine():
                 case _:
                     raise Exception(f'Unknown operation : {op}')
         
-        logger.debug(f'[Rank {self.rank}] - Finished computation !')
-        if viz_file is not None: stats.append((time.time(), self.rank, ".END"))
-        self._run_comms()
-        dist.barrier()
-        if viz_file is not None:
-            for r in range(int(os.environ["WORLD_SIZE"])):
-                # Each process writes in turn
-                if r == self.rank:
-                    if r == 0: open(viz_file, "w").close() # erase content
-                    with open(viz_file, 'a') as outfile:
-                        for t, id_, op in stats:
-                            outfile.write(f'{self.rank}:{t}:{id_},{op}\n')
+            if profile:
+                torch.cuda.nvtx.range_pop()
 
-                dist.barrier()
+        logger.debug(f'[Rank {self.rank}] - Finished computation !')
+        idle_time += self._run_comms()
+        start = time.time()
+        dist.barrier()
+        end = time.time()
+        idle_time += (end - start)
+        for block in self.blocks:
+            idle_time += block.idle_time
+            block.idle_time = 0
+
+        self.idle_time = idle_time
+        self.total_time = end - pipe_start
+
         return result, losses
 
 def compute_loss(block, output, target, loss_fn):
@@ -124,71 +139,3 @@ def compute_loss(block, output, target, loss_fn):
     loss.backward()
     block.grads.append((None, output.grad.data))
     return loss
-
-def visualize(path):
-    '''
-    Display the execution time of each operation executed by the engine
-    path: path to a file that should be created by a Pipeline/Engine call
-    '''
-    operations = {}  # Dictionary to store operations by device
-    with open(path, 'r') as file:
-        for line in file:
-            rank, times, id_op = line.split(':')
-            times = float(times)  # Convert time to float
-            
-            if rank not in operations:
-                operations[rank] = []
-            operations[rank].append((times, id_op.strip()))
-
-    colors = {
-        str(OperationType.RECV_FORWARD): "gold",
-        str(OperationType.FORWARD): "springgreen",
-        str(OperationType.SEND_FORWARD): "orange",
-        str(OperationType.RECV_BACKWARD): "plum",
-        str(OperationType.BACKWARD): "red",
-        str(OperationType.SEND_BACKWARD): "fuchsia",
-        ".END": "black"
-    }
-
-    fig, ax = plt.subplots()
-    first_start = 0
-    for rank, ops in operations.items():
-        # Sort operations by start time to ensure correct sequential plotting
-        ops.sort(key=lambda x: x[0])
-        if ops[0][0] < first_start or first_start == 0:
-            first_start = ops[0][0]
-
-    for rank, ops in operations.items():
-        # Sort operations by start time to ensure correct sequential plotting
-        if ops[0][0] < first_start or first_start == 0:
-            first_start = ops[0][0]
-        
-        for i, (start_time, id_op) in enumerate(ops):
-            if i + 1 < len(ops):
-                duration = ops[i + 1][0] - start_time
-            else:
-                duration = 0
-
-            # Plot each operation as a horizontal bar, *1000 for ms instead of s 
-            ax.barh(y=int(rank), width=duration * 1000, left=(start_time - first_start) * 1000, height=0.8, color=colors[id_op.split(',')[1]], edgecolor='black')
-            
-            # Annotate the bar with the operation ID
-            # Adjust the position to be inside the bar, slightly to the right and vertically centered
-            # text_x = start_time + 0.15 * duration  # Adjust this value as needed
-            # text_y = int(rank)
-            # if duration > (ops[-1][0] - ops[0][0]) / 12:
-            #     ax.text(text_x, text_y, id_op, va='center', ha='left', fontsize=12, color='black')
-
-
-    legend_handles = [matplotlib.patches.Patch(facecolor=color, edgecolor='black', label=label.split('.')[1].lower()) for label, color in colors.items() if label != ".END"]
-    ax.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1, 1))
-    ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Device Rank')
-    ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True)) # show only integers
-    plt.show()
-
-if __name__ == "__main__":
-    import sys
-    path = sys.argv[1]
-
-    visualize(path)
