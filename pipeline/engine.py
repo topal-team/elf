@@ -36,13 +36,14 @@ class Engine():
         Internal function, this should not be used by the user
         '''
         if len(self.comms) == 0: return 0
-        start = time.time()
+        
         works = dist.batch_isend_irecv(self.comms)
         logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
+        
         for w in works: w.wait()
-        end = time.time()
+        
         self.comms.clear()
-        return end - start
+        
 
     def train_step(self, batch, target, loss_fn, schedule, split_size, profile = False):
         '''
@@ -55,8 +56,6 @@ class Engine():
         profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
         '''
         splits = iter(batch.split(split_size, dim=0))
-
-        idle_time = 0
 
         result = []
         losses = []
@@ -74,30 +73,35 @@ class Engine():
                 torch.cuda.nvtx.range_push(f'{block}:{op}')
             match op.op:
                 case OperationType.FORWARD:
-                    idle_time += self._run_comms()
+                    self._run_comms()
                     y = block.forward(op.options)
                     if y is not None:
                         result.append(y)
+                        
                 case OperationType.BACKWARD:
-                    idle_time += self._run_comms()
+                    self._run_comms()
                     block.backward(op.options)
+                    
                 case OperationType.SEND_FORWARD:
                     if (op.options.get("dst") or block.next) == block.rank:
                         next_block = self.id_to_block.get(str(op.block_id + 1))
                         next_block.inputs.append((None, block.act_to_send.popleft().detach()))
                     if comm := block.send_forward(op.options):
                         self.comms.append(comm)
+                        
                 case OperationType.SEND_BACKWARD:
                     if (op.options.get("src") or block.previous) == block.rank:
                         next_block = self.id_to_block.get(str(op.block_id - 1))
                         next_block.grads.append((None, block.grads_to_send.popleft().detach()))
                     if comm := block.send_backward(op.options):
                         self.comms.append(comm)
+                        
                 case OperationType.RECV_FORWARD:
                     if block.previous is None:
                         block.inputs.append((None, next(splits)))
                     if comm := block.recv_forward(split_size[op.mb_id], op.options):
                         self.comms.append(comm)
+                        
                 case OperationType.RECV_BACKWARD:
                     if block.next is None:
                         nexti = curr + split_size[i]
@@ -108,6 +112,7 @@ class Engine():
                         curr = nexti
                     if comm := block.recv_backward(split_size[op.mb_id], op.options):
                         self.comms.append(comm)
+                        
                 case _:
                     raise Exception(f'Unknown operation : {op}')
         
@@ -115,17 +120,18 @@ class Engine():
                 torch.cuda.nvtx.range_pop()
 
         logger.debug(f'[Rank {self.rank}] - Finished computation !')
-        idle_time += self._run_comms()
-        start = time.time()
+        
+        self._run_comms()
+        torch.cuda.synchronize()
         dist.barrier()
-        end = time.time()
-        idle_time += (end - start)
+        pipe_end = time.time()
+        compute_time = 0
         for block in self.blocks:
-            idle_time += block.idle_time
-            block.idle_time = 0
+            compute_time += block.compute_time
+            block.compute_time = 0
 
-        self.idle_time = idle_time
-        self.total_time = end - pipe_start
+        self.total_time = pipe_end - pipe_start
+        self.idle_time = self.total_time - compute_time
 
         return result, losses
 

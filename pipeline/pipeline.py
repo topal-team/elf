@@ -25,11 +25,6 @@ dtypes = [
     torch.bool
 ]
 
-def deallocate_tensor(t):
-    if t._base is not None:
-        return # useless to deallocate a view as it will not do anything
-    t.data = torch.empty((1,), device = t.device, dtype = t.dtype)
-     
 class TensorMetadata():
     '''
     Informations about Tensors that are sent and received in p2p communication
@@ -106,7 +101,7 @@ class PipelineBlock():
         self.metadata = None
         self.out_metadata = None
 
-        self.idle_time = 0
+        self.compute_time = 0 # used to measure idle time
 
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
@@ -119,26 +114,29 @@ class PipelineBlock():
         
         work, x = self.inputs.popleft()
 
-        if work is not None:
-            start = time.time()
-            work.wait()
-            if options.get("time"): torch.cuda.synchronize()
-            end = time.time()
-            self.idle_time += end - start
+        if work is not None: work.wait()
         
         if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
             x.requires_grad = True
 
         logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
-        if  options.get('remat'):
-            with torch.no_grad(): y = self.model(x)
-        elif options.get('offload'):
-            y = self.model(x)
-            self.activations.append(y.cpu())
-            # x = x.cpu()
-        else:
-            y = self.model(x)
-            self.activations.append(y)
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            start_event.record(stream)
+            if  options.get('remat'):
+                with torch.no_grad(): y = self.model(x)
+            elif options.get('offload'):
+                y = self.model(x)
+                self.activations.append(y.cpu())
+                # x = x.cpu()
+            else:
+                y = self.model(x)
+                self.activations.append(y)
+            end_event.record(stream)
+            end_event.synchronize()
+            self.compute_time += start_event.elapsed_time(end_event) / 1000
            
         self.act_to_send.append(y.data)
         self.inputs_to_keep.append(x)
@@ -156,6 +154,7 @@ class PipelineBlock():
         x = self.inputs_to_keep.popleft()
 
         if options.get('remat'):
+            # TODO: record time here
             act = self.model(x)
         elif options.get('offload'):
             act = self.activations.popleft().cuda()
@@ -164,14 +163,17 @@ class PipelineBlock():
             act = self.activations.popleft()
         work, grads = self.grads.popleft()
         
-        if work is not None:
-            start = time.time()
-            work.wait()
-            if options.get("time"): torch.cuda.synchronize()
-            end = time.time()
-            self.idle_time += end - start
-        
-        act.backward(grads)
+        if work is not None: work.wait()
+
+        start_event = torch.cuda.Event(enable_timing = True)
+        end_event = torch.cuda.Event(enable_timing = True)
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            start_event.record(stream)
+            act.backward(grads)
+            end_event.record(stream)
+            end_event.synchronize()
+            self.compute_time += start_event.elapsed_time(end_event) / 1000
 
         if x.requires_grad:
             self.grads_to_send.append(x.grad.data)
@@ -184,7 +186,7 @@ class PipelineBlock():
         dst = options.get("dst") or self.next
         if dst is None or dst == self.rank: return
 
-        activations = self.act_to_send.popleft()
+        activations = self.act_to_send.popleft().data
 
         if options.get("batch"): return dist.P2POp(dist.isend, activations, dst)
         else:
@@ -199,7 +201,7 @@ class PipelineBlock():
         dst = options.get("dst") or self.previous
         if dst is None or dst == self.rank: return
 
-        grads = self.grads_to_send.popleft()
+        grads = self.grads_to_send.popleft().data
 
         if options.get("batch"): return dist.P2POp(dist.isend, grads, dst)
         else:
