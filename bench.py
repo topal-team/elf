@@ -73,7 +73,7 @@ if __name__ == "__main__":
             logger.warning(f'High standard deviation for iter times ! ({std} for t = {t}s, or {100 * std / t:.2f}%).')
         std = np.std(np.array(idles) / np.array(iter_times))
         if std > ((i / t) / 20): # i and t are not necessarily from the same iteration :/
-            logger.warning(f'High standard deviation for idle times ! ({std} for i = {i}%, or {100 * std / i:.2f}%).')
+            logger.warning(f'High standard deviation for idle times ! ({std} for i = {i}%, or {100 * std / (i / t):.2f}%).')
         
         mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank == 0 else None
         dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device = rank), mems, 0)
