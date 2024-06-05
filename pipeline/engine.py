@@ -8,6 +8,7 @@ import torch.distributed as dist
 import time
 import torch.distributed as dist
 from .schedule import OperationType
+from .utils import Timer
 
 import logging
 logger = logging.getLogger("engine")
@@ -36,14 +37,15 @@ class Engine():
         Internal function, this should not be used by the user
         '''
         if len(self.comms) == 0: return 0
-        
-        works = dist.batch_isend_irecv(self.comms)
-        logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
-        
-        for w in works: w.wait()
-        
+
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            works = dist.batch_isend_irecv(self.comms)
+            logger.debug(f'Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}')
+            for w in works: w.wait()
+            
         self.comms.clear()
-        
+        stream.synchronize()
 
     def train_step(self, batch, target, loss_fn, schedule, split_size, profile = False):
         '''
@@ -62,6 +64,7 @@ class Engine():
         i = 0
         curr = 0
 
+        dist.barrier() # useful for timing, but it probably slows down the execution a bit
         pipe_start = time.time()
             
         for op in schedule:
@@ -74,43 +77,46 @@ class Engine():
             match op.op:
                 case OperationType.FORWARD:
                     self._run_comms()
-                    y = block.forward(op.options)
+                    y = block.forward(**op.options)
                     if y is not None:
                         result.append(y)
                         
                 case OperationType.BACKWARD:
+                    if block.next is None:
+                        nexti = curr + split_size[i]
+                        with Timer() as timer:
+                            loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
+                        block.compute_time += timer.time()
+                        losses.append(loss)
+                        logger.debug(f'{block} - Computed loss = {loss}')
+                        i += 1
+                        curr = nexti
+
                     self._run_comms()
-                    block.backward(op.options)
+                    block.backward(**op.options)
                     
                 case OperationType.SEND_FORWARD:
                     if (op.options.get("dst") or block.next) == block.rank:
                         next_block = self.id_to_block.get(str(op.block_id + 1))
                         next_block.inputs.append((None, block.act_to_send.popleft().detach()))
-                    if comm := block.send_forward(op.options):
+                    if comm := block.send_forward(**op.options):
                         self.comms.append(comm)
                         
                 case OperationType.SEND_BACKWARD:
                     if (op.options.get("src") or block.previous) == block.rank:
                         next_block = self.id_to_block.get(str(op.block_id - 1))
                         next_block.grads.append((None, block.grads_to_send.popleft().detach()))
-                    if comm := block.send_backward(op.options):
+                    if comm := block.send_backward(**op.options):
                         self.comms.append(comm)
                         
                 case OperationType.RECV_FORWARD:
                     if block.previous is None:
                         block.inputs.append((None, next(splits)))
-                    if comm := block.recv_forward(split_size[op.mb_id], op.options):
+                    if comm := block.recv_forward(split_size[op.mb_id], **op.options):
                         self.comms.append(comm)
                         
                 case OperationType.RECV_BACKWARD:
-                    if block.next is None:
-                        nexti = curr + split_size[i]
-                        loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
-                        losses.append(loss)
-                        logger.debug(f'{block} - Computed loss = {loss}')
-                        i += 1
-                        curr = nexti
-                    if comm := block.recv_backward(split_size[op.mb_id], op.options):
+                    if comm := block.recv_backward(split_size[op.mb_id], **op.options):
                         self.comms.append(comm)
                         
                 case _:
@@ -119,7 +125,7 @@ class Engine():
             if profile:
                 torch.cuda.nvtx.range_pop()
 
-        logger.debug(f'[Rank {self.rank}] - Finished computation !')
+        logger.debug(f'[Rank {self.rank}] - Finished execution !')
         
         self._run_comms()
         torch.cuda.synchronize()
@@ -127,6 +133,7 @@ class Engine():
         pipe_end = time.time()
         compute_time = 0
         for block in self.blocks:
+            # print(f'{block} - Compute time = {block.compute_time}')
             compute_time += block.compute_time
             block.compute_time = 0
 

@@ -4,8 +4,11 @@ from models.resnet import ResNet, Bottleneck
 
 vocab_size = 3072
 
-placement = [0, 1, 2, 3]
-schedule = "afab"
+placement = [0, 1, 2, 3, 3, 2, 1, 0]
+schedule = "hanayo"
+options = {
+    'offload': True
+}
 
 batch_size = 64
 split_sizes = [1, 2, 4, 8, 16, 32, 64]
