@@ -61,6 +61,7 @@ class PipelineBlock():
             x.requires_grad = True
 
         logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
+
         with Timer() as timer:
             if  options.get('remat'):
                 with torch.no_grad(): y = self.model(x)

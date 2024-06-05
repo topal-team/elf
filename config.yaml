@@ -1,0 +1,13 @@
+---
+pipeline:
+  placement: 0,1,2,3,0,1,2,3
+  schedule: 1f1b
+  split_sizes: 1,2,4,8,16,32,64
+model:
+  arch: GPT
+  conf: GPTHanayoConfig
+  vocab_size: 3072
+  batch_size: 64
+  block_size: 64
+iters: 15
+warmups: 3

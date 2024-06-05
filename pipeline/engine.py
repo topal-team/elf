@@ -37,7 +37,7 @@ class Engine():
         Internal function, this should not be used by the user
         '''
         if len(self.comms) == 0: return 0
-
+        
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             works = dist.batch_isend_irecv(self.comms)
@@ -133,7 +133,6 @@ class Engine():
         pipe_end = time.time()
         compute_time = 0
         for block in self.blocks:
-            # print(f'{block} - Compute time = {block.compute_time}')
             compute_time += block.compute_time
             block.compute_time = 0
 
