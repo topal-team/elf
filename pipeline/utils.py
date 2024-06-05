@@ -2,6 +2,7 @@
 Various useful classes / functions
 '''
 
+import time
 import torch
 
 dtypes = [
@@ -77,7 +78,7 @@ class TimerCPU():
         self.start = time.perf_counter()
         return self
 
-    def __exit__(self):
+    def __exit__(self, *args):
         self.end = time.perf_counter()
 
     def time(self):
