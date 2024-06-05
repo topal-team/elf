@@ -10,69 +10,10 @@ import torch.distributed as dist
 from torch.autograd.variable import Variable
 from .schedule import *
 from .engine import Engine
+from .utils import Timer, TensorMetadata, activations_offloading
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
-
-dtypes = [
-    torch.float16,
-    torch.bfloat16,
-    torch.float32,
-    torch.float64,
-    torch.int16,
-    torch.int32,
-    torch.int64,
-    torch.bool
-]
-
-class TensorMetadata():
-    '''
-    Informations about Tensors that are sent and received in p2p communication
-    [dtype, *shape]
-    '''
-    MAX_SIZE = 16
-
-    @staticmethod
-    def from_tensor(t):
-        '''
-        Creates a TensorMetadata object from its Tensor equivalent (should be used when receiving metadata via p2p)
-        '''
-        dtype = dtypes[int(t[0].item())]
-        shape = []
-        assert len(t.shape) == 1, "Metadata should only have one dimension"
-        for s in t[1:]:
-            s = int(s.item())
-            if s == 0: break
-            shape.append(s)
-        
-        metadata = TensorMetadata(torch.empty(0, dtype=dtype))
-        metadata.shape = shape
-        return metadata
-
-    def __init__(self, t):
-        self.shape = t.shape
-        self.dtype = t.dtype
-        self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
-
-    def to_tensor(self):
-        '''
-        Creates the Tensor representation of this metadata. Should be used when sending metadata via p2p
-        '''
-        t = torch.zeros(TensorMetadata.MAX_SIZE, device = self.device)
-        t[0] = dtypes.index(self.dtype)
-        for i, s in enumerate(self.shape):
-            t[1 + i] = s
-        return t
-    
-    def get_buffer(self, batch_size):
-        '''
-        Allocates a tensor with the right shape and dtype for this metadata
-        '''
-        buffer = torch.empty((batch_size, *self.shape), dtype = self.dtype, device = self.device)
-        return buffer
-
-    def __repr__(self):
-        return f'TensorMetadata({self.shape})'
 
 class PipelineBlock():
     '''
@@ -106,11 +47,11 @@ class PipelineBlock():
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
 
-    def forward(self, options = {}):
+    def forward(self, **options):
         '''
         Perform the forward pass for one tensor of activations and register it as computed
         '''
-        logger.debug(f'{self} - Computing one forward')
+        logger.debug(f'{self} - Computing one forward with options {options}')
         
         work, x = self.inputs.popleft()
 
@@ -120,23 +61,20 @@ class PipelineBlock():
             x.requires_grad = True
 
         logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            start_event.record(stream)
+
+        with Timer() as timer:
             if  options.get('remat'):
                 with torch.no_grad(): y = self.model(x)
             elif options.get('offload'):
-                y = self.model(x)
+                with activations_offloading():
+                    y = self.model(x)
                 self.activations.append(y.cpu())
                 # x = x.cpu()
             else:
                 y = self.model(x)
                 self.activations.append(y)
-            end_event.record(stream)
-            end_event.synchronize()
-            self.compute_time += start_event.elapsed_time(end_event) / 1000
+                
+        self.compute_time += timer.time()
            
         self.act_to_send.append(y.data)
         self.inputs_to_keep.append(x)
@@ -144,41 +82,37 @@ class PipelineBlock():
         if self.next is None:
             return self.act_to_send.popleft()
         
-    def backward(self, options = {}):
+    def backward(self, **options):
         '''
         Perform the backward pass for one tensor of gradients and register it as computed
         Backward assumes activations AND grads to be on top of the queue
         '''
-        logger.debug(f'{self} - Computing one backward')
+        logger.debug(f'{self} - Computing one backward with options {options}')
 
         x = self.inputs_to_keep.popleft()
 
         if options.get('remat'):
-            # TODO: record time here
-            act = self.model(x)
+            with Timer() as timer:
+                act = self.model(x)
+            self.compute_time += timer()
         elif options.get('offload'):
             act = self.activations.popleft().cuda()
             # x = x.cuda()
         else:
             act = self.activations.popleft()
+            
         work, grads = self.grads.popleft()
         
         if work is not None: work.wait()
 
-        start_event = torch.cuda.Event(enable_timing = True)
-        end_event = torch.cuda.Event(enable_timing = True)
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            start_event.record(stream)
+        with Timer() as timer:
             act.backward(grads)
-            end_event.record(stream)
-            end_event.synchronize()
-            self.compute_time += start_event.elapsed_time(end_event) / 1000
+        self.compute_time += timer.time()
 
         if x.requires_grad:
             self.grads_to_send.append(x.grad.data)
             
-    def send_forward(self, options = {}):
+    def send_forward(self, **options):
         '''
         Send one activation to the next layer in the model
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
@@ -193,7 +127,7 @@ class PipelineBlock():
             logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
             dist.isend(activations, dst)
 
-    def send_backward(self, options = {}):
+    def send_backward(self, **options):
         '''
         Send one gradient to the previous layer in the model
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
@@ -208,7 +142,7 @@ class PipelineBlock():
             logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
             dist.isend(grads, dst)
 
-    def recv_forward(self, mb_size, options = {}):
+    def recv_forward(self, mb_size, **options):
         '''
         Receive and store one activation to forward
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
@@ -216,6 +150,10 @@ class PipelineBlock():
         src = options.get("src") or self.previous
         if src is None or src == self.rank: return
 
+        if options.get("offload") and len(self.activations) > 0:
+            # Free memory just before allocating the next buffer
+            activations_offloading().wait_for_offloading()
+        
         buffer = self.metadata.get_buffer(mb_size)
 
         if options.get("batch"):
@@ -223,10 +161,13 @@ class PipelineBlock():
             return dist.P2POp(dist.irecv, buffer, src)
         else:
             logger.debug(f'{self} - Starting to receive activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
-            work = dist.irecv(buffer, src)
-            self.inputs.append((work, buffer)) # .detach() ?
+            stream = torch.cuda.Stream()
+            with torch.cuda.stream(stream):
+                work = dist.irecv(buffer, src)
+            torch.cuda.current_stream().wait_stream(stream)
+            self.inputs.append((work, buffer))
 
-    def recv_backward(self, mb_size, options = {}):
+    def recv_backward(self, mb_size, **options):
         '''
         Receive and store one gradient to backward
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
@@ -234,6 +175,10 @@ class PipelineBlock():
         src = options.get("src") or self.next
         if src is None or src == self.rank: return
 
+        if options.get("offload"):
+            # Start moving activations back to gpu
+            activations_offloading().prefetch()
+        
         buffer = self.out_metadata.get_buffer(mb_size)
 
         if options.get("batch"):
@@ -241,7 +186,10 @@ class PipelineBlock():
             return dist.P2POp(dist.irecv, buffer, src)
         else:
             logger.debug(f'{self} - Starting to receive gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
-            work = dist.irecv(buffer, src)
+            stream = torch.cuda.Stream()
+            with torch.cuda.stream(stream):
+                work = dist.irecv(buffer, src)
+            torch.cuda.current_stream().wait_stream(stream)
             self.grads.append((work, buffer))
     
     def register_metadata(self):
@@ -296,6 +244,7 @@ class Pipeline():
         self.placement = placement
         self.engine = Engine(self.blocks)
         self.schedule = []
+        self.options = {}
 
     def __call__(self, batch, target, loss_fn, split_size = 1, profile = False, **options):
         '''
@@ -313,9 +262,10 @@ class Pipeline():
             assert sum(split_size) == batch.size(0), f'Splits do not cover the entire batch'
             n_micro_batches = len(split_size)
             
-        if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2): # Different number of micro batches ; we have to recompute the schedule 
+        if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2) or options != self.options: # Different number of micro batches ; we have to recompute the schedule 
 
-            self.schedule = self.scheduler(self.placement, n_micro_batches, options = options)
+            self.schedule = self.scheduler(self.placement, n_micro_batches, **options)
+            self.options = options
             cycles = find_cycles(graph_from_schedule(self.schedule))
             if cycles and dist.get_rank() == 0:
                 logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')

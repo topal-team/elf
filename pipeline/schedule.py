@@ -9,7 +9,7 @@ import torch
 import logging
 logger = logging.getLogger("schedule")
 
-def generate_afab_schedule(placement, n_micro_batches, prefetching = False, options = {}):
+def generate_afab_schedule(placement, n_micro_batches, prefetching = False, **options):
     '''
     All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
     '''
@@ -37,7 +37,7 @@ def generate_afab_schedule(placement, n_micro_batches, prefetching = False, opti
     if prefetching: return enable_prefetching(schedule)
     return schedule
 
-def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, options = {}):
+def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, **options):
     '''
     One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
     '''
@@ -104,7 +104,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, opti
     if prefetching: return enable_prefetching(schedule)
     return schedule
 
-def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False, options = {}):
+def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False, **options):
     schedule = []
     n_devices = max(placement) + 1
     n_stages = len(placement)
@@ -154,7 +154,7 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False, op
                     schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank, **options))
                     enod[rank] += 1
 
-    if prefetching: return reorder_operations(schedule)
+    if prefetching: return enable_prefetching(schedule)
     return schedule
 
 if __name__ == "__main__":
