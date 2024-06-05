@@ -1,8 +1,25 @@
 ---
 pipeline:
-  placement: 0,1,2,3,0,1,2,3
-  schedule: 1f1b
   split_sizes: 1,2,4,8,16,32,64
+  setups:
+    - gpipe: 
+        placement: 0,1,2,3
+        schedule: afab
+    - 1f1b:
+        placement: 0,1,2,3
+        schedule: 1f1b
+    - Megatron-LM:
+        placement: 0,1,2,3,0,1,2,3
+        schedule: 1f1b
+    - Hanayo 1-Wave:
+        placement: 0,1,2,3,3,2,1,0
+        schedule: hanayo
+    - Hanayo 2-Waves:
+        placement: 0,1,2,3,3,2,1,0,0,1,2,3,3,2,1,0
+        schedule: hanayo
+    - Hanayo 3-Waves:
+        placement: 0,1,2,3,3,2,1,0,0,1,2,3,3,2,1,0,0,1,2,3,3,2,1,0
+        schedule: hanayo
 model:
   arch: GPT
   conf: GPTHanayoConfig

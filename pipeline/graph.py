@@ -4,7 +4,6 @@ This is helpful to do static analysis before execution, for instance to prevent 
 '''
 
 from enum import Enum
-import sys
 
 class OperationType(Enum):
     RECV_FORWARD = 0
@@ -108,6 +107,7 @@ def graph_from_schedule(schedule):
 def schedule_from_graph(graph):
     '''
     Constructs a schedule as a list of Operation from its graph equivalent
+    (It's just a topological sort. The order of cycles does not matter as they are batched, or at least should be)
     '''
     def dfs(node, visited, stack):
         # Mark the current node as visited

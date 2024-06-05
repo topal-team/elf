@@ -2,10 +2,10 @@ import matplotlib.pyplot as plt
 import os
 
 # Read data from files
-files = ['1f1b.csv', 'i1f1b.csv', 'afab.csv', 'hanayo-1w.csv', 'hanayo-2w.csv', 'hanayo-3w.csv']
+files = ['1f1b.csv', 'i1f1b.csv', 'afab.csv', 'hanayo-1w.csv', 'hanayo-2w.csv']
 prefix = "GPTHanayo"
 files = [f'results/{prefix}/{f}' for f in files]
-labels = ["1f1b", "Megatron", "GPipe", "Hanayo 1-Wave", "Hanayo 2-Waves", "Hanayo 3-Waves"]
+labels = ["1f1b", "Megatron", "GPipe", "Hanayo 1-Wave", "Hanayo 2-Waves"]
 labels = [l for f,l in zip(files, labels) if os.path.exists(f)]
 
 # files = ["tmp1f1b.csv", "tmpmegatron.csv"]

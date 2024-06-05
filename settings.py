@@ -1,3 +1,7 @@
+'''
+Load a yaml config and sets all the right variables for benchmark
+'''
+
 import torch
 import importlib
 import yaml
@@ -17,14 +21,18 @@ ModelConf = getattr(module, conf)
 vocab_size = config['model']['vocab_size']
 batch_size = config['model']['batch_size']
 block_size = config['model']['block_size']
-placement = [int(x) for x in config['pipeline']['placement'].split(',')]
-schedule = config['pipeline']['schedule']
+setups = []
+options = config['pipeline'].get('options')
+for s in config['pipeline']['setups']:
+    placement = [int(x) for x in s['placement'].split(',')]
+    schedule = s['schedule']
+    setups.append((s, placement, schedule))
+
 split_sizes = [int(x) for x in config['pipeline']['split_sizes'].split(',')]
 iters = config['iters']
+warmups = config['warmups']
 
 inputs = torch.randint(0, vocab_size, (batch_size, block_size))
 # TODO: generate these inputs automatically based on the architecture
 
 model = ModelClass(ModelConf(vocab_size, block_size))
-
-

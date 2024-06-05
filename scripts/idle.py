@@ -41,15 +41,15 @@ for k in range(4):
         # idles[j][k] = np.pad(idles[j][k], (0, len(xlog[0]) - len(idles[j][k])), constant_values = 0)
 
         idle_time = idles[j][k] * times[j]
-
-        i = ax.bar(bar_positions + j * (bar_width * 1.1), idle_time, color = 'tab:gray', width=bar_width, align='center')
+        pos = bar_positions + j * (bar_width * 1.1) - ((len(times) - 1) * bar_width * 1.1 / 2)
+        i = ax.bar(pos, idle_time, color = 'tab:gray', width=bar_width, align='center')
         if j == 0: i.set_label('Idle')
-        ax.bar(bar_positions + j * (bar_width * 1.1), times[j] - idle_time, width=bar_width, bottom=idle_time, align='center', label = 'Compute')
+        ax.bar(pos, times[j] - idle_time, width=bar_width, bottom=idle_time, align='center', label = 'Compute')
 
     ax.set_ylabel('Median time for one iteration (s)', fontdict={'size': 14})
     ax.set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
     ax.tick_params(axis='both', which='major', labelsize=14)
-    ax.set_xticks(bar_positions + (bar_width * 1.1) * (len(sizes) - 1) / 2)
+    ax.set_xticks(ticks = xlog[0])
     ax.set_xticklabels(sizes[0])  # Assuming all sizes are the same for x-axis labels
     ax.set_ylim(0)
 
