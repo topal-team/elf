@@ -238,7 +238,8 @@ class Pipeline():
             case 'hanayo':
                 self.scheduler = generate_hanayo_schedule
             case _:
-                raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b"].')
+                self.scheduler = schedule
+                # raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b", "hanayo"].')
         
         self.blocks = create_pipeline(model, placement)
         self.placement = placement

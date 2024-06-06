@@ -68,7 +68,7 @@ class TensorMetadata():
 
 class Timer():
     def __new__(cls):
-        if torch.cuda.is_available() and torch.cuda.current_device().type == 'cuda':
+        if torch.cuda.is_available():
             return TimerGPU()
         else:
             return TimerCPU()
