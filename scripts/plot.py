@@ -1,109 +1,154 @@
-import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
 import sys
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-# --- Load data ---
+# Load the CSV files into DataFrames and plot each on a subplot
+df_full = pd.read_csv("results/GPTHanayo/full.csv")
 
-# files = ['afab.csv', '1f1b.csv', 'i1f1b.csv', 'hanayo.csv']
-# labels = ["GPipe", "1f1b", "Megatron-LM", "Hanayo 1-Wave"]
+mode = sys.argv[1] if len(sys.argv) >= 1 else "device"
 
-files = ['i1f1b.csv']
-labels = ["Megatron"]
+if mode == "device":
+    fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(15, 10))
+    axs = axs.flatten()
 
-prefix = 'results/GPTHanayo' 
-dfs = []
-for f in files:
-    dfs.append(pd.read_csv(f'{prefix}/{f}'))
+    # Every schedule
+    for idx, name in enumerate(df_full['name'].unique()):
+        df = df_full[df_full['name'] == name]
 
-prefix = 'results/GPTHanayo/remat'
-dfs_remat = []
-for f in files:
-    dfs_remat.append(pd.read_csv(f'{prefix}/{f}'))
+        mbs = df["mb_size"]
+        total_times = df.filter(regex = '^total_time')
+        start_times = df.filter(regex = '^start_time')
+        end_times = df.filter(regex = '^end_time')
+        bubble_times = df.filter(regex = '^bubble_time')
 
-prefix = 'results/GPTHanayo/offload'
-dfs_off = []
-for f in files:
-    dfs_off.append(pd.read_csv(f'{prefix}/{f}'))
+        bar_width = 0.1
+        xlog = np.log2(mbs)
+        bar_positions = np.arange(len(xlog))
 
-mode = sys.argv[1] if len(sys.argv) > 1 else "mems"
+        # Create a bar plot for the selected columns
+        for d in range(total_times.shape[1]):
+            pos = bar_positions + d * (bar_width * 1.2) - ((total_times.shape[1] - 1) * bar_width * 1.2) / 2
+            bottom = np.zeros(total_times.shape[0])
 
-if mode == "mems":
-    # --- Create layout ---
+            i = axs[idx].bar(pos, start_times.iloc[:, d], width=bar_width, align="center", color="dodgerblue")
+            bottom += start_times.iloc[:, d]
+            if d == 0: i.set_label('Start idle')
 
-    fig = plt.figure(figsize=(10, 8))
-    gs = fig.add_gridspec(2, 3)
+            i = axs[idx].bar(pos, bubble_times.iloc[:, d], width=bar_width, bottom=bottom, align="center", color="hotpink")
+            bottom += bubble_times.iloc[:, d]
+            if d == 0: i.set_label('Bubble')
 
-    # Merge the first row into one subplot
-    ax1 = fig.add_subplot(gs[0, 0:2])
+            i = axs[idx].bar(pos, end_times.iloc[:, d], width=bar_width, bottom=bottom, align="center", color="orange")
+            bottom += end_times.iloc[:, d]
+            if d == 0: i.set_label('End idle')
 
-    # Plot the remaining subplots
-    axes = []
-    for i, j in [(0, 2), (1, 0), (1, 1), (1, 2)]:
-        ax = fig.add_subplot(gs[i, j])
-        axes.append(ax)
+            axs[idx].bar(pos, total_times.iloc[:, 0] - bottom, bottom=bottom, width=bar_width, align="center", label=f'Device {d}')
 
-    # --- Plot data ---
+        axs[idx].legend()
+        axs[idx].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+        axs[idx].set_xticks(ticks=xlog)
+        axs[idx].set_xticklabels(mbs)
+        axs[idx].set_ylabel('Median time for one iteration (s)', fontdict={'size': 14})
+        axs[idx].set_title(name)
 
-    for df, df_r, df_o, label in zip(dfs, dfs_remat, dfs_off, labels):
-        ax1.plot(df['mb_size'], df['total_time'], label = label)
-        ax1.plot(df_r['mb_size'], df_r['total_time'], label = f'{label} w/ remat')
-        ax1.plot(df_o['mb_size'], df_o['total_time'], label = f'{label} w/ offloading')
+elif mode == "schedule":
+    fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(15, 10))
+    axs = axs.flatten()
 
-    ax1.set_xscale('log', base = 2)
-    ax1.legend()
-    ax1.set_xlabel('Micro batch size, full batch size = 64')
-    ax1.set_ylabel('Iteration time (s)')
-    ax1.set_title('Time comparison')
+    for d in range(4): # hardcoded number of gpus :)
+        mbs = df_full["mb_size"].unique()
+        n_schedules = df_full['name'].unique().shape[0]
+        
+        bar_width = 0.1
+        xlog = np.log2(mbs)
+        bar_positions = np.arange(len(xlog))
 
-    for i, ax in enumerate(axes):
-        for df, df_r, df_o, label in zip(dfs, dfs_remat, dfs_off, labels):
-            ax.plot(df['mb_size'], df[f'mem_{i}'], label = label)
-            ax.plot(df_r['mb_size'], df_r[f'mem_{i}'], label = f'{label} w/ remat')
-            ax.plot(df_o['mb_size'], df_o[f'mem_{i}'], label = f'{label} w/ offloading')
-            ax.set_xscale('log', base = 2)
-            ax.legend()
-            ax.set_xlabel('Micro batch size')
-            ax.set_ylabel('Peak memory used (GB)')
-            ax.set_title(f'Memory on GPU {i}')
+        # Create a bar plot for the selected columns
+        for idx, name in enumerate(df_full['name'].unique()):
+            total_times = df_full[df_full['name'] == name][f'total_time_{d}']
+            start_times = df_full[df_full['name'] == name][f'start_time_{d}']
+            bubble_times = df_full[df_full['name'] == name][f'bubble_time_{d}']
+            end_times = df_full[df_full['name'] == name][f'end_time_{d}']
 
-elif mode == "idles":
-    # --- Layout ---
-    
-    fig, axes = plt.subplots(2, 2)
-    axes = [ax for row in axes for ax in row]
-    bar_width = 0.1
-    space = 1.1
+            pos = bar_positions + (bar_width * 1.2) * idx - (bar_width * 1.2 * (n_schedules - 1) / 2)
+            bottom = np.zeros(total_times.shape[0])
 
-    # --- Data ---
+            i = axs[d].bar(pos, start_times, width=bar_width, align="center", color="dodgerblue")
+            bottom += start_times
+            if idx == 0: i.set_label('Start idle')
 
-    for i, ax in enumerate(axes):
-        for df, df_r, df_o, label in zip(dfs, dfs_remat, dfs_off, labels):
-            xlog = np.log2(df['mb_size'])
-            bar_positions = np.arange(len(xlog))
+            i = axs[d].bar(pos, bubble_times, width=bar_width, bottom=bottom, align="center", color="hotpink")
+            bottom += bubble_times
+            if idx == 0: i.set_label('Bubble')
 
-            idle_times = df[f'idle_ratio_{i}'] * df['total_time']
-            compute_times = df['total_time']
-            ax.bar(bar_positions, idle_times, color = "tab:gray", width = bar_width, label = 'Idle')
-            ax.bar(bar_positions, compute_times, bottom = idle_times, width = bar_width, label = label)
+            i = axs[d].bar(pos, end_times, width=bar_width, bottom=bottom, align="center", color="orange")
+            bottom += end_times
+            if idx == 0: i.set_label('End idle')
 
-            idle_times = df_r[f'idle_ratio_{i}'] * df_r['total_time']
-            compute_times = df_r['total_time'] - idle_times
-            ax.bar(bar_positions + space * bar_width, idle_times, color = "tab:gray", width = bar_width)
-            ax.bar(bar_positions + space * bar_width, compute_times, bottom = idle_times, width = bar_width, label = f'{label} w/ remat')
+            axs[d].bar(pos, total_times - bottom, bottom=bottom, width=bar_width, align="center", label=name)
 
-            idle_times = df_o[f'idle_ratio_{i}'] * df_o['total_time']
-            compute_times = df_o['total_time'] - idle_times
-            ax.bar(bar_positions + 2 * space * bar_width, idle_times, color = "tab:gray", width = bar_width)
-            ax.bar(bar_positions + 2 * space * bar_width, compute_times, bottom = idle_times, width = bar_width, label = f'{label} w/ offload')
+        axs[d].legend()
+        axs[d].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+        axs[d].set_xticks(ticks=xlog)
+        axs[d].set_xticklabels(mbs)
+        axs[d].set_ylabel('Median time for one iteration (s)', fontdict={'size': 14})
+        axs[d].set_title(f'Device {d}')
 
-            ax.set_xticks(bar_positions + (bar_width * 1.1 * (3 - 1)) / 2)
-            ax.set_xticklabels(df['mb_size'])
-            ax.legend()
-            ax.set_xlabel('Micro batch size')
-            ax.set_ylabel('Iteration time (s)')
-            ax.set_title(f'Idle time on GPU {i}')
+elif mode == "mems":
+    fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(15, 10))
+    axs = axs.flatten()
 
-plt.suptitle('GPT-like model training with batch size = 64', fontsize=20)
-fig.tight_layout()
+    for d in range(4): # hardcoded number of gpus :)
+        mbs = df_full["mb_size"].unique()
+        n_schedules = df_full['name'].unique().shape[0]
+        for idx, name in enumerate(df_full['name'].unique()):
+            peak_mem = df_full[df_full['name'] == name][f'mem_{d}']
+            axs[d].plot(mbs, peak_mem, label = name)
+        
+        axs[d].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+        axs[d].tick_params(axis='both', which='major', labelsize=14)
+        axs[d].set_xscale('log', base=2)
+        axs[d].set_ylim(0)
+        axs[d].legend(prop={'size': 10})
+        axs[d].set_ylabel(f'Peak memory used (GB)', fontdict={'size': 14})
+        axs[d].set_title(f'Memory on device {d}', fontdict={'size': 16})
+
+elif mode == "remat":
+    df_r = pd.read_csv('results/GPTHanayo/remat/full.csv')
+
+    fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(15, 10))
+    axs = axs.flatten()
+
+    for d in range(1):  # Assuming 4 devices as in previous sections
+        mbs = df_full["mb_size"].unique()
+        filtered_names = df_full['name'].unique()
+        filtered_names = [name for name in filtered_names if name not in ['GPipe', 'Hanayo 2-Waves', 'Hanayo 3-Waves']]
+        n_schedules = len(filtered_names)
+
+        for idx, name in enumerate(filtered_names):
+            total_time_full = df_full[df_full['name'] == name][f'total_time_{d}']
+            total_time_r = df_r[df_r['name'] == name][f'total_time_{d}']
+            mem_full = df_full[df_full['name'] == name][f'mem_{d}']
+            mem_r = df_r[df_r['name'] == name][f'mem_{d}']
+
+            axs[2*d].plot(mbs, total_time_full, label=name)
+            axs[2*d].plot(mbs, total_time_r, label=f'{name} w/ remat')
+            axs[2*d+1].plot(mbs, mem_full, label=name)
+            axs[2*d+1].plot(mbs, mem_r, label=f'{name} w/ remat')
+
+        axs[2*d].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+        axs[2*d].tick_params(axis='both', which='major', labelsize=14)
+        axs[2*d].set_ylabel('Difference in total time (s)', fontdict={'size': 14})
+        axs[2*d].set_title(f'Iteration time on device {d}', fontdict={'size': 16})
+        axs[2*d].legend()
+
+        axs[2*d+1].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+        axs[2*d+1].tick_params(axis='both', which='major', labelsize=14)
+        axs[2*d+1].set_ylabel('Difference in memory usage (GB)', fontdict={'size': 14})
+        axs[2*d+1].set_title(f'Memory usage on device {d}', fontdict={'size': 16})
+        axs[2*d+1].legend()
+
+
+plt.tight_layout()
 plt.show()
