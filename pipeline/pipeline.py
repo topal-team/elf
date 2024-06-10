@@ -3,7 +3,6 @@ Core pipeline objects. Define the user interface (Pipeline) and the behaviour of
 '''
 
 import os
-import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -11,6 +10,7 @@ from torch.autograd.variable import Variable
 from .schedule import *
 from .engine import Engine
 from .utils import Timer, TensorMetadata, activations_offloading
+from .partition import partition_graph
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
@@ -229,7 +229,8 @@ class Pipeline():
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
-            model = partition_model(model, placement)
+            # model = partition_model(model, placement)
+            model = partition_graph(model, placement)
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
@@ -306,20 +307,6 @@ def create_pipeline(layers, placement):
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
 
-    # Merge consecutive blocks that are on the same device (useful for hanayo-like schedules)
-    '''
-    i = 0
-    while i < len(blocks) - 1:
-        if blocks[i].rank == rank and blocks[i + 1].id == blocks[i].id + 1:
-            print(f'Merging block {blocks[i]} and {blocks[i + 1]}')
-            merged_block = PipelineBlock(nn.Sequential(blocks[i].model, blocks[i + 1].model), blocks[i].id, placement)
-            merged_block.previous = blocks[i].previous
-            merged_block.next = blocks[i + 1].next
-            blocks[i] = merged_block
-            blocks.pop(i + 1)
-            i -= 1
-        i += 1
-    '''
     return blocks
 
 def partition_model(model, placement):
