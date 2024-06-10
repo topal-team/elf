@@ -3,7 +3,6 @@ Core pipeline objects. Define the user interface (Pipeline) and the behaviour of
 '''
 
 import os
-import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -11,6 +10,7 @@ from torch.autograd.variable import Variable
 from .schedule import *
 from .engine import Engine
 from .utils import Timer, TensorMetadata, activations_offloading
+from .partition import partition_graph
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
@@ -230,7 +230,8 @@ class Pipeline():
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
-            model = partition_model(model, placement)
+            # model = partition_model(model, placement)
+            model = partition_graph(model, placement)
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule

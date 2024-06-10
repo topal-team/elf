@@ -22,6 +22,7 @@ vocab_size = config['model']['vocab_size']
 batch_size = config['model']['batch_size']
 block_size = config['model']['block_size']
 setups = []
+
 options = config['pipeline'].get('options') or {}
 for s, d in config['pipeline']['setups'].items():
     placement = [int(x) for x in d['placement'].split(',')]
