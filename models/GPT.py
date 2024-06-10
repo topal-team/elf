@@ -328,15 +328,15 @@ class EmbeddingStem(nn.Module):
         self.wpe = nn.Embedding(config.block_size, config.n_embd, device=device, dtype=dtype)
         self.drop = nn.Dropout(config.embd_pdrop)
         self.block_size = config.block_size
+        self.vocab_size = config.vocab_size
 
     def reset_parameters(self):
         self.tok_emb.reset_parameters()
 
     def forward(self, idx):
-
         token_embeddings = self.tok_emb(idx) # each index maps to a (learnable) vector
         pos_ids = torch.arange(
-                0, idx.size(-1), dtype=torch.long, device=self.wpe.weight.device
+                0, self.block_size, dtype=torch.long, device=torch.cuda.current_device()
             ).unsqueeze(0) # each position maps to a (learnable) vector
         return self.drop(token_embeddings + self.wpe(pos_ids))
 
