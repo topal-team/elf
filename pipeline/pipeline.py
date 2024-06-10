@@ -217,7 +217,7 @@ class Pipeline():
     Model wrapper for pipelining
     Maybe it can inherit from nn.Module ?
     '''
-    def __init__(self, model, placement = "auto", partition = "auto", schedule = "afab"):
+    def __init__(self, model, sample, placement = "auto", partition = "auto", schedule = "afab"):
         '''
         model: torch module
         placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
@@ -230,7 +230,7 @@ class Pipeline():
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
             # model = partition_model(model, placement)
-            model = partition_graph(model, placement)
+            model = partition_graph(model, placement, sample)
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule

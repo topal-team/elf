@@ -22,7 +22,7 @@ vocab_size = config['model']['vocab_size']
 batch_size = config['model']['batch_size']
 block_size = config['model']['block_size']
 setups = []
-options = config['pipeline'].get('options')
+options = config['pipeline'].get('options', {})
 for s in config['pipeline']['setups'].values():
     placement = [int(x) for x in s['placement'].split(',')]
     schedule = s['schedule']

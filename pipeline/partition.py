@@ -4,7 +4,6 @@ import torch
 import torch.distributed as dist
 import numpy as np
 sys.path.append("./")
-from models.simple import *
 
 def add_timing_to_graph(graph_module):
     def wrap_function(target):
@@ -197,8 +196,8 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
         
     return torch.fx.GraphModule(graph_module, subgraph)
 
-def partition_graph(model, placement):
-    trace = torch.fx.symbolic_trace(model)
+def partition_graph(model, placement, sample):
+    trace = torch.fx.symbolic_trace(model.cuda())
     operation_times = profile_operations(trace, sample)
 
     parts, inputs, outputs = split_graph_constrained(trace, operation_times, len(placement))

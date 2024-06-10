@@ -2,7 +2,7 @@
 Manipulate graphs corresponding to schedules.
 This is helpful to do static analysis before execution, for instance to prevent dependencies cycles.
 '''
-
+import sys
 from enum import Enum
 
 class OperationType(Enum):
