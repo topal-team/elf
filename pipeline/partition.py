@@ -4,26 +4,23 @@ import torch
 import torch.distributed as dist
 import numpy as np
 sys.path.append("./")
+from .utils import Timer
 
 def add_timing_to_graph(graph_module):
     def wrap_function(target):
         def timed_forward(*args, **kwargs):
-            start_time = time.time()
-            output = target(*args, **kwargs)
-            end_time = time.time()
-            duration = end_time - start_time
-            node_time[target.__name__] = duration
+            with Timer() as timer:
+                output = target(*args, **kwargs)
+            node_time[target.__name__] = timer.time()
             return output
         return timed_forward
 
     def wrap_module(module, node_name):
         original_forward = module.forward
         def timed_forward(*args, **kwargs):
-            start_time = time.time()
-            output = original_forward(*args, **kwargs)
-            end_time = time.time()
-            duration = end_time - start_time
-            node_time[node_name] = duration
+            with Timer() as timer:
+                output = original_forward(*args, **kwargs)
+            node_time[node_name] = timer.time()
             return output
         module.forward = timed_forward
         return module
@@ -31,11 +28,9 @@ def add_timing_to_graph(graph_module):
     def wrap_method(instance, method_name):
         def timed_method(*args, **kwargs):
             method = getattr(args[0], method_name)
-            start_time = time.time()
-            output = method(*args, **kwargs)
-            end_time = time.time()
-            duration = end_time - start_time
-            node_time[method_name] = duration
+            with Timer() as timer:
+                output = method(*args, **kwargs)
+            node_time[method_name] = timer.time()
             return output
         setattr(instance, method_name, timed_method)
 
@@ -81,7 +76,7 @@ def profile_operations(graph_module, input_sample):
         graph_module(input_sample)
 
     restore_original_operations(graph_module, original_ops)
-
+    
     return node_time
 
 def split_graph_constrained(graph_module, node_times, num_parts=3):
@@ -192,7 +187,8 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
         # subgraph.output({
         #     o: env[o] for o in outputs
         # })
-        subgraph.output(env[outputs[0]])
+        if len(outputs) != 0:
+            subgraph.output(env[outputs[0]])
         
     return torch.fx.GraphModule(graph_module, subgraph)
 
