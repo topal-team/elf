@@ -92,7 +92,7 @@ def add_profiling_to_graph(graph_module):
             with Timer() as timer:
                 for _ in range(10):
                     output = target(*args, **kwargs)
-            node_time[target.__name__] = timer.time() / 10
+            node_time[target.__name__] = timer.time()
             node_memory[target.__name__] = output.numel() * output.element_size()
             return output
         return timed_forward
@@ -101,9 +101,10 @@ def add_profiling_to_graph(graph_module):
         original_forward = module.forward
         def timed_forward(*args, **kwargs):
             with Timer() as timer:
+
                 for _ in range(10):
                     output = original_forward(*args, **kwargs)
-            node_time[node_name] = timer.time() / 10
+            node_time[node_name] = timer.time()
             node_memory[node_name] = output.numel() * output.element_size()
             return output
         module.forward = timed_forward
@@ -301,8 +302,6 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
         subgraph.output({
             o: env[o] for o in outputs
         })
-        # if len(outputs) != 0:
-        #     subgraph.output(env[outputs[0]])
         
     return torch.fx.GraphModule(graph_module, subgraph)
 
