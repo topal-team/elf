@@ -25,11 +25,7 @@ rank = int(os.getenv("RANK", "0"))
 
 try:
     from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
-    if rank == 0:
-        print("Using PyTorch checkpoint_wrapper")
 except ImportError:
-    if rank == 0:
-        print("Falling back to Fairscale checkpoint")
     from fairscale.nn.checkpoint import checkpoint_wrapper
 
 logger = logging.getLogger(__name__)

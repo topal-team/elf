@@ -68,7 +68,7 @@ class PipelineBlock():
             elif options.get('offload'):
                 with activations_offloading():
                     y = self.model(x)
-                self.activations.append(y.cpu())
+                self.activations.append(y)
                 # x = x.cpu()
             else:
                 y = self.model(x)
@@ -94,9 +94,9 @@ class PipelineBlock():
         if options.get('remat'):
             with Timer() as timer:
                 act = self.model(x)
-            self.compute_time += timer()
+            self.compute_time += timer.time()
         elif options.get('offload'):
-            act = self.activations.popleft().cuda()
+            act = self.activations.popleft()
             # x = x.cuda()
         else:
             act = self.activations.popleft()
@@ -287,7 +287,8 @@ class Pipeline():
             b.register_metadata()
             logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
-        result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
+        result, losses, times = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
+        self.times = times
         if len(result) != 0:
             return torch.cat(result, dim = 0), torch.tensor(losses, device = torch.cuda.current_device()).sum(dim = 0, keepdim = True)
         else: return None, None
@@ -306,73 +307,39 @@ def create_pipeline(layers, placement):
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
 
-    # Merge consecutive blocks that are on the same device (useful for hanayo-like schedules)
-    '''
-    i = 0
-    while i < len(blocks) - 1:
-        if blocks[i].rank == rank and blocks[i + 1].id == blocks[i].id + 1:
-            print(f'Merging block {blocks[i]} and {blocks[i + 1]}')
-            merged_block = PipelineBlock(nn.Sequential(blocks[i].model, blocks[i + 1].model), blocks[i].id, placement)
-            merged_block.previous = blocks[i].previous
-            merged_block.next = blocks[i + 1].next
-            blocks[i] = merged_block
-            blocks.pop(i + 1)
-            i -= 1
-        i += 1
-    '''
     return blocks
 
 def partition_model(model, placement):
-    '''
-    Divide a model into roughly equal blocks, in terms of number of parameters
-    Each block that is placed on this rank is moved to the corresponding GPU
-    '''
     rank = dist.get_rank() if dist.is_initialized() else None
 
     available_devices = [torch.device(device) for device in ['cpu'] + [f'cuda:{i}' for i in range(torch.cuda.device_count())]]
 
     if any(torch.device(p) not in available_devices for p in placement):
         raise RuntimeError(f'Trying to place the model on non existing or non visible devices : {placement}, but available devices are : {available_devices}')
-    
-    layers = []
-    for module in model.children():
-        if isinstance(module, nn.ModuleList) or isinstance(module, nn.Sequential):
-            layers.extend(module)
+
+    submodules = []
+    # assume children are sequential
+    for m in model.children():
+        if isinstance(m, nn.Sequential) or isinstance(m, nn.ModuleList):
+            submodules.extend(m)
         else:
-            layers.append(module)
+            submodules.append(m)
+    
+    total_params = sum([p.numel() for p in model.parameters()])
+    n_stages = len(placement)
+    delim = total_params // n_stages
+    acc = 0
+    blocks = [nn.Sequential() for r in placement if r == rank]
+   
+    for m in submodules:
+        if placement[acc // delim] == rank:
+            idx = placement[:acc//delim].count(rank)
+            blocks[idx].append(m)
+        acc += sum([p.numel() for p in m.parameters()])
             
-    def numel(layer):
-        return sum([p.numel() for p in layer.parameters()])
-
-    total_numel = sum([numel(layer) for layer in layers])
-    phase_numel = total_numel // len(placement)
-    delim_numel = phase_numel
-    accum_numel = 0
-
-    # seal one pipeline phase when its numel is larger than phase_numel
-    phases = [[]]
-    for layer in layers:
-        phases[-1].append(layer)
-        accum_numel += numel(layer)
-        if accum_numel >= delim_numel:
-            delim_numel += phase_numel
-            phases.append([])
+    
+    # Place all remaining layers
+    if rank == placement[-1]:
+        blocks.append(nn.Sequential(*submodules))
             
-    # pack all remaining layers into the last phase
-    while len(phases) > len(placement):
-        phases[-2].extend(phases[-1])
-        phases.pop()
-
-    if rank is None:
-        for i, phase in enumerate(phases):
-            for layer in phase:
-                layer.to_empty(device = torch.device(placement[i]))
-    else:
-        for i in range(len(placement)):
-            if rank == placement[i]:
-                for layer in phases[i]:
-                    layer.to_empty(device=torch.device(rank))
-
-    # create nn.Sequential
-    if rank is None: return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
-    else: return [nn.Sequential(*phases[i]) for i in range(len(placement)) if placement[i] == rank]
+    return blocks
