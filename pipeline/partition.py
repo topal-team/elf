@@ -1,29 +1,110 @@
-import sys
 import time
+import tempfile
+import numpy as np
+import subprocess
 import torch
 import torch.distributed as dist
-import numpy as np
-sys.path.append("./")
 
-def add_timing_to_graph(graph_module):
+class Node:
+    def __init__(self, node, time, idx):
+        self.node = node
+        self.time = time
+        self.idx = idx
+        self.edges = []
+
+    def to_line(self):
+        '''
+        s w1 w2 ... wncon v1 e1 v2 e2 ... vk ek
+        where s is the size of the vertex, w1, w2, . . . , wncon are the ncon vertex weights associated with this vertex, v1, . . . , vk
+        are the vertices adjacent to this vertex, and e1, . . . , ek are the weights of these edges.
+        http://glaros.dtc.umn.edu/gkhome/fetch/sw/metis/manual.pdf - Section 4.1.1
+        '''
+        line = f'{int(self.time * 1e1)}'
+        for v,e in self.edges:
+            line += f' {v} {max(int(e / 1e3), 1)}'
+        return line
+    
+    def __repr__(self):
+        return repr(self.node)
+    
+def convert_fx(module, times, memories):
+    nodes = list(module.graph.nodes)
+    graph = {}
+    indices = {}
+    for i, node in enumerate(nodes):
+        graph[node.name] = Node(node, times[node.name], i + 1)
+        indices[node.name] = i + 1
+        for dep in node.all_input_nodes:
+            graph[dep.name].edges.append((indices[node.name], memories[dep.name]))
+            graph[node.name].edges.append((indices[dep.name], memories[dep.name]))
+
+    return graph
+
+def write_metis(graph):
+    file = tempfile.NamedTemporaryFile("w+")
+    n = len(graph)
+    m = sum(map(lambda n : len(n.edges), list(graph.values()))) // 2 # edges are counted twice
+    fmt = '011'
+    ncon = 1
+    file.write(f'{n} {m} {fmt} {ncon}\n')
+    for node in graph.values():
+        file.write(node.to_line() + "\n")
+    return file
+
+def execute_metis(file, n):
+    file.flush()  # Ensure all data is written before executing
+    file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
+    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig"])  # Execute gpmetis with the file and partition into 5 parts
+
+def read_metis(graph, file):
+    f = open(file, "r")
+    nodes = list(graph.values())
+    n = 0
+    mapping = []
+    parts = []
+    while l := f.readline():
+        i = int(l)
+        if i in mapping:
+            i = mapping.index(i)
+        else:
+            mapping.append(i)
+            i = len(mapping) - 1
+            parts.append([])
+
+        parts[i].append(nodes[n].node)
+        n += 1
+    return parts
+
+def fx_from_metis(graph, file):
+    parts = []
+    nodes = list(graph.values())
+    with open(file, "r") as f:
+        i = 0
+        while line := f.readline():
+            p = int(line) - 1
+            parts[p].append(nodes[i].node)
+            i += 1
+    return parts
+
+def add_profiling_to_graph(graph_module):
     def wrap_function(target):
         def timed_forward(*args, **kwargs):
-            start_time = time.time()
-            output = target(*args, **kwargs)
-            end_time = time.time()
-            duration = end_time - start_time
-            node_time[target.__name__] = duration
+            with Timer() as timer:
+                for _ in range(10):
+                    output = target(*args, **kwargs)
+            node_time[target.__name__] = timer.time() / 10
+            node_memory[target.__name__] = output.numel() * output.element_size()
             return output
         return timed_forward
 
     def wrap_module(module, node_name):
         original_forward = module.forward
         def timed_forward(*args, **kwargs):
-            start_time = time.time()
-            output = original_forward(*args, **kwargs)
-            end_time = time.time()
-            duration = end_time - start_time
-            node_time[node_name] = duration
+            with Timer() as timer:
+                for _ in range(10):
+                    output = original_forward(*args, **kwargs)
+            node_time[node_name] = timer.time() / 10
+            node_memory[node_name] = output.numel() * output.element_size()
             return output
         module.forward = timed_forward
         return module
@@ -31,15 +112,15 @@ def add_timing_to_graph(graph_module):
     def wrap_method(instance, method_name):
         def timed_method(*args, **kwargs):
             method = getattr(args[0], method_name)
-            start_time = time.time()
-            output = method(*args, **kwargs)
-            end_time = time.time()
-            duration = end_time - start_time
-            node_time[method_name] = duration
+            with Timer as timer:
+                output = method(*args, **kwargs)
+            node_time[method_name] = timer.time()
+            node_memory[method_name] = output.numel() * output.element_size()
             return output
         setattr(instance, method_name, timed_method)
 
     node_time = {}
+    node_memory = {}
     original_operations = {}
     for node in graph_module.graph.nodes:
         if node.op == 'call_function':
@@ -59,7 +140,7 @@ def add_timing_to_graph(graph_module):
 
 
     graph_module.recompile()
-    return graph_module, node_time, original_operations
+    return graph_module, node_time, node_memory, original_operations
 
 def restore_original_operations(graph_module, original_operations):
     for node in graph_module.graph.nodes:
@@ -74,7 +155,7 @@ def restore_original_operations(graph_module, original_operations):
 
 def profile_operations(graph_module, input_sample):
     # Add timing to the graph
-    graph_module, node_time, original_ops = add_timing_to_graph(graph_module)
+    graph_module, node_time, node_memory, original_ops = add_profiling_to_graph(graph_module)
 
     # Execute the modified graph
     with torch.no_grad():
@@ -82,7 +163,13 @@ def profile_operations(graph_module, input_sample):
 
     restore_original_operations(graph_module, original_ops)
 
-    return node_time
+    for node in graph_module.graph.nodes:
+        if node.name not in node_time:
+            node_time[node.name] = 0
+        if node.name not in node_memory:
+            node_memory[node.name] = 0
+
+    return node_time, node_memory
 
 def split_graph_constrained(graph_module, node_times, num_parts=3):
     nodes = list(graph_module.graph.nodes)
@@ -99,12 +186,6 @@ def split_graph_constrained(graph_module, node_times, num_parts=3):
     current_time = 0
     for node in reversed(nodes):
         parts[current_part].insert(0, node)
-        if node.op == "placeholder":
-            part_inputs[current_part].append(node.name)
-            parts[current_part].remove(node)
-        elif node.op == "output":
-            part_outputs[current_part].append(node.args[0].name)
-            parts[current_part].remove(node)
         current_time += node_times.get(node.name, 0)
         for dep in node.all_input_nodes:
             if dep.name not in needed_inputs and dep not in parts[current_part]:
@@ -118,7 +199,6 @@ def split_graph_constrained(graph_module, node_times, num_parts=3):
             current_time = 0
 
     return parts, part_inputs, part_outputs
-
 
 def split_graph_into_parts(graph_module, node_times, num_parts=3):
     nodes = list(graph_module.graph.nodes)
@@ -173,6 +253,35 @@ def split_graph_into_parts(graph_module, node_times, num_parts=3):
     part_outputs =  {i: set(j) for i,j in part_outputs.items()}
     return parts, part_inputs, part_outputs
 
+def get_inputs_outputs(parts):
+    inputs = {i: set() for i in range(len(parts))}
+    outputs = {i: set() for i in range(len(parts))}
+
+    def find_idx(node):
+        for i, p in enumerate(parts):
+            if node in p:
+                return i
+
+    for i, part in enumerate(parts):
+        for node in part:
+            if node.op == "placeholder":
+                inputs[i].add(node.name)
+                part.remove(node)
+                continue
+            elif node.op == "output":
+                outputs[i].add(node.args[0].name)
+                part.remove(node)
+                continue
+            print(f'Processing node {node} - needs inputs {node.all_input_nodes}')
+            for dep in node.all_input_nodes:
+                if dep not in part:
+                    print(f'Dep {dep} not in part {part} !')
+                    inputs[i].add(dep.name)
+                    outputs[find_idx(dep)].add(dep.name)
+    
+    return inputs, outputs # remove dupes
+
+
 def create_subgraph(graph_module, nodes, inputs, outputs):
     subgraph = torch.fx.Graph()
     env = {}
@@ -189,16 +298,17 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
         env[node.name] = subgraph.node_copy(node, load_arg)
 
     with subgraph.inserting_after():
-        # subgraph.output({
-        #     o: env[o] for o in outputs
-        # })
-        subgraph.output(env[outputs[0]])
+        subgraph.output({
+            o: env[o] for o in outputs
+        })
+        # if len(outputs) != 0:
+        #     subgraph.output(env[outputs[0]])
         
     return torch.fx.GraphModule(graph_module, subgraph)
 
 def partition_graph(model, placement, sample):
     trace = torch.fx.symbolic_trace(model.cuda())
-    operation_times = profile_operations(trace, sample)
+    operation_times, operation_memories = profile_operations(trace, sample)
 
     parts, inputs, outputs = split_graph_constrained(trace, operation_times, len(placement))
     blocks = []
@@ -209,16 +319,27 @@ def partition_graph(model, placement, sample):
     return blocks
 
 if __name__ == '__main__':
-    model = SimpleTransformer(500, 256, 12)
+    import sys
+    from utils import Timer
+    sys.path.append("./")
+    from models.simple import SimpleTransformer
+    model = SimpleTransformer(500, 256, 6)
     sample = model.get_sample(2)
     
     trace = torch.fx.symbolic_trace(model)
-    operation_times = profile_operations(trace, sample)
+    operation_times, operation_memories = profile_operations(trace, sample)
 
-    parts, inputs, outputs = split_graph_constrained(trace, operation_times, 5)
+    nparts = 4
+    graph = convert_fx(trace, operation_times, operation_memories)
+    file = write_metis(graph)
+    execute_metis(file, nparts)
+    file.close()
+    parts = read_metis(graph, f'{file.name}.part.{nparts}')
+    print(f'{len(parts)} parts created.')
+    inputs, outputs = get_inputs_outputs(parts)
+    
+    # parts, inputs, outputs = split_graph_constrained(trace, operation_times, 12)
     # parts, inputs, outputs = split_graph_into_parts(trace, operation_times, 5)
-    for p in parts:
-        print(p)
     submodules = []
     for i,p in enumerate(parts):
         print(f'Parts {p} need inputs {inputs[i]} and has outputs {outputs[i]}.')
@@ -227,20 +348,22 @@ if __name__ == '__main__':
     
     times = []
     x = sample
-    # x = {i: sample for i in inputs[0]}
-    # all_values = {**x}
+    x = {i: sample for i in inputs[0]}
+    all_values = {**x}
     for i,s in enumerate(submodules):
         print(s.code)
         start = time.time()
-        x = s(x)
+        x = s(**x)
         times.append(time.time() - start)
-        # for y,z in x.items():
-        #     all_values[y] = z
-        # x = {y:z for y,z in all_values.items() if i + 1 < len(inputs) and y in inputs[i + 1]}
+        for y,z in x.items():
+            all_values[y] = z
+        x = {y:z for y,z in all_values.items() if i + 1 == len(inputs) or y in inputs[i + 1]}
 
     print(times)
     print(np.median(times), np.std(times))
-    # all_values = {x:y for x,y in all_values.items() if x == "view"}
+    all_values = {x:y for x,y in all_values.items() if x == "view"}
 
     gt = model(sample)
-    assert torch.allclose(x, gt)
+    assert torch.allclose(x['view'], gt)
+else:
+    from .utils import Timer
