@@ -68,7 +68,7 @@ class PipelineBlock():
             elif options.get('offload'):
                 with activations_offloading():
                     y = self.model(x)
-                self.activations.append(y)
+                self.activations.append(y.cpu())
                 # x = x.cpu()
             else:
                 y = self.model(x)
@@ -96,7 +96,7 @@ class PipelineBlock():
                 act = self.model(x)
             self.compute_time += timer.time()
         elif options.get('offload'):
-            act = self.activations.popleft()
+            act = self.activations.popleft().cuda()
             # x = x.cuda()
         else:
             act = self.activations.popleft()
@@ -148,12 +148,12 @@ class PipelineBlock():
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         src = options.get("src") or self.previous
-        if src is None or src == self.rank: return
-
         if options.get("offload") and len(self.activations) > 0:
             # Free memory just before allocating the next buffer
             activations_offloading().wait_for_offloading()
-        
+            
+        if src is None or src == self.rank: return
+
         buffer = self.metadata.get_buffer(mb_size)
 
         if options.get("batch"):
@@ -173,12 +173,13 @@ class PipelineBlock():
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         src = options.get("src") or self.next
-        if src is None or src == self.rank: return
 
         if options.get("offload"):
             # Start moving activations back to gpu
             activations_offloading().prefetch()
-        
+            
+        if src is None or src == self.rank: return
+
         buffer = self.out_metadata.get_buffer(mb_size)
 
         if options.get("batch"):

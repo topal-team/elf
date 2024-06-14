@@ -110,61 +110,62 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
             class_._instance.events = {}
             class_._instance.tensors = {}
             class_._instance.stream = torch.cuda.Stream()
+            class_._instance.single = False
         return class_._instance
     
     def __init__(self):
+        if self.single:
+            return
+        self.single = True
         # When forward is done, we start sending to cpu asynchronously
         def pack_to_cpu(tensor):
-            packed = torch.empty(
-                tensor.size(),
-                dtype=tensor.dtype,
-                layout=tensor.layout,
-                pin_memory=(torch.cuda.is_available() and not tensor.is_sparse),
-            )
-
             key = uuid.uuid4()
             self.events[key] = torch.cuda.Event()
-            self.tensors[key] = packed
             with torch.cuda.stream(self.stream):
+                packed = torch.empty(
+                    tensor.size(),
+                    device = torch.device('cpu'),
+                    dtype = tensor.dtype,
+                )
                 packed.copy_(tensor, non_blocking = True)
+                self.tensors[key] = packed
                 self.events[key].record(self.stream)
+                del tensor
                 
-            return (tensor.device, key, packed)
-
+            return key
+        
         # Ensure the data movement was finished and return the device tensor
-        def unpack_from_cpu(packed):
-            device, key, tensor = packed
-            self.stream.synchronize()
+        def unpack_from_cpu(key):
             # If it wasn't prefetched just copy it
             if not self.events.get(key):
                 print(f'Tensor was not prefetched :/ - {tensor.shape}')
-                return tensor.cuda()
+                return None
             
             self.events[key].synchronize()
             unpacked = self.tensors[key]
             del self.events[key]
             del self.tensors[key]
             return unpacked
-
+        
         super().__init__(pack_to_cpu, unpack_from_cpu)
 
     # At some point we need to free memory ; this means potentially waiting for the copy to finish, so we want to do it just in time, not too early
     def wait_for_offloading(self):
-        for key in self.events.keys():
+        for key in list(self.events.keys()):
             self.events[key].synchronize()
+        # Here all tensors are effectively copied on cpu and memory on gpu is freed
 
     # Copy back from device to host, asynchronously
     def prefetch(self):
         with torch.cuda.stream(self.stream):
-            for key in self.events.keys():
+            for key in list(self.events.keys()):
+                self.events[key] = torch.cuda.Event()
                 tensor = self.tensors[key]
                 unpacked = torch.empty(
                     tensor.size(),
-                    dtype=tensor.dtype,
-                    layout=tensor.layout,
-                    device=torch.cuda.current_device(),
+                    dtype = tensor.dtype,
+                    device = torch.cuda.current_device()
                 )
-                self.tensors[key] = unpacked
-                self.events[key] = torch.cuda.Event()
                 unpacked.copy_(tensor, non_blocking = True)
+                self.tensors[key] = unpacked                
                 self.events[key].record(self.stream)
