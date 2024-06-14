@@ -306,17 +306,32 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
         
     return torch.fx.GraphModule(graph_module, subgraph)
 
-def partition_graph(model, placement, sample):
+def split_graph_metis(graph, times, memories, n):
+        graph = convert_fx(graph, times, memories)
+        file = write_metis(graph)
+        execute_metis(file, n)
+        file.close()
+        parts = read_metis(graph, f'{file.name}.part.{n}')
+        inputs, outputs = get_inputs_outputs(parts)
+
+        return parts, inputs, outputs
+
+def partition_graph(model, placement, sample, mode = "metis"):
     trace = torch.fx.symbolic_trace(model.cuda())
     operation_times, operation_memories = profile_operations(trace, sample)
 
-    parts, inputs, outputs = split_graph_constrained(trace, operation_times, len(placement))
+    if mode == "metis":
+        parts, inputs, outputs = split_graph_metis(trace, operation_times, operation_memories, len(placement))        
+    elif mode == "constrained":
+        parts, inputs, outputs = split_graph_constrained(trace, operation_times, len(placement))
+    else:
+        parts, inputs, outputs = split_graph_into_parts(trace, operation_times, len(placement))
     blocks = []
     for i, p in enumerate(parts):
         if placement[i] == dist.get_rank():
             blocks.append(create_subgraph(trace, p, inputs[i], outputs[i]).cuda())
 
-    return blocks
+    return blocks, inputs, outputs
 
 if __name__ == '__main__':
     import sys
@@ -327,19 +342,8 @@ if __name__ == '__main__':
     sample = model.get_sample(2)
     
     trace = torch.fx.symbolic_trace(model)
-    operation_times, operation_memories = profile_operations(trace, sample)
-
-    nparts = 4
-    graph = convert_fx(trace, operation_times, operation_memories)
-    file = write_metis(graph)
-    execute_metis(file, nparts)
-    file.close()
-    parts = read_metis(graph, f'{file.name}.part.{nparts}')
-    print(f'{len(parts)} parts created.')
-    inputs, outputs = get_inputs_outputs(parts)
+    parts, inputs, outputs = partition_graph(trace, 4, sample, mode = "metis")
     
-    # parts, inputs, outputs = split_graph_constrained(trace, operation_times, 12)
-    # parts, inputs, outputs = split_graph_into_parts(trace, operation_times, 5)
     submodules = []
     for i,p in enumerate(parts):
         print(f'Parts {p} need inputs {inputs[i]} and has outputs {outputs[i]}.')

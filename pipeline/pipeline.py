@@ -4,9 +4,9 @@ Core pipeline objects. Define the user interface (Pipeline) and the behaviour of
 
 import os
 import torch
+import shutil
 import torch.nn as nn
 import torch.distributed as dist
-from torch.autograd.variable import Variable
 from .schedule import *
 from .engine import Engine
 from .utils import Timer, TensorMetadata, activations_offloading
@@ -19,7 +19,7 @@ class PipelineBlock():
     '''
     Manages one layer/group of contiguous layers placed on one device
     '''
-    def __init__(self, model, id_, placement):
+    def __init__(self, model, id_, placement, params, outputs):
         super(PipelineBlock, self).__init__()
         # Block infos
         self.rank = placement[id_] # global rank
@@ -39,10 +39,13 @@ class PipelineBlock():
         self.previous = None if self.id == 0 else placement[self.id - 1]
         self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
 
-        self.metadata = None
-        self.out_metadata = None
+        self.metadata = {}
+        self.out_metadata = {}
 
         self.compute_time = 0 # used to measure idle time
+
+        self.params = params
+        self.outputs = outputs
 
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
@@ -53,30 +56,32 @@ class PipelineBlock():
         '''
         logger.debug(f'{self} - Computing one forward with options {options}')
         
-        work, x = self.inputs.popleft()
-
-        if work is not None: work.wait()
+        x = self.inputs.popleft()
+        for key in self.params:
+            work, i = x[key]
+            if work is not None: work.wait()
+            x[key] = i
         
-        if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-            x.requires_grad = True
+            if x[key].dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
+                x[key].requires_grad = True
 
-        logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
+        # logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
 
         with Timer() as timer:
             if  options.get('remat'):
-                with torch.no_grad(): y = self.model(x)
+                with torch.no_grad(): y = self.model(**x)
             elif options.get('offload'):
                 with activations_offloading():
-                    y = self.model(x)
-                self.activations.append(y.cpu())
+                    y = self.model(**x)
+                self.activations.append(y)
                 # x = x.cpu()
             else:
-                y = self.model(x)
+                y = self.model(**x)
                 self.activations.append(y)
                 
         self.compute_time += timer.time()
            
-        self.act_to_send.append(y.data)
+        self.act_to_send.append(y)
         self.inputs_to_keep.append(x)
 
         if self.next is None:
@@ -93,7 +98,7 @@ class PipelineBlock():
 
         if options.get('remat'):
             with Timer() as timer:
-                act = self.model(x)
+                act = self.model(**x)
             self.compute_time += timer()
         elif options.get('offload'):
             act = self.activations.popleft().cuda()
@@ -101,16 +106,18 @@ class PipelineBlock():
         else:
             act = self.activations.popleft()
             
-        work, grads = self.grads.popleft()
-        
-        if work is not None: work.wait()
+        grads = self.grads.popleft()
+        for key in self.outputs:
+            work, g = grads[key]
+            if work is not None: work.wait()
+            grads[key] = g
 
         with Timer() as timer:
-            act.backward(grads)
+            for key in self.outputs:
+                act[key].backward(grads[key])
         self.compute_time += timer.time()
 
-        if x.requires_grad:
-            self.grads_to_send.append(x.grad.data)
+        self.grads_to_send.append({key: value.grad.data for key, value in x.items() if value.requires_grad})
             
     def send_forward(self, **options):
         '''
@@ -120,12 +127,14 @@ class PipelineBlock():
         dst = options.get("dst") or self.next
         if dst is None or dst == self.rank: return
 
-        activations = self.act_to_send.popleft().data
+        activations = self.act_to_send.popleft()
 
-        if options.get("batch"): return dist.P2POp(dist.isend, activations, dst)
+        if options.get("batch"):
+            return [dist.P2POp(dist.isend, a, dst) for a in activations.values()]
         else:
             logger.debug(f'{self} - Sending activations to layer {self.id + 1} on rank {dst}')
-            dist.isend(activations, dst)
+            for a in activations.values():
+                dist.isend(a, dst)
 
     def send_backward(self, **options):
         '''
@@ -137,10 +146,12 @@ class PipelineBlock():
 
         grads = self.grads_to_send.popleft().data
 
-        if options.get("batch"): return dist.P2POp(dist.isend, grads, dst)
+        if options.get("batch"): 
+            return [dist.P2POp(dist.isend, g, dst) for g in grads.values()]
         else:
             logger.debug(f'{self} - Sending gradients to layer {self.id - 1} on rank {dst}')
-            dist.isend(grads, dst)
+            for g in grads.values():
+                dist.isend(g, dst)
 
     def recv_forward(self, mb_size, **options):
         '''
@@ -154,18 +165,20 @@ class PipelineBlock():
             # Free memory just before allocating the next buffer
             activations_offloading().wait_for_offloading()
         
-        buffer = self.metadata.get_buffer(mb_size)
+        buffers = {key: (None, self.metadata[key].get_buffer(mb_size)) for key in self.params}
 
         if options.get("batch"):
-            self.inputs.append((None, buffer))
-            return dist.P2POp(dist.irecv, buffer, src)
+            self.inputs.append(buffers)
+            return [dist.P2POp(dist.irecv, buffers[key], src) for key in self.params]
         else:
-            logger.debug(f'{self} - Starting to receive activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
+            # logger.debug(f'{self} - Starting to receive activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
-                work = dist.irecv(buffer, src)
+                for key in self.params:
+                    work = dist.irecv(buffers[key][1], src)
+                    buffers[key][0] = work
             torch.cuda.current_stream().wait_stream(stream)
-            self.inputs.append((work, buffer))
+            self.inputs.append(buffers)
 
     def recv_backward(self, mb_size, **options):
         '''
@@ -179,18 +192,20 @@ class PipelineBlock():
             # Start moving activations back to gpu
             activations_offloading().prefetch()
         
-        buffer = self.out_metadata.get_buffer(mb_size)
+        buffers = {key: (None, self.out_metadata[key].get_buffer(mb_size)) for key in self.outputs}
 
         if options.get("batch"):
-            self.grads.append((None, buffer))
-            return dist.P2POp(dist.irecv, buffer, src)
+            self.grads.append(buffers)
+            return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.outputs]
         else:
-            logger.debug(f'{self} - Starting to receive gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
+            # logger.debug(f'{self} - Starting to receive gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
-                work = dist.irecv(buffer, src)
+                for key in self.outputs:
+                    work = dist.irecv(buffers[key][1], src)
+                    buffers[key][0] = work
             torch.cuda.current_stream().wait_stream(stream)
-            self.grads.append((work, buffer))
+            self.grads.append(buffers)
     
     def register_metadata(self):
         '''
@@ -198,19 +213,20 @@ class PipelineBlock():
         !! We assume that every micro batch has the same shape, except for the micro batch size !!
         '''
         if self.previous is not None and self.previous != self.rank:
-            metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
-            dist.recv(metadata, src = self.previous)
-            self.metadata = TensorMetadata.from_tensor(metadata)
+            for key in self.params:
+                metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
+                dist.recv(metadata, src = self.previous)
+                self.metadata[key] = TensorMetadata.from_tensor(metadata)
             
-        dummy = self.metadata.get_buffer(1)
-        dummy[:] = 1 # avoid problems with embeddings :)
-        y = self.model(dummy)
+        dummy = {key: self.metadata[key].get_buffer(1) for key in self.params}
+        # dummy[:] = 1 # avoid problems with embeddings :)
+        y = self.model(**dummy)
         
-        out_metadata = TensorMetadata(y.squeeze(0)) # do not include batch size
-        self.out_metadata = out_metadata
+        self.out_metadata = {key: TensorMetadata(y[key].squeeze(0))} # do not include batch size
         
         if self.next is not None and self.next != self.rank:
-            dist.send(out_metadata.to_tensor(), dst = self.next)
+            for key in self.params:
+                dist.send(self.out_metadata[key].to_tensor(), dst = self.next)
 
 class Pipeline():
     '''
@@ -222,7 +238,7 @@ class Pipeline():
         model: torch module
         placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
         partition: if your model is already partitioned, set to None. Otherwise leave the default ("auto"), which will try to create balanced blocks according to their number of parameters
-        schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b")
+        schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b"), Hanayo ("hanayo")
         '''
         if not dist.is_initialized() or "RANK" not in os.environ.keys():
             logger.warning(f'Trying to create a pipeline but no multi-gpu distributed setup has been found.')
@@ -230,7 +246,11 @@ class Pipeline():
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
             # model = partition_model(model, placement)
-            model = partition_graph(model, placement, sample)
+            if shutil.which("gpmetis"):
+                mode = "metis"
+            else:
+                mode = "default"
+            model, inputs, outputs = partition_graph(model, placement, sample, mode = mode)
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
@@ -242,7 +262,7 @@ class Pipeline():
                 self.scheduler = schedule
                 # raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b", "hanayo"].')
         
-        self.blocks = create_pipeline(model, placement)
+        self.blocks = create_pipeline(model, placement, inputs, outputs)
         self.placement = placement
         self.engine = Engine(self.blocks)
         self.schedule = []
@@ -280,7 +300,7 @@ class Pipeline():
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
-            self.blocks[0].metadata = TensorMetadata(batch[0])
+            self.blocks[0].metadata = {key: TensorMetadata(value) for key, value in batch[0].values()}
         for i in range(len(self.blocks)):
             b = self.blocks[i]
             if i > 0 and self.blocks[i - 1].rank == b.rank:
@@ -298,68 +318,13 @@ class Pipeline():
             'params': block.model.parameters()
         } for block in self.blocks]
 
-def create_pipeline(layers, placement):
+def create_pipeline(layers, placement, inputs, outputs):
     '''
     Transforms a list of layers placed on different devices to a working pipeline
     '''
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
-    blocks = [PipelineBlock(layer, i, placement) for i, layer in zip(ids, layers)]
+    blocks = [PipelineBlock(layer, i, placement, inputs[i], outputs[i]) for i, layer in zip(ids, layers)]
 
     return blocks
-
-def partition_model(model, placement):
-    '''
-    Divide a model into roughly equal blocks, in terms of number of parameters
-    Each block that is placed on this rank is moved to the corresponding GPU
-    '''
-    rank = dist.get_rank() if dist.is_initialized() else None
-
-    available_devices = [torch.device(device) for device in ['cpu'] + [f'cuda:{i}' for i in range(torch.cuda.device_count())]]
-
-    if any(torch.device(p) not in available_devices for p in placement):
-        raise RuntimeError(f'Trying to place the model on non existing or non visible devices : {placement}, but available devices are : {available_devices}')
-    
-    layers = []
-    for module in model.children():
-        if isinstance(module, nn.ModuleList) or isinstance(module, nn.Sequential):
-            layers.extend(module)
-        else:
-            layers.append(module)
-            
-    def numel(layer):
-        return sum([p.numel() for p in layer.parameters()])
-
-    total_numel = sum([numel(layer) for layer in layers])
-    phase_numel = total_numel // len(placement)
-    delim_numel = phase_numel
-    accum_numel = 0
-
-    # seal one pipeline phase when its numel is larger than phase_numel
-    phases = [[]]
-    for layer in layers:
-        phases[-1].append(layer)
-        accum_numel += numel(layer)
-        if accum_numel >= delim_numel:
-            delim_numel += phase_numel
-            phases.append([])
-            
-    # pack all remaining layers into the last phase
-    while len(phases) > len(placement):
-        phases[-2].extend(phases[-1])
-        phases.pop()
-
-    if rank is None:
-        for i, phase in enumerate(phases):
-            for layer in phase:
-                layer.to_empty(device = torch.device(placement[i]))
-    else:
-        for i in range(len(placement)):
-            if rank == placement[i]:
-                for layer in phases[i]:
-                    layer.to_empty(device=torch.device(rank))
-
-    # create nn.Sequential
-    if rank is None: return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
-    else: return [nn.Sequential(*phases[i]) for i in range(len(placement)) if placement[i] == rank]
