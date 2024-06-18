@@ -77,6 +77,7 @@ class GPTXXLConfig(GPTConfig):
     n_embd = 2560
 
 class GPTHanayoConfig(GPTConfig):
+    """ ~1.6B params """
     n_layer = 128
     n_head = 16
     n_embd = 1024

@@ -2,7 +2,7 @@
 pipeline:
   split_sizes: 1,2,4,8,16,32,64
   setups:
-    gpipe: 
+    GPipe: 
         placement: 0,1,2,3
         schedule: afab
     1f1b:
@@ -22,9 +22,9 @@ pipeline:
         schedule: hanayo
 model:
   arch: GPT
-  conf: GPTHanayoConfig
+  conf: GPTLargeConfig
   vocab_size: 3072
   batch_size: 64
   block_size: 64
 iters: 15
-warmups: 3
+warmups: 1

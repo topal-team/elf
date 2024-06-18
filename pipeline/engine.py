@@ -79,7 +79,7 @@ class Engine():
                     self._run_comms()
                     y = block.forward(**op.options)
                     if y is not None:
-                        result.append(y)
+                        result.append(*y.values())
                         
                 case OperationType.BACKWARD:
                     if block.next is None:
@@ -98,26 +98,29 @@ class Engine():
                 case OperationType.SEND_FORWARD:
                     if (op.options.get("dst") or block.next) == block.rank:
                         next_block = self.id_to_block.get(str(op.block_id + 1))
-                        next_block.inputs.append((None, block.act_to_send.popleft().detach()))
+                        key = list(next_block.params)[0]
+                        next_block.inputs.append({key: [None, value.detach()] for key, value in block.act_to_send.popleft().items()})
                     if comm := block.send_forward(**op.options):
-                        self.comms.append(comm)
+                        self.comms.extend(comm)
                         
                 case OperationType.SEND_BACKWARD:
                     if (op.options.get("src") or block.previous) == block.rank:
                         next_block = self.id_to_block.get(str(op.block_id - 1))
-                        next_block.grads.append((None, block.grads_to_send.popleft().detach()))
+                        key = list(next_block.outputs)[0]
+                        next_block.grads.append({key: [None, value.detach()] for key, value in block.grads_to_send.popleft().items()})
                     if comm := block.send_backward(**op.options):
-                        self.comms.append(comm)
+                        self.comms.extend(comm)
                         
                 case OperationType.RECV_FORWARD:
                     if block.previous is None:
-                        block.inputs.append((None, next(splits)))
+                        key = list(block.params)[0] # TODO: multiple inputs for first block
+                        block.inputs.append({key: [None, next(splits)]})
                     if comm := block.recv_forward(split_size[op.mb_id], **op.options):
-                        self.comms.append(comm)
+                        self.comms.extend(comm)
                         
                 case OperationType.RECV_BACKWARD:
                     if comm := block.recv_backward(split_size[op.mb_id], **op.options):
-                        self.comms.append(comm)
+                        self.comms.extend(comm)
                         
                 case _:
                     raise Exception(f'Unknown operation : {op}')
@@ -149,5 +152,6 @@ def compute_loss(block, output, target, loss_fn):
     output.requires_grad = True
     loss = loss_fn(output, target, reduction = "sum")
     loss.backward()
-    block.grads.append((None, output.grad.data))
+    key = list(block.outputs)[0] # TODO: multiple outputs
+    block.grads.append({key: [None, output.grad.data]})
     return loss

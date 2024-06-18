@@ -23,10 +23,10 @@ batch_size = config['model']['batch_size']
 block_size = config['model']['block_size']
 setups = []
 options = config['pipeline'].get('options', {})
-for s in config['pipeline']['setups'].values():
+for name, s in config['pipeline']['setups'].items():
     placement = [int(x) for x in s['placement'].split(',')]
     schedule = s['schedule']
-    setups.append((s, placement, schedule))
+    setups.append((name, placement, schedule))
 
 split_sizes = [int(x) for x in config['pipeline']['split_sizes'].split(',')]
 iters = config['iters']

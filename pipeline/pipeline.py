@@ -10,7 +10,7 @@ import torch.distributed as dist
 from .schedule import *
 from .engine import Engine
 from .utils import Timer, TensorMetadata, activations_offloading
-from .partition import partition_graph
+from .partition import *
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
@@ -44,8 +44,9 @@ class PipelineBlock():
 
         self.compute_time = 0 # used to measure idle time
 
-        self.params = params
-        self.outputs = outputs
+        self.params = sorted(params) # name of input variables
+        self.outputs = sorted(outputs) # name of output variables
+        # sorted alphabetically to make sure the order is consistent across devices
 
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
@@ -114,7 +115,7 @@ class PipelineBlock():
 
         with Timer() as timer:
             for key in self.outputs:
-                act[key].backward(grads[key])
+                act[key].backward(grads[key], retain_graph = (key != self.outputs[-1]))
         self.compute_time += timer.time()
 
         self.grads_to_send.append({key: value.grad.data for key, value in x.items() if value.requires_grad})
@@ -144,7 +145,7 @@ class PipelineBlock():
         dst = options.get("dst") or self.previous
         if dst is None or dst == self.rank: return
 
-        grads = self.grads_to_send.popleft().data
+        grads = self.grads_to_send.popleft()
 
         if options.get("batch"): 
             return [dist.P2POp(dist.isend, g, dst) for g in grads.values()]
@@ -165,11 +166,11 @@ class PipelineBlock():
             # Free memory just before allocating the next buffer
             activations_offloading().wait_for_offloading()
         
-        buffers = {key: (None, self.metadata[key].get_buffer(mb_size)) for key in self.params}
+        buffers = {key: [None, self.metadata[key].get_buffer(mb_size)] for key in self.params}
 
         if options.get("batch"):
             self.inputs.append(buffers)
-            return [dist.P2POp(dist.irecv, buffers[key], src) for key in self.params]
+            return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.params]
         else:
             # logger.debug(f'{self} - Starting to receive activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
             stream = torch.cuda.Stream()
@@ -192,7 +193,7 @@ class PipelineBlock():
             # Start moving activations back to gpu
             activations_offloading().prefetch()
         
-        buffers = {key: (None, self.out_metadata[key].get_buffer(mb_size)) for key in self.outputs}
+        buffers = {key: [None, self.out_metadata[key].get_buffer(mb_size)] for key in self.outputs}
 
         if options.get("batch"):
             self.grads.append(buffers)
@@ -219,13 +220,14 @@ class PipelineBlock():
                 self.metadata[key] = TensorMetadata.from_tensor(metadata)
             
         dummy = {key: self.metadata[key].get_buffer(1) for key in self.params}
-        # dummy[:] = 1 # avoid problems with embeddings :)
+        if 'idx' in dummy:
+            dummy['idx'][:] = 1 # avoid problems with embeddings :)
         y = self.model(**dummy)
         
-        self.out_metadata = {key: TensorMetadata(y[key].squeeze(0))} # do not include batch size
+        self.out_metadata = {key: TensorMetadata(y[key].squeeze(0)) for key in self.outputs} # do not include batch size
         
         if self.next is not None and self.next != self.rank:
-            for key in self.params:
+            for key in self.outputs:
                 dist.send(self.out_metadata[key].to_tensor(), dst = self.next)
 
 class Pipeline():
@@ -242,15 +244,30 @@ class Pipeline():
         '''
         if not dist.is_initialized() or "RANK" not in os.environ.keys():
             logger.warning(f'Trying to create a pipeline but no multi-gpu distributed setup has been found.')
+            
+        rank = dist.get_rank()
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
-            # model = partition_model(model, placement)
             if shutil.which("gpmetis"):
+                if rank == 0: logger.info(f'Using METIS to partition the graph.')
                 mode = "metis"
             else:
+                if rank == 0: logger.info(f'METIS not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
                 mode = "default"
-            model, inputs, outputs = partition_graph(model, placement, sample, mode = mode)
+            rank = dist.get_rank()                             
+            if rank == 0:                                      
+                blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode = mode)
+                partition = list(zip(blocks, inputs.values(), outputs.values()))
+                input_list = [[] for _ in range(max(placement) + 1)]
+                for i, p in enumerate(placement):
+                    input_list[p].append(partition[i])
+            else:                                              
+                partition = None
+            output_list = [None]                               
+            dist.scatter_object_list(output_list, input_list, src = 0)
+            del partition                                      
+            model, inputs, outputs = output_list[0]
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
@@ -300,13 +317,13 @@ class Pipeline():
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
-            self.blocks[0].metadata = {key: TensorMetadata(value) for key, value in batch[0].values()}
+            self.blocks[0].metadata = {'idx': TensorMetadata(batch[0])} # TODO: should accept multiple inputs
         for i in range(len(self.blocks)):
             b = self.blocks[i]
             if i > 0 and self.blocks[i - 1].rank == b.rank:
                 b.metadata = self.blocks[i - 1].out_metadata
             b.register_metadata()
-            logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
+            # logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
         result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
         if len(result) != 0:
@@ -325,6 +342,8 @@ def create_pipeline(layers, placement, inputs, outputs):
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
-    blocks = [PipelineBlock(layer, i, placement, inputs[i], outputs[i]) for i, layer in zip(ids, layers)]
+    blocks = [PipelineBlock(layer, idx, placement, inputs[i], outputs[i]) for i, (idx, layer) in enumerate(list(zip(ids, layers)))]
+    for b in blocks:
+        logger.info(f'{b} : inputs = {b.params}, outputs = {b.outputs}')
 
     return blocks
