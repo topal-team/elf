@@ -258,17 +258,18 @@ class Pipeline():
                 mode = "default"
             rank = dist.get_rank()                             
             if rank == 0:                                      
-                blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode = mode)
+                blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode = "default")
                 partition = list(zip(blocks, inputs.values(), outputs.values()))
                 input_list = [[] for _ in range(max(placement) + 1)]
                 for i, p in enumerate(placement):
                     input_list[p].append(partition[i])
-            else:                                              
-                partition = None
-            output_list = [None]                               
+                del blocks, inputs, outputs, partition
+            else:
+                input_list = None
+            output_list = [None]
             dist.scatter_object_list(output_list, input_list, src = 0)
-            del partition                                      
-            model, inputs, outputs = output_list[0]
+            model, inputs, outputs = ([m for m, _, _ in output_list[0]], [i for _, i, _ in output_list[0]], [o for _, _, o in output_list[0]])
+            del input_list
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule

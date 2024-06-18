@@ -8,6 +8,7 @@ import logging
 logger = logging.getLogger("partition")
 
 class Node:
+    NON_TENSOR = (2 << 29)
     def __init__(self, node, time, idx):
         self.node = node
         self.time = time
@@ -118,7 +119,7 @@ def add_profiling_to_graph(graph_module):
                     output = original_target(*args, **kwargs)
             node_time[node.target.__name__] = timer.time()
             if isinstance(output, torch.Tensor):
-                node_memory[target.__name__] = output.numel() * output.element_size()
+                node_memory[node.target.__name__] = output.numel() * output.element_size()
             setattr(node, "target", original_target) # restore original op
             return output
         setattr(node, "target", timed_forward)
@@ -188,7 +189,7 @@ def profile_operations(graph_module, input_sample):
         if node.name not in node_time:
             node_time[node.name] = 0
         if node.name not in node_memory:
-            node_memory[node.name] = (2 << 29) # if it's not a tensor, don't cut here as it creates problems for comms
+            node_memory[node.name] = Node.NON_TENSOR # if it's not a tensor, don't cut here as it creates problems for comms
 
     return node_time, node_memory
 
@@ -246,14 +247,14 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
     return torch.fx.GraphModule(graph_module, subgraph)
 
 
-def split_graph_constrained(graph_module, node_times, num_parts=3):
+def split_graph_constrained(graph_module, times, memories, num_parts=3):
     '''
     Splits a graph into roughly equal blocks in terms of time.
     This algorithm does not take into account the memory used or transferred.
     Unlike split_graph, it is guaranteed that every block has 1 tensor as input and 1 tensor as output.
     '''
     nodes = list(graph_module.graph.nodes)
-    total_time = sum(node_times.get(node.name, 0) for node in nodes)
+    total_time = sum(times.get(node.name, 0) for node in nodes)
     target_time = total_time / num_parts
 
     parts = [[] for _ in range(num_parts)]
@@ -263,26 +264,27 @@ def split_graph_constrained(graph_module, node_times, num_parts=3):
     current_time = 0
     for node in reversed(nodes):
         parts[current_part].insert(0, node)
-        current_time += node_times.get(node.name, 0)
+        current_time += times.get(node.name, 0)
         for dep in node.all_input_nodes:
             if dep.name not in needed_inputs and dep not in parts[current_part]:
                 needed_inputs.append(dep.name)
         if node.name in needed_inputs:
             needed_inputs.remove(node.name)
         if current_time > target_time and len(needed_inputs) <= 1:
+            if len(needed_inputs) != 0 and memories.get(needed_inputs[0], 0) == Node.NON_TENSOR: continue # non tensor edge
             current_part -= 1
             current_time = 0
 
     return parts
 
-def split_graph(graph_module, node_times, num_parts=3):
+def split_graph(graph_module, times, memories, num_parts=3):
     '''
     Splits a graph into roughly equal blocks in terms of time.
     This algorithm does not take into account the memory used or transferred.
     Unlike split_graph_constrained, the number of input and output tensors of each block is NOT guaranteed.
     '''
     nodes = list(graph_module.graph.nodes)
-    total_time = sum(node_times.get(node.name, 0) for node in nodes)
+    total_time = sum(times.get(node.name, 0) for node in nodes)
     target_time = total_time / (num_parts * .9)
 
     parts = []
@@ -290,8 +292,9 @@ def split_graph(graph_module, node_times, num_parts=3):
     current_time = 0
 
     for node in nodes:
-        node_time = node_times.get(node.name, 0)
-        if current_time + node_time > target_time and len(parts) < num_parts - 1:
+        node_time = times.get(node.name, 0)
+        mem = memories.get(node.name, 0)
+        if current_time + node_time > target_time and len(parts) < num_parts - 1 and mem != Node.NON_TENSOR: # don't cut on non-tensor edges
             parts.append(current_part)
             current_part = []
             current_time = 0
@@ -352,15 +355,16 @@ def partition_graph(model, n, sample, mode = "metis"):
     - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
     - metis (default): uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
     '''
-    trace = torch.fx.symbolic_trace(model)
-    operation_times, operation_memories = profile_operations(trace, sample)
+    trace = torch.fx.symbolic_trace(model.cuda())
+    sample = sample.cuda()
+    times, memories = profile_operations(trace, sample)
 
     if mode == "metis":
-        parts = split_graph_metis(trace, operation_times, operation_memories, n)        
+        parts = split_graph_metis(trace, times, memories, n)        
     elif mode == "constrained":
-        parts = split_graph_constrained(trace, operation_times, n)
+        parts = split_graph_constrained(trace, times, memories, n)
     else:
-        parts = split_graph(trace, operation_times, n)
+        parts = split_graph(trace, times, memories, n)
     inputs, outputs = get_inputs_outputs(parts)
     blocks = []
     for i, p in enumerate(parts):
