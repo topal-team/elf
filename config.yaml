@@ -24,9 +24,9 @@ pipeline:
       schedule: hanayo
 model:
   arch: GPT
-  conf: GPTHanayoConfig
+  conf: GPTLargeConfig
   vocab_size: 3072
   batch_size: 64
   block_size: 64
 iters: 15
-warmups: 3
+warmups: 1
