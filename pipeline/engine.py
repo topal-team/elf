@@ -66,7 +66,8 @@ class Engine():
 
         dist.barrier() # useful for timing, but it probably slows down the execution a bit
         pipe_start = time.time()
-            
+        warmup_start = None
+        
         for op in schedule:
             block = self.id_to_block.get(str(op.block_id))
             if block is None: continue # not my job
@@ -74,6 +75,9 @@ class Engine():
             logger.debug(f'Computing {op} on block {block} with options {op.options}')
             if profile:
                 torch.cuda.nvtx.range_push(f'{block}:{op}')
+            if warmup_start is None and op.op != OperationType.RECV_FORWARD:
+                torch.cuda.synchronize()
+                warmup_start = time.time()
             match op.op:
                 case OperationType.FORWARD:
                     self._run_comms()
@@ -132,6 +136,7 @@ class Engine():
         
         self._run_comms()
         torch.cuda.synchronize()
+        cooldown_end = time.time()
         dist.barrier()
         pipe_end = time.time()
         compute_time = 0
@@ -139,10 +144,14 @@ class Engine():
             compute_time += block.compute_time
             block.compute_time = 0
 
-        self.total_time = pipe_end - pipe_start
-        self.idle_time = self.total_time - compute_time
-
-        return result, losses
+        times = {
+            "total": pipe_end - pipe_start,
+            "idle": pipe_end - pipe_start - compute_time,
+            "start_idle": warmup_start - pipe_start,
+            "end_idle": pipe_end - cooldown_end
+        }
+        times["bubble"] = times["idle"] - times["start_idle"] - times["end_idle"]
+        return result, losses, times
 
 def compute_loss(block, output, target, loss_fn):
     '''

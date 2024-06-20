@@ -100,7 +100,7 @@ class PipelineBlock():
         if options.get('remat'):
             with Timer() as timer:
                 act = self.model(**x)
-            self.compute_time += timer()
+            self.compute_time += timer.time()
         elif options.get('offload'):
             act = self.activations.popleft().cuda()
             # x = x.cuda()
@@ -160,11 +160,11 @@ class PipelineBlock():
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         src = options.get("src") or self.previous
-        if src is None or src == self.rank: return
-
         if options.get("offload") and len(self.activations) > 0:
             # Free memory just before allocating the next buffer
             activations_offloading().wait_for_offloading()
+            
+        if src is None or src == self.rank: return
         
         buffers = {key: [None, self.metadata[key].get_buffer(mb_size)] for key in self.params}
 
@@ -187,12 +187,13 @@ class PipelineBlock():
         If the communication needs to be batched, returns it as a dist.P2POp. Otherwise returns None.
         '''
         src = options.get("src") or self.next
-        if src is None or src == self.rank: return
 
         if options.get("offload"):
             # Start moving activations back to gpu
             activations_offloading().prefetch()
-        
+
+        if src is None or src == self.rank: return
+
         buffers = {key: [None, self.out_metadata[key].get_buffer(mb_size)] for key in self.outputs}
 
         if options.get("batch"):
@@ -262,12 +263,14 @@ class Pipeline():
                 input_list = [[] for _ in range(max(placement) + 1)]
                 for i, p in enumerate(placement):
                     input_list[p].append(partition[i])
-            else:                                              
-                partition = None
-            output_list = [None]                               
+                del blocks, inputs, outputs, partition
+            else:
+                input_list = None
+            output_list = [None]
             dist.scatter_object_list(output_list, input_list, src = 0)
-            del partition                                      
-            model, inputs, outputs = output_list[0]
+            model, inputs, outputs = ([m for m, _, _ in output_list[0]], [i for _, i, _ in output_list[0]], [o for _, _, o in output_list[0]])
+            del input_list
+
         match schedule.lower():
             case 'afab':
                 self.scheduler = generate_afab_schedule
@@ -277,7 +280,6 @@ class Pipeline():
                 self.scheduler = generate_hanayo_schedule
             case _:
                 self.scheduler = schedule
-                # raise Exception(f'Unknown schedule : {schedule}. Possible options are ["afab", "1f1b", "hanayo"].')
         
         self.blocks = create_pipeline(model, placement, inputs, outputs)
         self.placement = placement
@@ -325,7 +327,8 @@ class Pipeline():
             b.register_metadata()
             # logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
-        result, losses = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
+        result, losses, times = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
+        self.times = times
         if len(result) != 0:
             return torch.cat(result, dim = 0), torch.tensor(losses, device = torch.cuda.current_device()).sum(dim = 0, keepdim = True)
         else: return None, None

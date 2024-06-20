@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -58,29 +59,23 @@ class SimpleCNN(nn.Module):
         return x
 
 class SimpleAttention(nn.Module):
-    def __init__(self, input_dim, hidden_dim, remat = False):
+    def __init__(self, hidden_dim, output_dim, remat = False):
         super(SimpleAttention, self).__init__()
-        self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         
-        self.embed = nn.Embedding(input_dim, hidden_dim)
         self.query = nn.Linear(hidden_dim, hidden_dim)
         self.key = nn.Linear(hidden_dim, hidden_dim)
         self.value = nn.Linear(hidden_dim, hidden_dim)
         self.softmax = nn.Softmax(dim=-1)
-        self.head = nn.Linear(hidden_dim, input_dim)
+        self.head = nn.Linear(hidden_dim, output_dim)
         
         if remat:
-            self.embed = CheckpointedModule(self.embed)
             self.query = CheckpointedModule(self.query)
             self.key = CheckpointedModule(self.key)
             self.value = CheckpointedModule(self.value)
             self.softmax = CheckpointedModule(self.softmax)
 
     def forward(self, inputs):
-        # Embeddings
-        inputs = self.embed(inputs)
-        
         # Linear projections
         Q = self.query(inputs)
         K = self.key(inputs)
@@ -100,35 +95,28 @@ class SimpleAttention(nn.Module):
 
         return y.view(-1, y.size(-1))
     
-def run(batch_size, remat = False):
-    # model = SimpleCNN(remat).cuda()
+def run(data, update = True):
+    model, inputs, labels, optimizer = data
     
-    model = SimpleAttention(1000, 1024, remat=remat).cuda()
-    
-    optimizer = optim.Adam(model.parameters())
-    criterion = nn.CrossEntropyLoss()
-
-    # inputs = torch.randn(batch_size, 3, 224, 224).cuda()
-    # labels = torch.randint(0, 10, (batch_size,)).cuda()
-    inputs = torch.randint(0, 1000, (batch_size, 128)).cuda()
-    labels = torch.randint(0, 1000, (batch_size, 128)).cuda().view(-1)
-
     # Zero the parameter gradients
-    optimizer.zero_grad()
+    if update: optimizer.zero_grad()
 
     # Forward + backward + optimize
     outputs = model(inputs)
-    loss = criterion(outputs, labels)
+    loss = nn.functional.cross_entropy(outputs, labels)
     loss.backward()
-    optimizer.step()
+    if update: optimizer.step()
 
-def check_memory():
+def check_memory(model, model_type):
+    optimizer = torch.optim.Adam(model.parameters())
     batch_size = 128
     max_batch_size = 0
     while True:
         try:
             # Generate random input data and labels
-            run(batch_size)
+            inputs, labels = generate_inputs(model_type, batch_size)
+            torch.cuda.synchronize()
+            run((model, inputs, labels, optimizer), update = True)
             # Successfully completed this batch size, increase it
             max_batch_size = batch_size
             print(f"Batch size {batch_size} succeeded")
@@ -141,41 +129,80 @@ def check_memory():
             else:
                 raise e
 
-    print(f"Maximum batch size without OOM: {max_batch_size}")
+    print(f"Maximum batch size without OOM: {max_batch_size}\n")
     return max_batch_size
 
-if __name__ == "__main__":
-    batch_size = check_memory()
-    torch.cuda.empty_cache()
+def generate_inputs(model_type, batch_size):
+    if model_type == 'attention':
+        inputs = torch.randn((batch_size, 256, 512)).cuda()
+        labels = torch.randint(0, 500, (batch_size, 256,)).cuda().view(-1)
+    elif model_type == 'cnn':
+        inputs = torch.randn(batch_size, 3, 224, 224).cuda()
+        labels = torch.randint(0, 10, (batch_size,)).cuda()
+
+    return inputs, labels
+
+if __name__ == "__main__":    
+    model_type = sys.argv[1] if len(sys.argv) > 1 else 'attention'
+    if model_type == 'attention':
+        model = SimpleAttention(512, 500).cuda()
+    elif model_type == 'cnn':
+        model = SimpleCNN().cuda()
+    optimizer = torch.optim.Adam(model.parameters())
+    batch_size = check_memory(model, model_type)
+
+    inputs, labels = generate_inputs(model_type, batch_size)
+    
     iters = 10
 
+    # Warmup
+    for _ in range(3):
+        run((model, inputs, labels, optimizer), update = False)
+
+    torch.cuda.cudart().cudaProfilerStart()
+    
     times = []
     for _ in range(iters):
-        torch.cuda.empty_cache()
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        start_event = torch.cuda.Event(enable_timing = True)
+        end_event = torch.cuda.Event(enable_timing = True)
         start_event.record()
-        run(batch_size, remat = False)
+        
+        run((model, inputs, labels, optimizer), update = False)
+        run((model, inputs, labels, optimizer), update = True)
+        
         end_event.record()
-        torch.cuda.synchronize()
+        end_event.synchronize()
         time_taken = start_event.elapsed_time(end_event) / 1000  # convert to seconds
         times.append(time_taken)
 
     median = sorted(times)[iters // 2]
-    print(f'Without remat, batch size = {batch_size} : {median:.2f}s.\nThroughput = {batch_size // median} img/s.\n')
+    print(f'Without remat, 2 iterations w/ batch size = {batch_size} : {median:.2f}s.\nThroughput = {(batch_size * 2) // median} img/s.\n')
 
     batch_size *= 2
+    if model_type == 'attention':
+        model = SimpleAttention(512, 500, remat = True).cuda()
+    elif model_type == 'cnn':
+        model = SimpleCNN(remat = True).cuda()
+
+    # inputs = torch.cat([inputs.detach(), inputs.detach()], dim = 0).cuda()
+    # labels = torch.cat([labels.detach(), labels.detach()], dim = 0).cuda()
+    # inputs.requires_grad = True
+    inputs, labels = generate_inputs(model_type, batch_size * 2)
+
+    torch.cuda.synchronize()
+    
     times = []
     for _ in range(iters):
-        torch.cuda.empty_cache()
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        start_event = torch.cuda.Event(enable_timing = True)
+        end_event = torch.cuda.Event(enable_timing = True)
         start_event.record()
-        run(batch_size, remat = True)
+        run((model, inputs, labels, optimizer), update = True)
         end_event.record()
-        torch.cuda.synchronize()
+        end_event.synchronize()
         time_taken = start_event.elapsed_time(end_event) / 1000  # convert to seconds
         times.append(time_taken)
+    
+    torch.cuda.cudart().cudaProfilerStop()
         
     median = sorted(times)[iters // 2]
     print(f'With remat, batch size = {batch_size} : {median:.2f}s.\nThroughput = {batch_size // median} img/s.')
