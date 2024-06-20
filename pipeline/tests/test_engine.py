@@ -17,8 +17,8 @@ def test_compute_loss():
     loss = loss_fn(outputs, targets, reduction = "sum")
     loss.backward()
 
-    block = PipelineBlock(model, 0, ['cpu'])
+    block = PipelineBlock(model, 0, ['cpu'], ["inputs"], ["outputs"])
     compute_loss(block, outputs.clone(), targets, loss_fn)
     assert len(block.grads) == 1
-    assert torch.allclose(block.grads[0][1], outputs.grad.data)
+    assert torch.allclose(block.grads[0]["outputs"][1], outputs.grad.data)
     

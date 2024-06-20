@@ -398,8 +398,9 @@ def partition_graph(model, n, sample, mode = "metis"):
     - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
     - metis (default): uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
     '''
-    trace = torch.fx.symbolic_trace(model.cuda())
-    sample = sample.cuda()
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    trace = torch.fx.symbolic_trace(model.to(device))
+    sample = sample.to(device)
     times, memories = profile_operations(trace, sample)
 
     if mode == "metis":
@@ -425,9 +426,11 @@ if __name__ == '__main__':
     from models.simple import SimpleTransformer
     model = SimpleTransformer(500, 256, 6)
     sample = model.get_sample(2)
+
+    mode = sys.argv[1] if len(sys.argv) > 1 else "default"
     
     trace = torch.fx.symbolic_trace(model)
-    parts, inputs, outputs = partition_graph(trace, 8, sample, mode = "dagP")
+    parts, inputs, outputs = partition_graph(trace, 4, sample, mode = mode)
     
     for i,p in enumerate(parts):
         print(f'Part {i} needs inputs {inputs[i]} and has outputs {outputs[i]}.')
