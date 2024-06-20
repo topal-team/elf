@@ -5,12 +5,11 @@ Core pipeline objects. Define the user interface (Pipeline) and the behaviour of
 import os
 import torch
 import shutil
-import torch.nn as nn
 import torch.distributed as dist
 from .schedule import *
 from .engine import Engine
 from .utils import Timer, TensorMetadata, activations_offloading
-from .partition import *
+from .partitioners import partition_graph
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
