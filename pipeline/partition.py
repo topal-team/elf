@@ -13,9 +13,10 @@ class Node:
         self.node = node
         self.time = time
         self.idx = idx
-        self.edges = []
+        self.edges_in = []
+        self.edges_out = []
 
-    def to_line(self):
+    def to_metis_line(self):
         '''
         s w1 w2 ... wncon v1 e1 v2 e2 ... vk ek
         where s is the size of the vertex, w1, w2, . . . , wncon are the ncon vertex weights associated with this vertex, v1, . . . , vk
@@ -23,9 +24,20 @@ class Node:
         http://glaros.dtc.umn.edu/gkhome/fetch/sw/metis/manual.pdf - Section 4.1.1
         '''
         line = f'{max(int(self.time * 1e3), 1)}'
-        for v,e in self.edges:
+        for v,e in self.edges_in:
+            line += f' {v} {max(int(e / 1e3), 1)}'
+        for v,e in self.edges_out:
             line += f' {v} {max(int(e / 1e3), 1)}'
         return line
+    
+    def to_dot_line(self):
+        dot = f'{self.idx} [weight={max(int(self.time * 1e3), 1)}];\n'
+        return dot
+    def to_dot_edges(self):
+        dot = ''
+        for v,e in self.edges_out:
+            dot += f'{self.idx}->{v} [weight={max(int(e / 1e3), 1)}];\n'
+        return dot
     
     def __repr__(self):
         return repr(self.node)
@@ -42,8 +54,8 @@ def convert_fx(module, times, memories):
         graph[node.name] = Node(node, times[node.name], i + 1)
         indices[node.name] = i + 1
         for dep in node.all_input_nodes:
-            graph[dep.name].edges.append((indices[node.name], memories[dep.name])) # add smth to distinguish in and out edges ?
-            graph[node.name].edges.append((indices[dep.name], memories[dep.name]))
+            graph[dep.name].edges_out.append((indices[node.name], memories[dep.name])) # add smth to distinguish in and out edges ?
+            graph[node.name].edges_in.append((indices[dep.name], memories[dep.name]))
 
     return graph
 
@@ -53,12 +65,12 @@ def write_metis(graph):
     '''
     file = tempfile.NamedTemporaryFile("w+", dir = ".")
     n = len(graph)
-    m = sum(map(lambda n : len(n.edges), list(graph.values()))) // 2 # edges are counted twice
+    m = sum(map(lambda n : len(n.edges_in), list(graph.values())))
     fmt = '011'
     ncon = 1
     file.write(f'{n} {m} {fmt} {ncon}\n')
     for node in graph.values():
-        file.write(node.to_line() + "\n")
+        file.write(node.to_metis_line() + "\n")
     return file
 
 def execute_metis(file, n):
@@ -104,6 +116,24 @@ def read_metis(graph, file):
     os.remove(f.name)
     logger.info(f'Estimated times after partition adjustment : {["%.3f" % e for e in times]}')
     return parts
+
+def write_dagP(graph):
+    file = tempfile.NamedTemporaryFile("w+", dir = ".", suffix = ".dot")
+    file.write('digraph compgraph {\n') # don't forget the \n because dagP dot reader is sensitive ;)
+    for node in graph.values():
+        file.write(node.to_dot_line())
+    for node in graph.values():
+        file.write(node.to_dot_edges())
+    file.write('}')
+    return file
+
+def execute_dagP(file, n):
+    file.flush()  # Ensure all data is written before executing
+    file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
+    subprocess.run(["rMLGP", file.name, str(n), "--obj", "1", "--write_parts", "1", "--print", "0"], stdout = subprocess.DEVNULL)
+    os.remove(f'{file.name}.bin')
+    os.remove(f'{file.name}.nodemappings')
+    os.remove(f'{file.name}.partitioned.part_{n}.seed_0.dot')
 
 def add_profiling_to_graph(graph_module):
     '''
@@ -261,6 +291,7 @@ def split_graph_constrained(graph_module, times, memories, num_parts=3):
 
     current_part = num_parts - 1
     current_time = 0
+    # subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-minconn"], stdout=subprocess.DEVNULL)  # Execute gpmetis with the file and partition into 5 parts
     for node in reversed(nodes):
         parts[current_part].insert(0, node)
         current_time += times.get(node.name, 0)
@@ -346,6 +377,19 @@ def split_graph_metis(graph, times, memories, n):
 
     return parts
 
+def split_graph_dagP(graph, times, memories, n):
+    '''
+    Split graph using dagP (https://github.com/GT-TDAlab/dagP, https://inria.hal.science/hal-02306566/document)
+    Compared to METIS, this has the advantage of always creating acyclic graphs
+    '''
+    graph = convert_fx(graph, times, memories)
+    file = write_dagP(graph)
+    execute_dagP(file, n)
+    file.close()
+    parts = read_metis(graph, f'{file.name}.partsfile.part_{n}.seed_0.txt') # output file is the same as metis
+
+    return parts
+
 def partition_graph(model, n, sample, mode = "metis"):
     '''
     Splits a graph into n parts of roughly equal time.
@@ -362,6 +406,8 @@ def partition_graph(model, n, sample, mode = "metis"):
         parts = split_graph_metis(trace, times, memories, n)        
     elif mode == "constrained":
         parts = split_graph_constrained(trace, times, memories, n)
+    elif mode == "dagP":
+        parts = split_graph_dagP(trace, times, memories, n)
     else:
         parts = split_graph(trace, times, memories, n)
     inputs, outputs = get_inputs_outputs(parts)
@@ -381,7 +427,7 @@ if __name__ == '__main__':
     sample = model.get_sample(2)
     
     trace = torch.fx.symbolic_trace(model)
-    parts, inputs, outputs = partition_graph(trace, 4, sample, mode = "metis")
+    parts, inputs, outputs = partition_graph(trace, 8, sample, mode = "dagP")
     
     for i,p in enumerate(parts):
         print(f'Part {i} needs inputs {inputs[i]} and has outputs {outputs[i]}.')
