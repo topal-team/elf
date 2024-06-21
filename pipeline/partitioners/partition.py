@@ -167,6 +167,20 @@ def get_inputs_outputs(parts):
     
     return inputs, outputs
 
+def get_inputs_outputs_single(part):
+    '''
+    Get the input/output nodes of a single part from the graph
+    Useful for already splitted graphs
+    '''
+    inputs = set()
+    outputs = set()
+    nodes = list(part.graph.node)
+    for node in nodes:
+        if node.op == "placeholder":
+            inputs.append(node.name)
+        if node.op == "output":
+            outputs.append(node.name)
+    return inputs, outputs
 
 def partition_graph(model, n, sample, mode = "default"):
     '''

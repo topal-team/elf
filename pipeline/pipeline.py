@@ -9,7 +9,7 @@ import torch.distributed as dist
 from .schedule import *
 from .engine import Engine
 from .utils import Timer, TensorMetadata, activations_offloading
-from .partitioners import partition_graph
+from .partitioners import partition_graph, get_inputs_outputs_single
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
@@ -255,20 +255,9 @@ class Pipeline():
             else:
                 if rank == 0: logger.info(f'METIS not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
                 mode = "default"
-            rank = dist.get_rank()                             
-            if rank == 0:                                      
-                blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode = mode)
-                partition = list(zip(blocks, inputs.values(), outputs.values()))
-                input_list = [[] for _ in range(max(placement) + 1)]
-                for i, p in enumerate(placement):
-                    input_list[p].append(partition[i])
-                del blocks, inputs, outputs, partition
-            else:
-                input_list = None
-            output_list = [None]
-            dist.scatter_object_list(output_list, input_list, src = 0)
-            model, inputs, outputs = ([m for m, _, _ in output_list[0]], [i for _, i, _ in output_list[0]], [o for _, _, o in output_list[0]])
-            del input_list
+            model, inputs, outputs = share_partition(model, placement, sample, mode)
+        else:
+            inputs, outputs = get_inputs_outputs_single(torch.fx.symbolic_trace(model))
 
         match schedule.lower():
             case 'afab':
@@ -349,3 +338,26 @@ def create_pipeline(layers, placement, inputs, outputs):
         logger.info(f'{b} : inputs = {b.params}, outputs = {b.outputs}')
 
     return blocks
+
+def share_partition(model, placement, sample, mode):
+    '''
+    Partitions a model according to a placement & mode, then shares it to every process to be consistent
+    '''
+    rank = dist.get_rank()
+    # Rank 0 profiles & partition the graph, then shares it to everyone
+    # TODO: avoid loading everything on rank 0 as it can easily OOM
+    # TODO: what if devices are heterogenous ? how to profile correctly ?
+    if rank == 0:
+        blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode = mode)
+        partition = list(zip(blocks, inputs.values(), outputs.values()))
+        input_list = [[] for _ in range(max(placement) + 1)]
+        for i, p in enumerate(placement):
+            input_list[p].append(partition[i])
+    else:
+        input_list = None
+    output_list = [None]
+    dist.scatter_object_list(output_list, input_list, src = 0)
+    model, inputs, outputs = ([m for m, _, _ in output_list[0]],
+                              [i for _, i, _ in output_list[0]],
+                              [o for _, _, o in output_list[0]])
+    return model, inputs, outputs
