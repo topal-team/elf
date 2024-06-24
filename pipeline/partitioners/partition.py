@@ -3,6 +3,7 @@ from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
 from .dagP import split_graph_dagP
+from ..utils import TimerCPU
 
 import logging
 logger = logging.getLogger("partition")
@@ -91,9 +92,12 @@ def partition_graph(model, n, sample, mode = "default"):
     - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
     '''
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    trace = torch.fx.symbolic_trace(model.to(device))
-    sample = sample.to(device)
-    times, memories = profile_operations(trace, sample)
+
+    trace = torch.fx.symbolic_trace(model)
+    
+    with TimerCPU() as timer:
+        times, memories = profile_operations(trace, sample, device)
+    logger.info(f'Time taken to profile graph : {timer.time():.3f}s')
 
     if mode == "default":
         parts = split_graph(trace, times, memories, n)
@@ -117,4 +121,6 @@ def partition_graph(model, n, sample, mode = "default"):
         graph = create_subgraph(trace, p, inputs[i], outputs[i])
         blocks.append(graph)
 
+    logger.info(f'Estimated times : {[sum([times.get(n.name, 0) for n in part]) for part in parts]}')
+    logger.info(f'Memory transfers : {[sum([memories.get(o, 0) for o in out]) for out in outputs.values()]}')
     return blocks, inputs, outputs

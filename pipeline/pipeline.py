@@ -255,7 +255,7 @@ class Pipeline():
             else:
                 if rank == 0: logger.info(f'METIS not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
                 mode = "default"
-            model, inputs, outputs = share_partition(model, placement, sample, mode)
+            model, inputs, outputs = share_partition(model, placement, sample, mode = mode)
         else:
             inputs, outputs = get_inputs_outputs_single(torch.fx.symbolic_trace(model))
 
@@ -357,7 +357,8 @@ def share_partition(model, placement, sample, mode):
         input_list = None
     output_list = [None]
     dist.scatter_object_list(output_list, input_list, src = 0)
-    model, inputs, outputs = ([m for m, _, _ in output_list[0]],
+    model, inputs, outputs = ([m.cuda() for m, _, _ in output_list[0]],
                               [i for _, i, _ in output_list[0]],
                               [o for _, _, o in output_list[0]])
+    
     return model, inputs, outputs
