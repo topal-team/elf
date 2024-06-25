@@ -28,6 +28,12 @@ class TensorMetadata():
     def from_tensor(t):
         '''
         Creates a TensorMetadata object from its Tensor equivalent (should be used when receiving metadata via p2p)
+
+        :param t: Tensor representation of a metadata
+        :type t: Tensor
+
+        :return: corresponding metadata
+        :rtype: TensorMetadata
         '''
         dtype = dtypes[int(t[0].item())]
         shape = []
@@ -42,6 +48,12 @@ class TensorMetadata():
         return metadata
 
     def __init__(self, t):
+        '''
+        Extract metadata from a tensor
+
+        :param t: tensor
+        :type t: Tensor
+        '''
         self.shape = t.shape
         self.dtype = t.dtype
         self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
@@ -49,6 +61,9 @@ class TensorMetadata():
     def to_tensor(self):
         '''
         Creates the Tensor representation of this metadata. Should be used when sending metadata via p2p
+
+        :return: tensor representation of this metadata
+        :rtype: Tensor
         '''
         t = torch.zeros(TensorMetadata.MAX_SIZE, device = self.device)
         t[0] = dtypes.index(self.dtype)
@@ -59,6 +74,9 @@ class TensorMetadata():
     def get_buffer(self, batch_size):
         '''
         Allocates a tensor with the right shape and dtype for this metadata
+
+        :return: tensor corresponding to this metadata
+        :rtype: Tensor
         '''
         buffer = torch.empty((batch_size, *self.shape), dtype = self.dtype, device = self.device)
         return buffer
@@ -68,6 +86,19 @@ class TensorMetadata():
 
 
 class Timer():
+    '''
+    Utility context to time the execution of some code
+    Uses GPU if cuda is available, else times CPU execution
+
+    Utilisation example: ::
+    
+        with Timer() as timer:
+            # do some stuff
+            # everything in this context will be timed
+        # if you do something here, it will not be timed
+        print(timer.time())
+        
+    '''
     def __new__(cls):
         if torch.cuda.is_available():
             return TimerGPU()
@@ -75,6 +106,9 @@ class Timer():
             return TimerCPU()
 
 class TimerCPU():
+    '''
+    Timer for CPU execution
+    '''
     def __enter__(self):
         self.start = time.perf_counter()
         return self
@@ -86,6 +120,9 @@ class TimerCPU():
         return (self.end - self.start) * 1000
     
 class TimerGPU():
+    '''
+    Timer for CUDA execution
+    '''
     def __init__(self):
         self.start_event = torch.cuda.Event(enable_timing = True)
         self.end_event = torch.cuda.Event(enable_timing = True)
@@ -102,6 +139,21 @@ class TimerGPU():
         return self.start_event.elapsed_time(self.end_event) / 1000
 
 class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
+    '''
+    Context to offload activations on CPU
+
+    Usage: ::
+    
+        with activations_offloading():
+            y = model(x)
+        # do stuff
+        activations_offloading().wait_for_offloading() # GPU memory for activations is freed
+        # ...
+        activations_offloading().prefetch() # GPU memory is re-allocated and activations moved back to CPU
+        # ...
+        loss.backward() # all tensors are on GPU for backward
+    
+    '''
     # Singleton pattern
     _instance = None
     def __new__(class_):
@@ -138,7 +190,7 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
         def unpack_from_cpu(key):
             # If it wasn't prefetched just copy it
             if not self.events.get(key):
-                print(f'Tensor was not prefetched :/ - {tensor.shape}')
+                print(f'Tensor was not prefetched :/')
                 return None
             
             self.events[key].synchronize()
@@ -151,12 +203,18 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
 
     # At some point we need to free memory ; this means potentially waiting for the copy to finish, so we want to do it just in time, not too early
     def wait_for_offloading(self):
+        '''
+        Wait for every activation to be completely moved to CPU, which allows CUDA to free their memory
+        '''
         for key in list(self.events.keys()):
             self.events[key].synchronize()
         # Here all tensors are effectively copied on cpu and memory on gpu is freed
 
     # Copy back from device to host, asynchronously
     def prefetch(self):
+        '''
+        Start the data movement of offloaded activations back on GPU, asynchronously
+        '''
         with torch.cuda.stream(self.stream):
             for key in list(self.events.keys()):
                 self.events[key] = torch.cuda.Event()

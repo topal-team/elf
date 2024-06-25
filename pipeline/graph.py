@@ -1,12 +1,14 @@
 '''
-Manipulate graphs corresponding to schedules.
+Manipulate dependency graphs corresponding to schedules.
 This is helpful to do static analysis before execution, for instance to prevent dependencies cycles.
 '''
-
 import sys
 from enum import Enum
 
 class OperationType(Enum):
+    '''
+    Different type of operations that can be performed. They can be both computation (forward, backward) or communications (p2p send/recv)
+    '''
     RECV_FORWARD = 0
     FORWARD = 1
     SEND_FORWARD = 2
@@ -25,6 +27,16 @@ class Operation():
     def __init__(self, block_id, mb_id, op, rank, **options):
         '''
         Computation or communication unit. Operations are the elements contained in the schedule, and give all the informations needed for a block to execute it, except the data itself.
+
+        :param block_id: number of the block that will execute this OP in the pipeline
+        :type block_id: int
+        :param mb_id: number of the micro batch that this op will be executed on
+        :type mb_id: int
+        :param op: type of operation
+        :type op: OperationType
+        :param rank: global rank of the block
+        :type rank: int
+        :param **options: options to modify the behaviour of the execution
         '''
         self.block_id = block_id
         self.op = op # type of the operation (see OperationType enum)
@@ -34,6 +46,12 @@ class Operation():
         self.dependencies = [] # Operations that need to be completed for the process to run this operation without blocking
 
     def add_dependency(self, node):
+        '''
+        Indicate that this operation needs the operation ``node`` to be completed for the process to run this operation without blocking
+
+        :param node: dependency
+        :type node: Operation
+        '''
         self.dependencies.append(node)
 
     def __str__(self) -> str:
@@ -61,7 +79,12 @@ def graph_from_schedule(schedule):
     '''
     Build the graph representing a schedule
     All nodes are Operation, with dependencies filled according to the schedule
-    Returns a dictionary containing the roots of the graph (there are multiple ones)
+    Virtually, ``schedule_from_graph(graph_from_schedule(schedule))`` should return the same schedule (or at least, the same execution order)
+
+    :param schedule: schedule as described in pipeline.schedule
+    :type schedule: List[Operation]
+    :return: a dictionary containing the roots of the graph (there are multiple ones)
+    :rtype: Dict[Operation]
     '''
     # For each one, add forward/backward dependencies (from the sequential nature)
     for operation in schedule:
@@ -109,6 +132,12 @@ def schedule_from_graph(graph):
     '''
     Constructs a schedule as a list of Operation from its graph equivalent
     (It's just a topological sort. The order of cycles does not matter as they are batched, or at least should be)
+    Virtually, ``schedule_from_graph(graph_from_schedule(schedule))`` should return the same schedule (or at least, the same execution order)
+
+    :param graph: graph as obtained from graph_from_schedule, aka dictionary of roots for the dependency graph
+    :type graph: Dict[Operation]
+    :return: schedule as defined by pipeline.schedule
+    :rtype: List[Operation]
     '''
     def dfs(node, visited, stack):
         # Mark the current node as visited
@@ -138,6 +167,9 @@ def fix_cycle(cycle):
     '''
     Mark all operations in a cycle as needing to be batched
     This fixes deadlocks in communications
+
+    :param cycle: list of operations forming a dependency cycle
+    :type cycle: List[Operation]
     '''
     for op in cycle:
         if op.op not in [OperationType.FORWARD, OperationType.BACKWARD]:
@@ -146,7 +178,11 @@ def fix_cycle(cycle):
 def find_cycles(graph):
     '''
     Detects cycles in a schedule graph by performing a depth-first search.
-    Returns a list of paths that form a cycle
+
+    :param graph: graph as obtained from graph_from_schedule, aka dictionary of roots for the dependency graph
+    :type graph: Dict[Operation]
+    :return: list of paths that form a cycle
+    :rtype: List[List[Operation]]
     '''
     sys.setrecursionlimit(3000) # sometimes needed when the graph is big
     def dfs(node, visited, stack, depth = 1, current_path = []):
@@ -182,7 +218,9 @@ def enable_prefetching(operations):
     '''
     Modifies a schedule to add prefetching
     Prefetching is a technique that aims to overlap computation and communication by starting to receive the data for the next micro batch before starting the computation for the current one
-    !! Experimental, currently often makes the schedule block !!
+    
+    .. warning::
+        Experimental, currently often makes the schedule block
     '''
     # Define the target and source operations
     target_ops = {OperationType.FORWARD, OperationType.BACKWARD}

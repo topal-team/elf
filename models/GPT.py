@@ -73,6 +73,7 @@ class GPTXXLConfig(GPTConfig):
     n_embd = 2560
 
 class GPTHanayoConfig(GPTConfig):
+    """ ~1.6B params """
     n_layer = 128
     n_head = 16
     n_embd = 1024
@@ -115,62 +116,6 @@ def module_wrapper(module, fsdp=False, activation="noop"):
         return wrap(checkpoint_wrapper(module, offload_to_cpu=True))
     else:
         raise ValueError(f"Unrecognized activation mode {activation}")
-
-
-# class CausalSelfAttention(nn.Module):
-#     """
-#     A vanilla multi-head masked self-attention layer with a projection at the end.
-#     It is possible to use torch.nn.MultiheadAttention here but I am including an
-#     explicit implementation here to show that there is nothing too scary here.
-#     """
-
-#     def __init__(self, config, device="cpu", dtype=torch.float32):
-#         super().__init__()
-#         assert config.n_embd % config.n_head == 0, f"n_embd={config.n_embd}, n_head={config.n_head}"
-#         # key, query, value projections for all heads
-#         self.key = nn.Linear(config.n_embd, config.n_embd, device=device, dtype=dtype)
-#         self.query = nn.Linear(config.n_embd, config.n_embd, device=device, dtype=dtype)
-#         self.value = nn.Linear(config.n_embd, config.n_embd, device=device, dtype=dtype)
-#         # regularization
-#         self.attn_drop = nn.Dropout(config.attn_pdrop)
-#         self.resid_drop = nn.Dropout(config.resid_pdrop)
-#         # output projection
-#         self.proj = nn.Linear(config.n_embd, config.n_embd, device=device, dtype=dtype)
-#         # causal mask to ensure that attention is only applied to the left in the input sequence
-#         # TODO: leave buffer on CPU for now, until we can do meta_tensor.to_empty()
-#         d = device if torch.device(device).type == "cuda" else "cpu"
-#         self.register_buffer(
-#             "mask",
-#             torch.tril(torch.ones(config.block_size, config.block_size, device=d, dtype=dtype))
-#                  .view(1, 1, config.block_size, config.block_size)
-#         )
-#         self.n_head = config.n_head
-
-#     def reset_parameters(self):
-#         for _, m in self.named_modules():
-#             if isinstance(m, nn.Linear):
-#                 m.reset_parameters()
-
-#     def forward(self, x, layer_past=None):
-#         B, T, C = x.size()
-
-#         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-#         k = self.key(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-#         q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-#         v = self.value(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-
-#         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-#         # att = torch.matmul(q, k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-#         att = torch.matmul(q, k.transpose(-2, -1))
-#         att = att.masked_fill(self.mask[:,:,:T,:T] == 0, float('-inf'))
-#         att = F.softmax(att, dim=-1)
-#         att = self.attn_drop(att)
-#         y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-#         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-
-#         # output projection
-#         y = self.resid_drop(self.proj(y))
-#         return y
 
 class Conv1D(nn.Module):
     def __init__(self, nx, nf):
@@ -328,15 +273,15 @@ class EmbeddingStem(nn.Module):
         self.wpe = nn.Embedding(config.block_size, config.n_embd, device=device, dtype=dtype)
         self.drop = nn.Dropout(config.embd_pdrop)
         self.block_size = config.block_size
+        self.vocab_size = config.vocab_size
 
     def reset_parameters(self):
         self.tok_emb.reset_parameters()
 
     def forward(self, idx):
-
         token_embeddings = self.tok_emb(idx) # each index maps to a (learnable) vector
         pos_ids = torch.arange(
-                0, idx.size(-1), dtype=torch.long, device=self.wpe.weight.device
+                0, self.block_size, dtype=torch.long, device=torch.cuda.current_device() if torch.cuda.is_available() else ('cpu')
             ).unsqueeze(0) # each position maps to a (learnable) vector
         return self.drop(token_embeddings + self.wpe(pos_ids))
 

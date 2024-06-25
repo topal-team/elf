@@ -53,7 +53,8 @@ if __name__ == "__main__":
             
             if global_rank == 0: logger.info(f'{s} - Beginning bench for micro batches of size {size}')
 
-            pipe = Pipeline(model, placement, schedule = schedule)            
+            pipe = Pipeline(model, inputs.cuda(), placement, schedule = schedule)
+            
             # Warmup
             if global_rank == 0: logger.info(f'{s} - Warming up')
             for i in range(warmups):
