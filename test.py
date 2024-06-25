@@ -50,7 +50,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
         
     target = torch.randn_like(batch, device = rank) # No need to share since only last device will use this anyway
 
-    pipe = Pipeline(blocks, placement, partition = None, schedule = scheduler)
+    pipe = Pipeline(blocks, batch, placement, partition = None, schedule = scheduler)
     output, _ = pipe(batch, target, F.mse_loss, split_size)
     blocks = pipe.blocks # we shouldn't access directly the internal modules but it's for the purpose of testing
     grads = None
