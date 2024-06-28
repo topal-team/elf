@@ -83,7 +83,7 @@ class TimerCPU():
         self.end = time.perf_counter()
 
     def time(self):
-        return (self.end - self.start) * 1000
+        return (self.end - self.start)
     
 class TimerGPU():
     def __init__(self):

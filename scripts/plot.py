@@ -149,6 +149,55 @@ elif mode == "remat":
         axs[2*d+1].set_title(f'Memory usage on device {d}', fontdict={'size': 16})
         axs[2*d+1].legend()
 
+elif mode == "partitioner":
+    del df_full
+    fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(15, 10))
+    axs = axs.flatten()
+
+    partitioners = ['default', 'metis', 'dagP', 'constrained', 'old']
+    device = 3
+
+    dfs = [pd.read_csv(f'results/GPTLarge/{p}.csv') for p in partitioners]
+
+    mbs = dfs[0]["mb_size"].unique()
+    filtered_names = dfs[0]['name'].unique()
+    filtered_names = [name for name in filtered_names if name in ['GPipe', '1f1b', 'Megatron-LM', 'Hanayo 1-Wave', 'Hanayo 2-Waves', 'Hanayo 3-Waves']]
+    n_schedules = len(filtered_names)
+
+    for idx, name in enumerate(filtered_names):
+        bar_width = 0.15
+        x = np.arange(len(mbs))
+        for j, (df, p) in enumerate(zip(dfs, partitioners)):
+            empty = df[df['name'] == name].empty
+            start_idle = df[df['name'] == name][f'start_time_{device}'] if not empty else np.zeros((len(mbs),))
+            bubble = df[df['name'] == name][f'bubble_time_{device}'] if not empty else np.zeros((len(mbs),))
+            end_idle = df[df['name'] == name][f'end_time_{device}'] if not empty else np.zeros((len(mbs),))
+            total = df[df['name'] == name][f'total_time_{device}'] if not empty else np.zeros((len(mbs),))
+
+            bottom = 0
+
+            i = axs[idx].bar(x + j * bar_width, start_idle, width=bar_width, bottom=bottom, color="dodgerblue")
+            if j == 0: i.set_label('Start idle')
+            bottom += start_idle
+
+            i = axs[idx].bar(x + j * bar_width, bubble, width=bar_width, bottom=bottom, color="hotpink")
+            bottom += bubble
+            if j == 0: i.set_label('Bubble')
+
+            i = axs[idx].bar(x + j * bar_width, end_idle, width=bar_width, bottom=bottom, color="orange")
+            bottom += end_idle
+            if j == 0: i.set_label('End idle')
+
+            axs[idx].bar(x + j * bar_width, total, width=bar_width, bottom=bottom, label=f'{p}')
+
+
+        axs[idx].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+        axs[idx].set_xticks(x + bar_width * (len(partitioners) - 1) / 2)
+        axs[idx].set_xticklabels(mbs)
+        axs[idx].tick_params(axis='both', which='major', labelsize=14)
+        axs[idx].set_ylabel('Idle time (s)', fontdict={'size': 14})
+        axs[idx].set_title(name, fontdict={'size': 16})
+        axs[idx].legend()
 
 plt.tight_layout()
 plt.show()

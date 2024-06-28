@@ -8,7 +8,7 @@ from pipeline.utils import Timer
 # To avoid that we put a soft constraint by giving them a huge communication cost.
 NON_TENSOR = 2 << 29
 
-def add_profiling_to_graph(graph_module, iters = 10):
+def add_profiling_to_graph(graph_module, iters = 3):
     '''
     Torch FX graph manipulation to add profiling of time & memory to each node.
     This function returns a new module that will profile the operations it runs.
@@ -59,6 +59,7 @@ def add_profiling_to_graph(graph_module, iters = 10):
             return output
         setattr(instance, method_name, timed_method)
 
+
     node_time = {}
     node_memory = {}
 
@@ -75,7 +76,13 @@ def add_profiling_to_graph(graph_module, iters = 10):
             wrap_method(instance, node.target)
 
         elif node.op == 'get_attr':
-            ... # Is it really useful to profile these ones ?
+            r = node.target.split('.')
+            attribute = graph_module
+            for lvl in r:
+                attribute = getattr(attribute, lvl)
+
+            if isinstance(attribute, torch.Tensor):
+                node_memory[node.name] = attribute.numel() * attribute.element_size()
 
     graph_module.recompile()
     return graph_module, node_time, node_memory
