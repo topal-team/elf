@@ -249,13 +249,15 @@ class Pipeline():
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition == "auto":
-            if shutil.which("gpmetis"):
+            if shutil.which("rMLGP"):
+                mode = "dagP"
+            elif shutil.which("gpmetis"):
                 if rank == 0: logger.info(f'Using METIS to partition the graph.')
                 mode = "metis"
             else:
-                if rank == 0: logger.info(f'METIS not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
+                if rank == 0: logger.info(f'METIS and dagP not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
                 mode = "default"
-            model, inputs, outputs = share_partition(model, placement, sample, mode = mode)
+            model, inputs, outputs = share_partition(model, placement, sample, mode = "metis")
         else:
             inputs, outputs = get_inputs_outputs_single(torch.fx.symbolic_trace(model))
 
@@ -360,5 +362,4 @@ def share_partition(model, placement, sample, mode):
     model, inputs, outputs = ([m.cuda() for m, _, _ in output_list[0]],
                               [i for _, i, _ in output_list[0]],
                               [o for _, _, o in output_list[0]])
-    
     return model, inputs, outputs

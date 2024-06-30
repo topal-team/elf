@@ -109,8 +109,15 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
             instance = node.args[0]
             wrap_method(instance, node.target)
 
+
         elif node.op == 'get_attr':
-            ... # Is it really useful to profile these ones ?
+            r = node.target.split('.')
+            attribute = graph_module
+            for lvl in r:
+                attribute = getattr(attribute, lvl)
+
+            if isinstance(attribute, torch.Tensor):
+                node_memory[node.name] = attribute.numel() * attribute.element_size()
 
     graph_module.recompile()
     return graph_module, node_time, node_memory

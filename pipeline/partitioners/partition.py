@@ -121,6 +121,8 @@ def partition_graph(model, n, sample, mode = "default"):
         graph = create_subgraph(trace, p, inputs[i], outputs[i])
         blocks.append(graph)
 
-    logger.info(f'Estimated times : {[sum([times.get(n.name, 0) for n in part]) for part in parts]}')
-    logger.info(f'Memory transfers : {[sum([memories.get(o, 0) for o in out]) for out in outputs.values()]}')
+    estimated_times = [sum([times.get(n.name, 0) for n in part]) for part in parts]
+    estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
+    logger.info(f'Estimated times : {["%.3fs" % t for t in estimated_times]}')
+    logger.info(f'Estimated memory transfers : {["%.1fMB" % t for t in estimated_mems]}')
     return blocks, inputs, outputs
