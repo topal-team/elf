@@ -94,6 +94,7 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
         
         setattr(instance, method_name, timed_method)
 
+
     node_time = {}
     node_memory = {}
 

@@ -7,12 +7,19 @@ class Node:
     '''
     Custom representation of graphs to manipulate METIS inputs/outputs easily
     '''
-
-    def __init__(self, node, time, memory, idx):
+    def __init__(self, node, time, mem, idx):
+        '''
+        :param node: original node
+        :type node: fx.Node
+        :param time: time obtained by profiling this node
+        :type time: float
+        :param idx: index of the node in the (topological sort of) the graph
+        :type idx: int
+        '''
         self.node = node
         self.time = time
-        self.mem = memory
         self.idx = idx
+        self.mem = mem
         self.edges_in = []
         self.edges_out = []
 
@@ -24,11 +31,12 @@ class Node:
         http://glaros.dtc.umn.edu/gkhome/fetch/sw/metis/manual.pdf - Section 4.1.1
         '''
         line = f'{self.mem} {self.time}'
-        for v,e in self.edges_in:
+
+        for v in self.edges_in:
             line += f' {v}'
-        for v,e in self.edges_out:
+        for v,_ in self.edges_out:
             line += f' {v}'
-        return line
+        return line # + f"% {self.idx} - {self.node.name}"
     
     def to_dot_line(self):
         '''
@@ -58,14 +66,14 @@ def convert_fx(module, times, memories):
     nodes = list(module.graph.nodes)
     graph = {}
     indices = {}
-
+    
     to_weight = lambda x : max(int(x), 1)
 
     # Map into [1, 100] to have consistent times
     min_time = min(filter(lambda x : x != 0, times.values()))
     max_time = max(times.values())
     time_range = max_time - min_time
-    scaled_times = {name: to_weight(1 + 999 * ((time - min_time) / time_range)) for name, time in times.items()}
+    scaled_times = {name: to_weight(1 + 99 * ((time - min_time) / time_range)) for name, time in times.items()}
     times = scaled_times
 
     # Map memories into [1, 100] to have consistent memory sizes
@@ -73,17 +81,17 @@ def convert_fx(module, times, memories):
     min_memory = min(tensor_memories)
     max_memory = max(tensor_memories)
     memory_range = max_memory - min_memory
-    scaled_memories = {name: to_weight(1 + 999 * ((memory - min_memory) / memory_range)) if memory != NON_TENSOR else 10000 for name, memory in memories.items()}
+    scaled_memories = {name: to_weight(1 + 99 * ((memory - min_memory) / memory_range)) if memory != NON_TENSOR else 1000 for name, memory in memories.items()}
     memories = scaled_memories
-
+    
     for i, node in enumerate(nodes):
         # Indices of METIS are 1-based :(
         graph[node.name] = Node(node, times[node.name], memories[node.name], i + 1)
         indices[node.name] = i + 1
         for dep in node.all_input_nodes:
-            weight = scaled_memories[dep.name]
+            weight = memories[dep.name]
             graph[dep.name].edges_out.append((indices[node.name], weight))
-            graph[node.name].edges_in.append((indices[dep.name], weight))
+            graph[node.name].edges_in.append((indices[dep.name]))
 
     return graph
 
@@ -117,7 +125,6 @@ def read_metis(graph, file):
     '''
     Reads the output of Graph Partitioning METIS and breaks a custom graph accordingly.
     '''
-
     f = open(file, "r")
     nodes = list(graph.values())
     n = 0
@@ -142,21 +149,19 @@ def read_metis(graph, file):
 
     '''
     f = open(file, "r")
-    
-    mapping = []
     nodes = list(graph.values())
-    lines = list(map(int, f.readlines()))
-    parts = []
     n = 0
-    
-    for l in range(len(lines)):
-        i = lines[l]
-        # WE NEED TO HAVE CONTIGUOUS PARTITIONS
-        # METIS does not enforce that, so we have to fix it by ignoring some attributions
-        if i not in mapping and (l < len(lines) - 1 and i == lines[l + 1]):
+    mapping = []
+    parts = []
+    while l := f.readline():
+        i = int(l)
+        if i in mapping:
+            i = mapping.index(i)
+        else:
             mapping.append(i)
+            i = len(mapping) - 1
             parts.append([])
-        i = len(mapping) - 1            
+
         parts[i].append(nodes[n].node)
         assert nodes[n].idx == n + 1
         n += 1
