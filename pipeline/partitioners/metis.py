@@ -7,7 +7,6 @@ class Node:
     '''
     Custom representation of graphs to manipulate METIS inputs/outputs easily
     '''
-
     def __init__(self, node, time, mem, idx):
         '''
         :param node: original node
@@ -32,6 +31,7 @@ class Node:
         http://glaros.dtc.umn.edu/gkhome/fetch/sw/metis/manual.pdf - Section 4.1.1
         '''
         line = f'{self.mem} {self.time}'
+
         for v in self.edges_in:
             line += f' {v}'
         for v,_ in self.edges_out:
@@ -66,7 +66,7 @@ def convert_fx(module, times, memories):
     nodes = list(module.graph.nodes)
     graph = {}
     indices = {}
-
+    
     to_weight = lambda x : max(int(x), 1)
 
     # Map into [1, 100] to have consistent times
@@ -83,7 +83,7 @@ def convert_fx(module, times, memories):
     memory_range = max_memory - min_memory
     scaled_memories = {name: to_weight(1 + 99 * ((memory - min_memory) / memory_range)) if memory != NON_TENSOR else 1000 for name, memory in memories.items()}
     memories = scaled_memories
-
+    
     for i, node in enumerate(nodes):
         # Indices of METIS are 1-based :(
         graph[node.name] = Node(node, times[node.name], memories[node.name], i + 1)
@@ -125,7 +125,6 @@ def read_metis(graph, file):
     '''
     Reads the output of Graph Partitioning METIS and breaks a custom graph accordingly.
     '''
-
     f = open(file, "r")
     nodes = list(graph.values())
     n = 0
@@ -148,10 +147,34 @@ def read_metis(graph, file):
     os.remove(f.name)
     return parts
 
+    '''
+    f = open(file, "r")
+    nodes = list(graph.values())
+    n = 0
+    mapping = []
+    parts = []
+    while l := f.readline():
+        i = int(l)
+        if i in mapping:
+            i = mapping.index(i)
+        else:
+            mapping.append(i)
+            i = len(mapping) - 1
+            parts.append([])
+
+        parts[i].append(nodes[n].node)
+        assert nodes[n].idx == n + 1
+        n += 1
+
+    f.close()
+    os.remove(f.name)
+    return parts
+    '''
+
 def execute_metis(file, n):
     '''
     Runs METIS on a file
     '''
     file.flush()  # Ensure all data is written before executing
     file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
-    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-minconn", "-contig", "-ufactor=30", "-ncuts=500"], stdout=subprocess.DEVNULL)  # Execute gpmetis
+    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-minconn", "-ufactor=300", "-ncuts=2000"], stdout=subprocess.DEVNULL)  # Execute gpmetis
