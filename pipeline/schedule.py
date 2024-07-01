@@ -1,17 +1,24 @@
 '''
 Manage different types of schedule. All scheduling algorithm (GPipe, 1f1b, ...) are defined here.
-A schedule is a list of operations (see Operation in ``graph.py``) that will be executed in order by each device.
+A schedule is a list of operations (see Operation) that will be executed in order by each device.
 Every rank should generate the entire schedule for all ranks, in order to detect and fix cycles/deadlocks.
 '''
-
-import torch
 
 import logging
 logger = logging.getLogger("schedule")
 
-def generate_afab_schedule(placement, n_micro_batches, prefetching = False, **options):
+def generate_afab_schedule(placement, n_micro_batches, **options):
     '''
     All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
+
+    :param placement: device on which each block is placed
+    :type placement: List[int]
+    :param n_micro_batches: number of micro batches
+    :type n_micro_batches: int
+    :param **options: options to add to **each** operation of the schedule
+
+    :return: a list containing the operations to execute for **all** processes
+    :rtype: List[Operation]
     '''
     schedule = []
     n_stages = len(placement)
@@ -34,12 +41,20 @@ def generate_afab_schedule(placement, n_micro_batches, prefetching = False, **op
                 schedule.append(Operation(id_, i, OperationType.SEND_BACKWARD, rank, **options))
     
     assert len(schedule) == n_micro_batches * n_stages * 2 * 3
-    if prefetching: return enable_prefetching(schedule)
     return schedule
 
-def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, **options):
+def generate_1f1b_schedule(placement, n_micro_batches, **options):
     '''
     One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
+
+    :param placement: device on which each block is placed
+    :type placement: List[int]
+    :param n_micro_batches: number of micro batches
+    :type n_micro_batches: int
+    :param **options: options to add to **each** operation of the schedule
+
+    :return: a list containing the operations to execute for **all** processes
+    :rtype: List[Operation]
     '''
     schedule = []
     n_stages = len(placement)
@@ -101,10 +116,21 @@ def generate_1f1b_schedule(placement, n_micro_batches, prefetching = False, **op
             if (i - n_micro_batches - state) % (n_devices // 2) == 0 or (i - n_micro_batches - state) % n_micro_batches == 0:
                 b_b = (b_b - 1) % stages_per_device
 
-    if prefetching: return enable_prefetching(schedule)
     return schedule
 
-def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False, **options):
+def generate_hanayo_schedule(placement, n_micro_batches, **options):
+    '''
+    Hanayo schedule as in https://dl.acm.org/doi/10.1145/3581784.3607073
+
+    :param placement: device on which each block is placed
+    :type placement: List[int]
+    :param n_micro_batches: number of micro batches
+    :type n_micro_batches: int
+    :param **options: options to add to **each** operation of the schedule
+
+    :return: a list containing the operations to execute for **all** processes
+    :rtype: List[Operation]
+    '''
     schedule = []
     n_devices = max(placement) + 1
     n_stages = len(placement)
@@ -154,7 +180,6 @@ def generate_hanayo_schedule(placement, n_micro_batches, prefetching = False, **
                     schedule.append(Operation(ids[rank][ -1 - 2 * (enod[rank] // n_micro_batches)], enod[rank] % n_micro_batches, OperationType.SEND_BACKWARD, rank, **options))
                     enod[rank] += 1
 
-    if prefetching: return enable_prefetching(schedule)
     return schedule
 
 if __name__ == "__main__":
@@ -167,13 +192,9 @@ if __name__ == "__main__":
         for c in cycles: print(c)
         print()
     
-    # new_schedule = schedule_from_graph(graph)
     for rank in range(max(placement) + 1):
         local_schedule = list(filter(lambda op: op.rank == rank, schedule))
-        # local_new_schedule = list(filter(lambda op: op.block_id == rank, new_schedule))
         print(f'Rank {rank}')
         print(local_schedule, "\n")
-        # print(local_new_schedule)
-        # assert local_schedule == local_new_schedule
 else:
     from .graph import *

@@ -1,4 +1,9 @@
+'''
+Utils to partition a computation graph using METIS
+'''
+
 import os
+import random
 import tempfile
 import subprocess
 from .profile import NON_TENSOR
@@ -7,7 +12,6 @@ class Node:
     '''
     Custom representation of graphs to manipulate METIS inputs/outputs easily
     '''
-
     def __init__(self, node, time, mem, idx):
         '''
         :param node: original node
@@ -30,18 +34,25 @@ class Node:
         where s is the size of the vertex, w1, w2, . . . , wncon are the ncon vertex weights associated with this vertex, v1, . . . , vk
         are the vertices adjacent to this vertex, and e1, . . . , ek are the weights of these edges (undirected).
         http://glaros.dtc.umn.edu/gkhome/fetch/sw/metis/manual.pdf - Section 4.1.1
+
+        :return: representation of this node as expected by METIS
+        :rtype: str
         '''
         line = f'{self.mem} {self.time}'
+
         for v in self.edges_in:
             line += f' {v}'
         for v,_ in self.edges_out:
             line += f' {v}'
-        return line # + f"% {self.idx} - {self.node.name}"
+        return line + f"% {self.idx} - {self.node.name}"
     
     def to_dot_line(self):
         '''
         Dot representation of node
         https://graphviz.org/doc/info/lang.html
+
+        :return: representation of this node in dot format
+        :rtype: str
         '''
         dot = f'{self.idx} [weight={self.time}];\n'
         return dot
@@ -49,6 +60,9 @@ class Node:
     def to_dot_edges(self):
         '''
         Dot representation of all edges (directed)
+
+        :return: representation of all outgoing edges for this node, in dot format
+        :rtype: str
         '''
         dot = ''
         for v,e in self.edges_out:
@@ -60,13 +74,23 @@ class Node:
 
 def convert_fx(module, times, memories):
     '''
-    Converts a torch FX graph into our custom format using the Node class
-    Our format includes informations about the time & memory profiling, and edges between each nodes
+    Converts a torch FX graph into a custom format using the Node class
+    This format includes informations about the time & memory profiling, and edges between each nodes
+
+    :param module: symbolic trace of a torch model (see torch.fx)
+    :type module: fx.GraphModule
+    :param times: information about the weights, i.e. the profiled execution time, of each node
+    :type times: Dict[str, float]
+    :param memories: information about the weight of the outgoing edge for each node, i.e. the memory size of the output value
+    :type memories: Dict[str, float]
+
+    :return: custom representation of every node by their name
+    :rtype: Dict[str, Node]
     '''
     nodes = list(module.graph.nodes)
     graph = {}
     indices = {}
-
+    
     to_weight = lambda x : max(int(x), 1)
 
     # Map into [1, 100] to have consistent times
@@ -83,7 +107,7 @@ def convert_fx(module, times, memories):
     memory_range = max_memory - min_memory
     scaled_memories = {name: to_weight(1 + 99 * ((memory - min_memory) / memory_range)) if memory != NON_TENSOR else 1000 for name, memory in memories.items()}
     memories = scaled_memories
-
+    
     for i, node in enumerate(nodes):
         # Indices of METIS are 1-based :(
         graph[node.name] = Node(node, times[node.name], memories[node.name], i + 1)
@@ -98,6 +122,18 @@ def convert_fx(module, times, memories):
 def split_graph_metis(graph, times, memories, n):
     '''
     Splits a graph into n parts using METIS.
+
+    :param graph: symbolic trace of the module to partition (see torch.fx)
+    :type graph: fx.GraphModule
+    :param times: information about the weights, i.e. the profiled execution time, of each node
+    :type times: Dict[str, float]
+    :param memories: information about the weight of the outgoing edge for each node, i.e. the memory size of the output value
+    :type memories: Dict[str, float]
+    :param n: number of partitions to create
+    :type n: Optional[int]
+
+    :return: ``n`` lists of nodes corresponding to each part
+    :rtype: List[List[fx.Node]]
     '''
     graph = convert_fx(graph, times, memories)
     file = write_metis(graph)
@@ -110,6 +146,12 @@ def split_graph_metis(graph, times, memories, n):
 def write_metis(graph):
     '''
     Dumps the info about a custom graph into a file in METIS format
+
+    :param graph: custom representation of every node of a computational graph, by name
+    :type graph: Dict[str, Node]
+
+    :rtype: file descriptor where the info was written
+    :type: File
     '''
     file = tempfile.NamedTemporaryFile("w+", dir = ".")
     n = len(graph)
@@ -124,22 +166,39 @@ def write_metis(graph):
 def read_metis(graph, file):
     '''
     Reads the output of Graph Partitioning METIS and breaks a custom graph accordingly.
+
+    :param graph: custom representation of every node of a computational graph, by name
+    :type graph: Dict[str, Node]
+    :param file: name of the file where METIS wrote its output
+    :type file: str
+
+    :return: lists of nodes corresponding to each part of the partition obtained
+    :rtype: List[List[fx.Node]]
     '''
-
     f = open(file, "r")
-    nodes = list(graph.values())
-    n = 0
-    mapping = []
-    parts = []
-    while l := f.readline():
-        i = int(l)
-        if i in mapping:
-            i = mapping.index(i)
-        else:
-            mapping.append(i)
-            i = len(mapping) - 1
-            parts.append([])
 
+    
+    mapping = []
+    nodes = list(graph.values())
+    lines = list(map(int, f.readlines()))
+    parts = []
+    n = 0
+    
+    for l in range(len(lines)):
+        i = lines[l]
+        # WE NEED TO HAVE CONTIGUOUS PARTITIONS
+        # METIS does not enforce that, so we have to fix it by ignoring some attributions
+        if i not in mapping and (l < len(lines) - 1 and i == lines[l + 1]):
+            mapping.append(i)
+            parts.append([])
+            i = -1
+        # if i not in mapping:
+        #     mapping.append(i)
+        #     parts.append([])
+        #     tmp.append([])
+        #     i = -1
+        else:
+            i = mapping.index(i)
         parts[i].append(nodes[n].node)
         assert nodes[n].idx == n + 1
         n += 1
@@ -151,7 +210,28 @@ def read_metis(graph, file):
 def execute_metis(file, n):
     '''
     Runs METIS on a file
+
+    :param file: file descriptor of the file where the info of the graph was written
+    :type file: File
+    :param n: number of parts to create
+    :type n: int
     '''
     file.flush()  # Ensure all data is written before executing
     file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
-    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-minconn", "-contig", "-ufactor=30", "-ncuts=500"], stdout=subprocess.DEVNULL)  # Execute gpmetis
+    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-ufactor=500", "-ncuts=2000", "-niter=2000"], stdout=subprocess.DEVNULL)  # Execute gpmetis
+
+def export_partition_to_dot(parts):
+    text = "digraph partition {\n"
+    for i, p in enumerate(parts):
+        color = '#'+ ''.join([random.choice('0123456789abcdef') for _ in range(6)])
+        text += f"\tsubgraph cluster_{i} {{\n"
+        text += f"bgcolor=\"{color}\";\n"
+        for n in p:
+            text += f'{n.idx} [weight={n.time}];\n'
+        text += "}"
+    for p in parts:
+        for n in p:
+            text += n.to_dot_edges()
+    text += "}"
+    with open("partition.dot", "w+") as f:
+        f.write(text)

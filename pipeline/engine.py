@@ -1,6 +1,5 @@
 '''
-Coordinates the execution of a schedule on a list of blocks at a device/rank level.
-Takes care of feeding the input to the first block and computing the loss on the last block.
+Execution of the pipeline
 '''
 
 import torch
@@ -16,6 +15,11 @@ logger = logging.getLogger("engine")
 def op_to_str(op):
     '''
     Pretty print for dist.P2POp
+
+    :param op: communication operation
+    :type op: dist.P2POp
+    :return: string describing the op
+    :rtype: string
     '''
     match op.op:
         case dist.isend:
@@ -24,7 +28,15 @@ def op_to_str(op):
             return f'Receive from {op.peer}'
 
 class Engine():
+    '''
+    Coordinates the execution of a schedule on a list of blocks at a device/rank level.
+    Takes care of feeding the input to the first block and computing the loss on the last block.
+    '''
     def __init__(self, blocks):
+        '''
+        :param blocks: list of blocks handled by this process rank
+        :type blocks: List[PipelineBlock]
+        '''
         self.blocks = blocks
         self.rank = self.blocks[0].rank if blocks else None
         for b in self.blocks: assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
@@ -49,13 +61,34 @@ class Engine():
 
     def train_step(self, batch, target, loss_fn, schedule, split_size, profile = False):
         '''
-        Perform forward + backward pass on a batch of data
-        batch: input data, only used on the first block of the pipeline
-        target: groundtruth, only used on the last block of the pipeline
-        loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own it needs to take the same parameter "reduction = 'sum'" as torch ones. 
-        schedule: list of operations. For more info, look at ``schedule.py``
-        split_size: list of micro batch sizes. The list should cover the entire batch, i.e. sum(split_size) == batch_size
-        profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
+        Executes a schedule on a batch of data
+
+        :param batch: input data, only used on the first block of the pipeline
+        :type batch: Tensor
+        :param target: groundtruth, only used on the last block of the pipeline
+        :type target: Tensor
+        :param loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own it needs to take the same parameter "reduction = 'sum'" as torch ones.
+        :type loss_fn: function (Tensor, Tensor, reduction = 'sum') -> Tensor
+        :param schedule: list of operations. For more info, see schedule.
+        :type schedule: list[Operation]
+        :param split_size: list of micro batch sizes. The list should cover the entire batch, i.e. ``sum(split_size) == batch_size``
+        :type split_size: int or List[int]
+        :param profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
+        :type profile: boolean
+
+        :return:
+
+        - Result of the forward pass
+        - Losses for each micro-batch
+        - Insights about time taken, as a dict containing:
+
+            - total: total time taken for the execution
+            - idle: total time not used for computation for this process
+            - start_idle: time between the start of execution and the first computation
+            - end_idle: time between the last computation and the end of execution
+            - bubble: idle time between first and last computation
+
+        :rtype: Tensor, Tensor, Dict[float]
         '''
         splits = iter(batch.split(split_size, dim=0))
 
@@ -156,6 +189,18 @@ class Engine():
 def compute_loss(block, output, target, loss_fn):
     '''
     Computes the loss and correctly prepares the gradients for the pipelined backward pass
+
+    :param block: last block of the pipeline
+    :type block: PipelineBlock
+    :param output: output of this block
+    :type output: Tensor
+    :param target: target value
+    :type target: Tensor
+    :param loss_fn: loss function to compute
+    :type loss_fn: function (Tensor, Tensor, reduction = 'sum') -> Tensor
+
+    :return: loss value
+    :rtype: Tensor
     '''
     output = output.detach()
     output.requires_grad = True

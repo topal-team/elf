@@ -274,6 +274,7 @@ class EmbeddingStem(nn.Module):
         self.drop = nn.Dropout(config.embd_pdrop)
         self.block_size = config.block_size
         self.vocab_size = config.vocab_size
+        self.device = device
 
     def reset_parameters(self):
         self.tok_emb.reset_parameters()
@@ -281,7 +282,7 @@ class EmbeddingStem(nn.Module):
     def forward(self, idx):
         token_embeddings = self.tok_emb(idx) # each index maps to a (learnable) vector
         pos_ids = torch.arange(
-                0, self.block_size, dtype=torch.long, device=torch.cuda.current_device() if torch.cuda.is_available() else ('cpu')
+                0, self.block_size, dtype=torch.long, device=self.device
             ).unsqueeze(0) # each position maps to a (learnable) vector
         return self.drop(token_embeddings + self.wpe(pos_ids))
 
@@ -510,31 +511,31 @@ def PipelineGPT(model, devices, vocab_size, input_shape, checkpoint = False, bud
             print(input.shape)
 
             # list_solver = [rockmate.solvers.HILP()]
-            list_solver = [rockmate.solvers.TwRemat()]
-            max_size_S_graph_for_no_partitioning = 0
-            partitioners = [rkgb.Ptools.Partitioner_seq(sub_partitioner=rkgb.Ptools.Partitioner())]
+            # list_solver = [rockmate.solvers.TwRemat()]
+            # max_size_S_graph_for_no_partitioning = 0
+            # partitioners = [rkgb.Ptools.Partitioner_seq(sub_partitioner=rkgb.Ptools.Partitioner())]
 
             
-            input = input.to(device)
-            rkMod = rockmate.HRockmate(
-                    module, input, budget, 
-                    list_solvers=list_solver, 
-                    partitioners=partitioners,
-                    # solve_sched = False,
-                    max_size_S_graph_for_no_partitioning=max_size_S_graph_for_no_partitioning
-                )
+            # input = input.to(device)
+            # rkMod = rockmate.HRockmate(
+            #         module, input, budget, 
+            #         list_solvers=list_solver, 
+            #         partitioners=partitioners,
+            #         # solve_sched = False,
+            #         max_size_S_graph_for_no_partitioning=max_size_S_graph_for_no_partitioning
+            #     )
 
-            with torch.no_grad():
-                output = module(input)
-                input_shape = output.shape
-                input = output.detach()
+            # with torch.no_grad():
+            #     output = module(input)
+            #     input_shape = output.shape
+            #     input = output.detach()
 
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
 
-            rkMod.solve_sched(budget, rec=False)
-            rkMod.get_compiled_fct()
+            # rkMod.solve_sched(budget, rec=False)
+            # rkMod.get_compiled_fct()
 
-            rkMods.append(rkMod)
+            # rkMods.append(rkMod)
 
         del input
         
