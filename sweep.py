@@ -2,13 +2,14 @@
 
 import torch
 import torch.distributed as dist
+from settings import *
 from models.simple import SimpleTransformer
 from pipeline.partitioners.profile import profile_operations
 from pipeline.partitioners.metis import *
 from pipeline.partitioners.partition import *
 from pipeline import Pipeline
 import pickle
-import wandb
+#import wandb
 import argparse
 import time
 
@@ -19,9 +20,9 @@ parser.add_argument('--ufactor', type=int, default=30)
 parser.add_argument('--niter', type=int, default=10)
 parser.add_argument('--ncuts', type=int, default=100)
 
-def profile(model):
+def profile(model, sample):
     trace = torch.fx.symbolic_trace(model)
-    times, memories = profile_operations(trace, model.get_sample(16))
+    times, memories = profile_operations(trace, sample)
     with open('performance_metrics.pkl', 'wb') as file:
         pickle.dump({'times': times, 'memories': memories}, file)
 
@@ -43,7 +44,7 @@ def evaluate_partition(parts, inputs, sample):
 
     total_time = sum(times)
 
-    return total_time,
+    return total_time
 
 def evaluate_pipeline(parts, sample, placement, schedule):
     pipe = Pipeline(parts, sample.cuda(), placement, schedule = schedule, partition = False)
@@ -59,10 +60,16 @@ if __name__ == '__main__':
     placement = [0, 1, 2, 3, 0, 1, 2, 3]
     schedule = "1f1b"
     if rank == 0:
-        wandb.init(dir = ".")
+        wandb.init(mode='offline')
         args = parser.parse_args()
-        model = SimpleTransformer(256, 64, 16)
+        # model = SimpleTransformer(256, 64, 16)
         # wandb.config.update(args)
+        wandb.config.update({
+            'arch': arch,
+            'model configuration': conf,
+            'batch size': batch_size,
+            'sequence length': block_size
+        })
         
         trace = torch.fx.symbolic_trace(model)
         n = 4
@@ -74,6 +81,13 @@ if __name__ == '__main__':
 
         graph = convert_fx(trace, times, memories)
         file = write_metis(graph)
+        pweights = [getattr(wandb.config, f'uf{i}') for i in range(len(placement))]
+        pweights = torch.tensor(pweights, dtype=torch.float32)
+        pweights = torch.softmax(pweights, dim=0)
+        weights_file = tempfile.NamedTemporaryFile("w+", dir = ".")
+        for i, twgt in enumerate(pweights):
+            weights_file.write(f'{i} = {twgt}\n')
+            wandb.config.update({f'uf{i}': twgt})
 
         file.flush()  # Ensure all data is written before executing
         file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
@@ -82,11 +96,13 @@ if __name__ == '__main__':
         command.append(f'-ufactor={wandb.config.ufactor}')
         command.append(f'-niter={wandb.config.niter}')
         command.append(f'-ncuts={wandb.config.ncuts}')
+        command.append(f'-tpwgts={weights_file.name}')
         if wandb.config.minconn:
             command.append(f'-minconn')
         subprocess.run(command, stdout=subprocess.DEVNULL)  # Execute gpmetis
 
         file.close()
+        weights_file.close()
         parts = read_metis(graph, f'{file.name}.part.{n}')
 
         inputs, outputs = get_inputs_outputs(parts)
@@ -112,7 +128,7 @@ if __name__ == '__main__':
                               [o for _, _, o in output_list[0]])
 
     # t = evaluate_partition(blocks, inputs, model.get_sample(16))
-    t = evaluate_pipeline(blocks, model.get_sample(16), placement, schedule)
+    t = evaluate_pipeline(blocks, inputs, placement, schedule)
     wandb.log({"time": t})
     
     wandb.finish()
