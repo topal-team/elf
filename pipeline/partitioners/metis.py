@@ -5,20 +5,13 @@ Utils to partition a computation graph using METIS
 import os
 import tempfile
 import subprocess
+from .profile import NON_TENSOR
 
 class Node:
     '''
     Custom representation of graphs to manipulate METIS inputs/outputs easily
     '''
-
-    # Arbitrary formulas to convert time/memory to integer weights.
-    # We need to stay in the range [1, MAX_INT] for every value
-    def time_to_weight(time):
-        return max(int(time * 1e3), 1)
-    def mem_to_weight(mem):
-        return max(int(mem / 1e3), 1)
-
-    def __init__(self, node, time, idx):
+    def __init__(self, node, time, mem, idx):
         '''
         :param node: original node
         :type node: fx.Node
@@ -28,8 +21,9 @@ class Node:
         :type idx: int
         '''
         self.node = node
-        self.time = Node.time_to_weight(time)
+        self.time = time
         self.idx = idx
+        self.mem = mem
         self.edges_in = []
         self.edges_out = []
 
@@ -43,12 +37,13 @@ class Node:
         :return: representation of this node as expected by METIS
         :rtype: str
         '''
-        line = f'{self.time}'
-        for v,e in self.edges_in:
-            line += f' {v} {e}'
-        for v,e in self.edges_out:
-            line += f' {v} {e}'
-        return line
+        line = f'{self.mem} {self.time}'
+
+        for v in self.edges_in:
+            line += f' {v}'
+        for v,_ in self.edges_out:
+            line += f' {v}'
+        return line # + f"% {self.idx} - {self.node.name}"
     
     def to_dot_line(self):
         '''
@@ -94,14 +89,32 @@ def convert_fx(module, times, memories):
     nodes = list(module.graph.nodes)
     graph = {}
     indices = {}
+    
+    to_weight = lambda x : max(int(x), 1)
+
+    # Map into [1, 100] to have consistent times
+    min_time = min(filter(lambda x : x != 0, times.values()))
+    max_time = max(times.values())
+    time_range = max_time - min_time
+    scaled_times = {name: to_weight(1 + 99 * ((time - min_time) / time_range)) for name, time in times.items()}
+    times = scaled_times
+
+    # Map memories into [1, 100] to have consistent memory sizes
+    tensor_memories = list(filter(lambda x : x != NON_TENSOR, memories.values()))
+    min_memory = min(tensor_memories)
+    max_memory = max(tensor_memories)
+    memory_range = max_memory - min_memory
+    scaled_memories = {name: to_weight(1 + 99 * ((memory - min_memory) / memory_range)) if memory != NON_TENSOR else 1000 for name, memory in memories.items()}
+    memories = scaled_memories
+    
     for i, node in enumerate(nodes):
         # Indices of METIS are 1-based :(
-        graph[node.name] = Node(node, times[node.name], i + 1)
+        graph[node.name] = Node(node, times[node.name], memories[node.name], i + 1)
         indices[node.name] = i + 1
         for dep in node.all_input_nodes:
-            weight = Node.mem_to_weight(memories[dep.name])
+            weight = memories[dep.name]
             graph[dep.name].edges_out.append((indices[node.name], weight))
-            graph[node.name].edges_in.append((indices[dep.name], weight))
+            graph[node.name].edges_in.append((indices[dep.name]))
 
     return graph
 
@@ -142,7 +155,7 @@ def write_metis(graph):
     file = tempfile.NamedTemporaryFile("w+", dir = ".")
     n = len(graph)
     m = sum(map(lambda n : len(n.edges_in), list(graph.values())))
-    fmt = '011'
+    fmt = '110'
     ncon = 1
     file.write(f'{n} {m} {fmt} {ncon}\n')
     for node in graph.values():
@@ -196,4 +209,4 @@ def execute_metis(file, n):
     '''
     file.flush()  # Ensure all data is written before executing
     file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
-    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-minconn"], stdout=subprocess.DEVNULL)  # Execute gpmetis
+    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-minconn", "-ufactor=300", "-ncuts=2000"], stdout=subprocess.DEVNULL)  # Execute gpmetis

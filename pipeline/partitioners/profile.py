@@ -10,7 +10,7 @@ from pipeline.utils import Timer
 # To avoid that we put a soft constraint by giving them a huge communication cost.
 NON_TENSOR = 2 << 29
 
-def add_profiling_to_graph(graph_module, iters = 10):
+def add_profiling_to_graph(graph_module, device, iters = 10):
     '''
     Torch FX graph manipulation to add profiling of time & memory to each node.
 
@@ -19,6 +19,8 @@ def add_profiling_to_graph(graph_module, iters = 10):
 
     :param graph_module: original symbolically traced module to be profiled (see torch.fx)
     :type graph_module: fx.GraphModule
+    :param device: device on which the profiling will be performed
+    :type device: str or torch.device
     :param iters: number of computations to perform for each operation. More iters means a more robust result, but will take more time
     :type iters: Optional[int]
         
@@ -38,42 +40,70 @@ def add_profiling_to_graph(graph_module, iters = 10):
                 with Timer() as timer:
                     output = original_target(*args, **kwargs)
                 times.append(timer.time())
+                            
             node_time[node.target.__name__] = np.median(times)
             if isinstance(output, torch.Tensor):
                 node_memory[node.target.__name__] = output.numel() * output.element_size()
+                output = output.to('cpu', non_blocking = True)
+            
             setattr(node, "target", original_target) # restore original op
             return output
+        
         setattr(node, "target", timed_forward)
 
     def wrap_module(module, node_name):
         original_forward = module.forward
         def timed_forward(*args, **kwargs):
+            nonlocal module
             times = []
+            module = module.to(device)
+            args = [t.to(device) if isinstance(t, torch.Tensor) else t for t in args]
+            kwargs = {x:y.to(device) if isinstance(y, torch.Tensor) else y for x,y in kwargs.items()}
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                
             for _ in range(iters):
                 with Timer() as timer:
                     output = original_forward(*args, **kwargs)
                 times.append(timer.time())
+                
+            
             node_time[node_name] = np.median(times)
             if isinstance(output, torch.Tensor):
                 node_memory[node_name] = output.numel() * output.element_size()
+                output = output.to('cpu', non_blocking = True)
+                
+            module.cpu()
+                
             setattr(module, "forward", original_forward) # restore
             return output
+        
         module.forward = timed_forward
     
     def wrap_method(instance, method_name):
         def timed_method(*args, **kwargs):
             method = getattr(args[0], method_name)
             times = []
+            args = [t.to(device) if isinstance(t, torch.Tensor) else t for t in args]
+            kwargs = {x:y.to(device) if isinstance(y, torch.Tensor) else y for x,y in kwargs.items()}
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                
             for _ in range(iters):
                 with Timer() as timer:
                     output = method(*args, **kwargs)
                 times.append(timer.time())
+            
             node_time[instance.name] = np.median(times)
             if isinstance(output, torch.Tensor):
                 node_memory[instance.name] = output.numel() * output.element_size()
+                output = output.to('cpu', non_blocking = True)
+            
             setattr(instance, method_name, method) # restore
             return output
+        
         setattr(instance, method_name, timed_method)
+
 
     node_time = {}
     node_memory = {}
@@ -90,8 +120,15 @@ def add_profiling_to_graph(graph_module, iters = 10):
             instance = node.args[0]
             wrap_method(instance, node.target)
 
+
         elif node.op == 'get_attr':
-            ... # Is it really useful to profile these ones ?
+            r = node.target.split('.')
+            attribute = graph_module
+            for lvl in r:
+                attribute = getattr(attribute, lvl)
+
+            if isinstance(attribute, torch.Tensor):
+                node_memory[node.name] = attribute.numel() * attribute.element_size()
 
     graph_module.recompile()
     return graph_module, node_time, node_memory
@@ -113,7 +150,8 @@ def profile_operations(graph_module, input_sample):
         graph_module(input_sample)
 
     # Add timing to the graph
-    graph_module, node_time, node_memory = add_profiling_to_graph(graph_module)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    graph_module, node_time, node_memory = add_profiling_to_graph(graph_module, device)
 
     # Execute the modified graph
     with torch.no_grad():

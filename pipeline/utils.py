@@ -117,7 +117,7 @@ class TimerCPU():
         self.end = time.perf_counter()
 
     def time(self):
-        return (self.end - self.start) * 1000
+        return (self.end - self.start)
     
 class TimerGPU():
     '''
@@ -182,17 +182,17 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
                 packed.copy_(tensor, non_blocking = True)
                 self.tensors[key] = packed
                 self.events[key].record(self.stream)
-                del tensor
-                
+                del tensor, packed
+                  
             return key
         
         # Ensure the data movement was finished and return the device tensor
         def unpack_from_cpu(key):
-            # If it wasn't prefetched just copy it
+        # If it wasn't prefetched just copy it
             if not self.events.get(key):
                 print(f'Tensor was not prefetched :/')
                 return None
-            
+
             self.events[key].synchronize()
             unpacked = self.tensors[key]
             del self.events[key]
@@ -206,6 +206,28 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
         '''
         Wait for every activation to be completely moved to CPU, which allows CUDA to free their memory
         '''
+        for key in list(self.events.keys()):
+            self.events[key].synchronize()
+            self.total_size += self.tensors[key].numel() * self.tensors[key].element_size()
+        # Here all tensors are effectively copied on cpu and memory on gpu is freed
+
+    # Copy back from device to host, asynchronously
+    def prefetch(self):
+        with torch.cuda.stream(self.stream):
+            for key in list(self.events.keys()):
+                self.events[key] = torch.cuda.Event()
+                tensor = self.tensors[key]
+                unpacked = torch.empty(
+                    tensor.size(),
+                    dtype = tensor.dtype,
+                    device = torch.cuda.current_device(),
+                )
+                unpacked.copy_(tensor, non_blocking = True)
+                self.tensors[key] = unpacked
+                self.events[key].record(self.stream)
+
+    # At some point we need to free memory ; this means potentially waiting for the copy to finish, so we want to do it just in time, not too early
+    def wait_for_offloading(self):
         for key in list(self.events.keys()):
             self.events[key].synchronize()
         # Here all tensors are effectively copied on cpu and memory on gpu is freed
@@ -225,5 +247,5 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
                     device = torch.cuda.current_device()
                 )
                 unpacked.copy_(tensor, non_blocking = True)
-                self.tensors[key] = unpacked                
+                self.tensors[key] = unpacked
                 self.events[key].record(self.stream)

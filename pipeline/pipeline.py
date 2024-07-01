@@ -225,7 +225,7 @@ class PipelineBlock():
         if options.get("offload"):
             # Start moving activations back to gpu
             activations_offloading().prefetch()
-            
+
         if src is None or src == self.rank: return
 
         buffers = {key: [None, self.out_metadata[key].get_buffer(mb_size)] for key in self.outputs}
@@ -289,11 +289,12 @@ class Pipeline():
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if partition:
-            if shutil.which("gpmetis"):
-                if rank == 0: logger.info(f'Using METIS to partition the graph.')
+            if shutil.which("rMLGP"):
+                mode = "dagP"
+            elif shutil.which("gpmetis"):
                 mode = "metis"
             else:
-                if rank == 0: logger.info(f'METIS not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
+                if rank == 0: logger.info(f'METIS or dagP not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
                 mode = "default"
             model, inputs, outputs = share_partition(model, placement, sample, mode)
         else:
@@ -439,7 +440,7 @@ def share_partition(model, placement, sample, mode):
         input_list = None
     output_list = [None]
     dist.scatter_object_list(output_list, input_list, src = 0)
-    model, inputs, outputs = ([m for m, _, _ in output_list[0]],
+    model, inputs, outputs = ([m.cuda() for m, _, _ in output_list[0]],
                               [i for _, i, _ in output_list[0]],
                               [o for _, _, o in output_list[0]])
     return model, inputs, outputs

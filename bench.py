@@ -1,8 +1,6 @@
 import torch
 import torch.distributed as dist
 import os
-import time
-import numpy as np
 from pipeline.pipeline import Pipeline
 from argparse import ArgumentParser
 from settings import *
@@ -48,12 +46,11 @@ if __name__ == "__main__":
     inputs = inputs.cuda()
 
     for (s, placement, schedule) in setups:
+        pipe = Pipeline(model, inputs.cuda(), placement, schedule = schedule)
         for size in split_sizes:
             # if global_rank == 0: print(f'Memory allocated : {torch.cuda.memory_allocated() / 2**30:.3f} GB')
             
             if global_rank == 0: logger.info(f'{s} - Beginning bench for micro batches of size {size}')
-
-            pipe = Pipeline(model, inputs.cuda(), placement, schedule = schedule)
             
             # Warmup
             if global_rank == 0: logger.info(f'{s} - Warming up')
@@ -65,7 +62,7 @@ if __name__ == "__main__":
             times = []
             for i in range(iters):
                 _ = pipe(inputs.detach(), torch.empty(0), lambda x,y,**_: x.sum(), size, **options)
-                model.zero_grad() # TODO: implement zero_grad for pipeline object
+                model.zero_grad()
                 times.append(pipe.times)
                 
             mems = [torch.tensor(0.0, device = rank) for _ in range(world_size)] if global_rank == 0 else None

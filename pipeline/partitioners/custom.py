@@ -30,10 +30,9 @@ def split_graph(graph, times, memories, n = 3):
 
     for node in nodes:
         node_time = times.get(node.name, 0)
-        if current_time + node_time > target_time:
+        if current_time + node_time > target_time * (len(parts) + 1) and len(parts) < n:
             parts.append(current_part)
             current_part = []
-            current_time = 0
         current_part.append(node)
         current_time += node_time
     parts.append(current_part)
@@ -78,5 +77,5 @@ def split_graph_constrained(graph, times, memories, n=3):
         if current_time > target_time and len(needed_inputs) <= 1:
             current_part -= 1
             current_time = 0
-
+            
     return parts
