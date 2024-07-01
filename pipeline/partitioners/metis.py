@@ -3,6 +3,7 @@ Utils to partition a computation graph using METIS
 '''
 
 import os
+import random
 import tempfile
 import subprocess
 from .profile import NON_TENSOR
@@ -43,7 +44,7 @@ class Node:
             line += f' {v}'
         for v,_ in self.edges_out:
             line += f' {v}'
-        return line # + f"% {self.idx} - {self.node.name}"
+        return line + f"% {self.idx} - {self.node.name}"
     
     def to_dot_line(self):
         '''
@@ -175,6 +176,7 @@ def read_metis(graph, file):
     :rtype: List[List[fx.Node]]
     '''
     f = open(file, "r")
+
     
     mapping = []
     nodes = list(graph.values())
@@ -189,7 +191,14 @@ def read_metis(graph, file):
         if i not in mapping and (l < len(lines) - 1 and i == lines[l + 1]):
             mapping.append(i)
             parts.append([])
-        i = len(mapping) - 1            
+            i = -1
+        # if i not in mapping:
+        #     mapping.append(i)
+        #     parts.append([])
+        #     tmp.append([])
+        #     i = -1
+        else:
+            i = mapping.index(i)
         parts[i].append(nodes[n].node)
         assert nodes[n].idx == n + 1
         n += 1
@@ -209,4 +218,20 @@ def execute_metis(file, n):
     '''
     file.flush()  # Ensure all data is written before executing
     file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
-    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-minconn", "-ufactor=300", "-ncuts=2000"], stdout=subprocess.DEVNULL)  # Execute gpmetis
+    subprocess.run(["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-ufactor=500", "-ncuts=2000", "-niter=2000"], stdout=subprocess.DEVNULL)  # Execute gpmetis
+
+def export_partition_to_dot(parts):
+    text = "digraph partition {\n"
+    for i, p in enumerate(parts):
+        color = '#'+ ''.join([random.choice('0123456789abcdef') for _ in range(6)])
+        text += f"\tsubgraph cluster_{i} {{\n"
+        text += f"bgcolor=\"{color}\";\n"
+        for n in p:
+            text += f'{n.idx} [weight={n.time}];\n'
+        text += "}"
+    for p in parts:
+        for n in p:
+            text += n.to_dot_edges()
+    text += "}"
+    with open("partition.dot", "w+") as f:
+        f.write(text)

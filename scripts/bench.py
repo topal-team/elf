@@ -1,6 +1,8 @@
 import torch
 import torch.distributed as dist
 import os
+import sys
+sys.path.append("./")
 from pipeline.pipeline import Pipeline
 from argparse import ArgumentParser
 from settings import *

@@ -13,17 +13,26 @@ import logging
 logger = logging.getLogger(f'test partition')
 logging.basicConfig(level = logging.INFO)
 
+def pretty_print_params(n):
+    if n > 1e9:
+        return f'{n/1e9:.1f}B'
+    elif n > 1e6:
+        return f'{n/1e6:.1f}M'
+    else:
+        return f'{int(n)}'
+
 def compare_partitioners(model, sample):
     n = 4
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     trace = torch.fx.symbolic_trace(model)
     with TimerCPU() as timer:
-        times, memories = profile_operations(trace, sample, device)
+        times, memories = profile_operations(trace, sample)
     print(f'Time taken to profile  : {timer.time():.3f}s')
 
     for name, partitioner in zip(['default', 'constrained', 'metis', 'dagP'],
                                  [split_graph, split_graph_constrained, split_graph_metis, split_graph_dagP]):
+        if name == 'dagP': continue
         print(f'-- {name} --')
         with TimerCPU() as timer:
             parts = partitioner(trace, times, memories, n)
@@ -36,11 +45,10 @@ def compare_partitioners(model, sample):
             blocks.append(graph)
 
         real_times = []
-        sample = sample.cuda()
+        sample = sample.to(device)
         x = {i: sample for i in inputs[0]}
         for i,s in enumerate(blocks):
             s = s.to(device)
-            torch.cuda.synchronize()
             with Timer() as timer:
                 with torch.no_grad():
                     x = s(**x)
@@ -50,7 +58,7 @@ def compare_partitioners(model, sample):
 
         print(f'\tTime measured : {["%.3fs" % t for t in real_times]}')
         print(f'\tMedian : {np.median(real_times):.3f}s - Stddev : {np.std(real_times):.3f}')
-        print(f'\tTotal memory sent : {["%.1fMB" % m for m in memories_used]}\n')
+        print(f'\tMemory sent : {["%.1fMB" % m for m in memories_used]} (total = {sum(memories_used):.1f}MB)\n')
 
 if __name__ == '__main__':
     parser = ArgumentParser(description = "Demo/Test of pipelined model")
@@ -68,8 +76,10 @@ if __name__ == '__main__':
 
 
     sample = inputs
-    model = SimpleTransformer(500, 256, 6)
-    sample = model.get_sample(2)
+    # model = SimpleTransformer(500, 256, 6)
+    # sample = model.get_sample(2)
+
+    print('# of trainable parameters : ', pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
     if args.compare:
         compare_partitioners(model, sample)
@@ -81,7 +91,7 @@ if __name__ == '__main__':
     parts, inputs, outputs = partition_graph(model, 4, sample, mode = args.mode)
     end = time.time()
     print(f'Time taken to partition: {end - start:.3f}s')
-    
+
     for i,p in enumerate(parts):
         print(f'Part {i} needs inputs {inputs[i]} and has outputs {outputs[i]}.')
     

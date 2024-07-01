@@ -7,7 +7,6 @@ from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
 from .dagP import split_graph_dagP
-from ..utils import TimerCPU
 
 import logging
 logger = logging.getLogger("partition")
@@ -134,7 +133,7 @@ def partition_graph(model, n, sample, mode = "default"):
     elif mode == "constrained":
         parts = split_graph_constrained(trace, times, memories, n)
     elif mode == "metis":
-        parts = split_graph_metis(trace, times, memories, n)        
+        parts = split_graph_metis(trace, times, memories, n)
     elif mode == "dagP":
         parts = split_graph_dagP(trace, times, memories, n)
     else:

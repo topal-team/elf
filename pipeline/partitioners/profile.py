@@ -145,10 +145,6 @@ def profile_operations(graph_module, input_sample):
     :return: 2 dicts, one for time and one for memory used, respectively. Each one has the format {node_name: value}
     :rtype: Dict[str, float], Dict[str, float]
     '''
-    # Warmup
-    with torch.no_grad():
-        graph_module(input_sample)
-
     # Add timing to the graph
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     graph_module, node_time, node_memory = add_profiling_to_graph(graph_module, device)
