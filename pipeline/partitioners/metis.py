@@ -192,13 +192,8 @@ def read_metis(graph, file):
             mapping.append(i)
             parts.append([])
             i = -1
-        # if i not in mapping:
-        #     mapping.append(i)
-        #     parts.append([])
-        #     tmp.append([])
-        #     i = -1
         else:
-            i = mapping.index(i)
+            i = len(mapping) - 1
         parts[i].append(nodes[n].node)
         assert nodes[n].idx == n + 1
         n += 1

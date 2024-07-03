@@ -88,12 +88,13 @@ def get_inputs_outputs_single(part):
     '''
     inputs = set()
     outputs = set()
-    nodes = list(part.graph.node)
+    nodes = list(part.graph.nodes)
     for node in nodes:
         if node.op == "placeholder":
-            inputs.append(node.name)
+            inputs.add(node.name)
         if node.op == "output":
-            outputs.append(node.name)
+            for name in node.args[0]:
+                outputs.add(name)
     return inputs, outputs
 
 def partition_graph(model, n, sample, mode = "default"):

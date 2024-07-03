@@ -32,7 +32,6 @@ def compare_partitioners(model, sample):
 
     for name, partitioner in zip(['default', 'constrained', 'metis', 'dagP'],
                                  [split_graph, split_graph_constrained, split_graph_metis, split_graph_dagP]):
-        if name == 'dagP': continue
         print(f'-- {name} --')
         with TimerCPU() as timer:
             parts = partitioner(trace, times, memories, n)
