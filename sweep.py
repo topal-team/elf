@@ -14,14 +14,14 @@ import argparse
 import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--minconn', type=bool, default=True)
+parser.add_argument('--minconn', action = 'store_true')
 parser.add_argument('--ufactor', type=int, default=30)
 parser.add_argument('--niter', type=int, default=10)
 parser.add_argument('--ncuts', type=int, default=100)
 parser.add_argument('--wfile', type=str)
+parser.add_argument('--outfile', type=str)
 
-def profile(model, sample):
-    trace = torch.fx.symbolic_trace(model)
+def profile(trace, sample):
     times, memories = profile_operations(trace, sample)
     with open('performance_metrics.pkl', 'wb') as file:
         pickle.dump({'times': times, 'memories': memories}, file)
@@ -44,7 +44,8 @@ def evaluate_partition(parts, inputs, sample):
     return total_time
 
 def evaluate_pipeline(parts, sample, placement, schedule):
-    pipe = Pipeline(parts, sample.cuda(), placement, schedule = schedule, partition = False)
+    sample = sample.cuda()
+    pipe = Pipeline(parts, sample, placement, schedule = schedule, partition = False)
     # Warmup
     _ = pipe(sample.clone(), torch.empty(0), lambda x,y,**_: x.sum(), sample.size(0) // 8)
 
@@ -52,17 +53,23 @@ def evaluate_pipeline(parts, sample, placement, schedule):
 
     return pipe.times['total']
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     rank = int(os.getenv('RANK', 0))
+    local_rank = int(os.getenv('LOCAL_RANK', 0))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+
+    sample = inputs
+    args = parser.parse_args()
+    
     placement = [0, 1, 2, 3, 0, 1, 2, 3]
     schedule = "1f1b"
     if rank == 0:
-        args = parser.parse_args()
-        model = SimpleTransformer(256, 64, 16)
-        
         trace = torch.fx.symbolic_trace(model)
-        n = 4
+        n = len(placement)
 
+        if not os.path.exists('performance_metrics.pkl'):
+            profile(trace, inputs)
         with open('performance_metrics.pkl', 'rb') as file:
             data = pickle.load(file)
         times = data['times']
@@ -80,14 +87,17 @@ if __name__ == '__main__':
         command.append(f'-tpwgts={args.wfile}')
         if args.minconn:
             command.append(f'-minconn')
-        subprocess.run(command, stdout=subprocess.DEVNULL)  # Execute gpmetis
+
+        start = time.time()
+        subprocess.run(command)  # Execute gpmetis
+        partition_time = time.time() - start
 
         file.close()
+        # wfile.close()
         parts = read_metis(graph, f'{file.name}.part.{n}')
 
         inputs, outputs = get_inputs_outputs(parts)
-        mem = sum(sum(memories[n] for n in out) for out in outputs)
-        print(mem)
+        mem = sum(sum(memories[n] for n in out) for out in outputs.values())
 
         blocks = []
         for i, p in enumerate(parts):
@@ -108,5 +118,11 @@ if __name__ == '__main__':
                               [o for _, _, o in output_list[0]])
 
     # t = evaluate_partition(blocks, inputs, model.get_sample(16))
-    t = evaluate_pipeline(blocks, model.get_sample(16), placement, schedule)
-    if rank == 0: print(time)
+    t = evaluate_pipeline(model, sample, placement, schedule)
+    if dist.is_initialized():
+        dist.destroy_process_group()
+        
+    if rank == 0:
+        with open(args.outfile, "w+") as f:
+            f.write(f'{t}\n{mem}\n{partition_time}')
+            f.flush()

@@ -2,44 +2,55 @@ import wandb
 import subprocess
 import argparse
 import tempfile
-from settings import *
+import math
+import shlex
+import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--minconn', type=bool, default=True)
 parser.add_argument('--ufactor', type=int, default=30)
 parser.add_argument('--niter', type=int, default=10)
 parser.add_argument('--ncuts', type=int, default=100)
+for i in range(8):
+    parser.add_argument(f'--uf{i}', type=int, default=5)
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    wandb.init(dir = ".")
-    wandb.config.update({
-            'arch': arch,
-            'model configuration': conf,
-            'batch size': batch_size,
-            'sequence length': block_size
-        })
-    
-    pweights = [getattr(wandb.config, f'uf{i}') for i in range(len(placement))]
-    pweights = torch.tensor(pweights, dtype=torch.float32)
-    pweights = torch.softmax(pweights, dim=0)
-    weights_file = tempfile.NamedTemporaryFile("w+", dir = ".")
+    wandb.init()
+
+    temperature = 5
+    pweights = [getattr(wandb.config, f'uf{i}') / temperature for i in range(8)]
+    exp_weights = [math.exp(w) for w in pweights]
+    sum_exp_weights = sum(exp_weights)
+    pweights = [w / sum_exp_weights for w in exp_weights]
+    weights_file = tempfile.NamedTemporaryFile("w+", dir = ".", delete_on_close = False)
     for i,w in enumerate(pweights):
         weights_file.write(f'{i} = {w}\n')
         wandb.config.update({f'uf{i}': w})
+    weights_file.flush()
+    weights_file.close()
+    outfile = tempfile.NamedTemporaryFile("w+", dir = ".")
+    command = f"srun --account=hyb@v100 --gpus=4 --nodes=1 --exclusive singularity exec --nv --bind $(pwd -P):$(pwd) {os.environ['SINGULARITY_ALLOWED_DIR']}/pipe.sif torchrun --nproc-per-node=4 --nnodes=1 -- sweep.py --ufactor={wandb.config.ufactor} --niter={wandb.config.niter} --ncuts={wandb.config.ncuts} --wfile={os.path.basename(weights_file.name)} --outfile={os.path.basename(outfile.name)}"
+    if wandb.config.minconn:
+        command += " --minconn"
+
+    process = subprocess.run(command, shell = True)
+    if process.returncode == 0:
+        outfile.seek(0)
+        output = outfile.read()
+        print(f'Output : {output}')
+        mem, time, partition_time = tuple(map(float, output.split('\n')))
+    else:
+        mem = time = partition_time = -1
     
-    output = subprocess.getoutput(["sbatch", "--account=hyb@v100", "--gpus=4", "--nodes=1", "--exclusive",
-                    "singularity", "exev", "--nv", "--bind", "$(pwd):$(pwd)", "$SINGULARITY_ALLOWED_DIR/pipe.sif",
-                    "torchrun" "--nproc-per-node=4", "--nnodes=1", "--", 
-                    "sweep.py", f"--ufactor={wandb.config.ufactor}", f"--niter={wandb.config.niter}", f"--ncuts={wandb.config.ncuts}",
-                    f"--wfile={weights_file.name}", "--minconn" if wandb.config.minconn else ""
-                    ])
+    outfile.close()
+    os.remove(weights_file.name)
 
     weights_file.close()
-    mem, time = tuple(map(float, output.split('\n')))
     wandb.log({
         'time': time,
-        'mem': mem
+        'mem': mem,
+        'partition_time': partition_time
     })
 
     wandb.finish()

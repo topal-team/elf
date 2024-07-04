@@ -298,7 +298,12 @@ class Pipeline():
                 mode = "default"
             model, inputs, outputs = share_partition(model, placement, sample, mode)
         else:
-            inputs, outputs = get_inputs_outputs_single(torch.fx.symbolic_trace(model))
+            inputs = []
+            outputs = []
+            for m in model:
+                inp, out = get_inputs_outputs_single(torch.fx.symbolic_trace(m))
+                inputs.append(inp)
+                outputs.append(out)
 
         match schedule.lower():
             case 'afab':

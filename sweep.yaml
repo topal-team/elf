@@ -1,23 +1,22 @@
-program: sweep.py
-name: metis-estimate
-method: random
+entity: topal-inria
+program: fullsweep.py
+project: metis-estimate
+method: bayes
 metric:
   name: time
   goal: minimize
 parameters:
-  ctype:
-    values: [rm,shem]
   minconn:
     values: [true,false]
   ufactor:
     min: 1
-    max: 300
+    max: 100
   niter:
-    min: 5
-    max: 200000
+    min: 1
+    max: 10000
   ncuts:
-    min: 10
-    max: 100000
+    min: 1
+    max: 10000
   uf0:
     min: 1
     max: 10
