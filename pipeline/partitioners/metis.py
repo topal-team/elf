@@ -6,7 +6,11 @@ import os
 import random
 import tempfile
 import subprocess
-from .profile import NON_TENSOR
+import numpy as np
+
+# Some edges should not be part of the cut; for instance values that are not torch.Tensor are a problem to send/recv for pipelining.
+# To avoid that we put a soft constraint by giving them a huge communication cost.
+NON_TENSOR = 2 << 20
 
 class Node:
     '''
@@ -18,6 +22,8 @@ class Node:
         :type node: fx.Node
         :param time: time obtained by profiling this node
         :type time: float
+        :param mem: memory size of this node's output
+        :type mem: float
         :param idx: index of the node in the (topological sort of) the graph
         :type idx: int
         '''
@@ -25,6 +31,7 @@ class Node:
         self.time = time
         self.idx = idx
         self.mem = mem
+        # TODO: change to children/parents
         self.edges_in = []
         self.edges_out = []
 
@@ -90,6 +97,9 @@ def convert_fx(module, times, memories):
     nodes = list(module.graph.nodes)
     graph = {}
     indices = {}
+
+    times = {k: np.median(v) for k,v in times.items()}
+    memories = {k: np.median(v) for k,v in memories.items()}
     
     to_weight = lambda x : max(int(x), 1)
 
@@ -101,11 +111,11 @@ def convert_fx(module, times, memories):
     times = scaled_times
 
     # Map memories into [1, 100] to have consistent memory sizes
-    tensor_memories = list(filter(lambda x : x != NON_TENSOR, memories.values()))
+    tensor_memories = list(filter(lambda x : x != 0, memories.values()))
     min_memory = min(tensor_memories)
     max_memory = max(tensor_memories)
     memory_range = max_memory - min_memory
-    scaled_memories = {name: to_weight(1 + 99 * ((memory - min_memory) / memory_range)) if memory != NON_TENSOR else 1000 for name, memory in memories.items()}
+    scaled_memories = {name: to_weight(1 + 99 * ((memory - min_memory) / memory_range)) if memory != 0 else NON_TENSOR for name, memory in memories.items()}
     memories = scaled_memories
     
     for i, node in enumerate(nodes):
@@ -176,7 +186,6 @@ def read_metis(graph, file):
     :rtype: List[List[fx.Node]]
     '''
     f = open(file, "r")
-
     
     mapping = []
     nodes = list(graph.values())

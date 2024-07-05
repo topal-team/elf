@@ -3,19 +3,52 @@ Utils for operation profiling
 '''
 
 import torch
-import numpy as np
 from pipeline.utils import Timer
 
-# Some edges should not be part of the cut; for instance values that are not torch.Tensor are a problem to send/recv for pipelining.
-# To avoid that we put a soft constraint by giving them a huge communication cost.
-NON_TENSOR = 2 << 29
+def to_device(x, device):
+    '''
+    Moves ``x`` to the specified device if it is a tensor
+    If ``x`` is an iterable or dictionary, recursively moves every tensor contained in it to the device too
+    Otherwise does not do anything
+
+    :param x: object to move to device memory
+    :type x: Any
+    :param device: destination
+    :type device: str or torch.device
+
+    :return: moved objects
+    :rtype: same as ``x``
+    '''
+    if isinstance(x, torch.Tensor) or isinstance(x, torch.nn.Module):
+        return x.to(device, non_blocking = True)
+    elif hasattr(x, '__iter__') and not isinstance(x, str):
+        return type(x)(to_device(item, device) for item in x)
+    elif isinstance(x, dict):
+        return {k: to_device(v, device) for k, v in x.items()}
+    return x
+
+def get_memory(x):
+    '''
+    Estimates memory used by ``x`` if it is a tensor
+    If ``x`` is an iterable or dictionary, recursively count memory for every tensor contained in it
+
+    :param x: object to estimate
+    :type x: Any
+
+    :return: memory estimation in bytes
+    :rtype: float
+    '''
+    if isinstance(x, torch.Tensor):
+        return x.numel() * x.element_size()
+    elif hasattr(x, '__iter__') and not isinstance(x, str):
+        return sum([get_memory(v) for v in x])
+    elif isinstance(x, dict):
+        return sum([get_memory(v) for v in x.values()])
+    return 0
 
 def add_profiling_to_graph(graph_module, device, iters = 10):
     '''
     Torch FX graph manipulation to add profiling of time & memory to each node.
-
-    .. warning::
-        Profiling statistics can only be ran once ; afterwards the graph automatically restores itself.
 
     :param graph_module: original symbolically traced module to be profiled (see torch.fx)
     :type graph_module: fx.GraphModule
@@ -29,9 +62,12 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
         - a new module that will profile the operations it runs.
         - a dictionary for time where the profiling results will be stored with the format {node_name: value}
         - a similar dictionary for output memories
+        - a list of functions that restore original operations to remove profiling
 
-    :rtype: fx.GraphModule, Dict[str, float], Dict[str, float]
+    :rtype: fx.GraphModule, Dict[str, List[float]], Dict[str, List[float]], List[function() -> None]
     '''
+    # list of functions to call to restore initial operations
+    restore = []
     def wrap_function(node):
         original_target = node.target
         def timed_forward(*args, **kwargs):
@@ -40,25 +76,31 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
                 with Timer() as timer:
                     output = original_target(*args, **kwargs)
                 times.append(timer.time())
-                            
-            node_time[node.target.__name__] = np.median(times)
-            if isinstance(output, torch.Tensor):
-                node_memory[node.target.__name__] = output.numel() * output.element_size()
-                output = output.to('cpu', non_blocking = True)
             
-            setattr(node, "target", original_target) # restore original op
+            assert(node.name not in node_time)
+            assert(node.name not in node_memory)
+            node_time[node.name] = times
+            node_memory[node.name] = get_memory(output)
+            output = to_device(output, 'cpu')
+            restore.append(lambda : setattr(node, "target", original_target))
             return output
         
         setattr(node, "target", timed_forward)
 
-    def wrap_module(module, node_name):
-        original_forward = module.forward
+    def wrap_module(node):
+        module = dict(graph_module.named_modules())[node.target]
+        original_forward = getattr(module, "original_forward", None)
+        if original_forward is None:
+            original_forward = module.forward
+            setattr(module, "original_forward", module.forward)
+            restore.append(lambda : setattr(module, "forward", original_forward))
+
         def timed_forward(*args, **kwargs):
             nonlocal module
             times = []
             module = module.to(device)
-            args = [t.to(device) if isinstance(t, torch.Tensor) else t for t in args]
-            kwargs = {x:y.to(device) if isinstance(y, torch.Tensor) else y for x,y in kwargs.items()}
+            args = to_device(args, device)
+            kwargs = to_device(kwargs, device)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 
@@ -66,26 +108,26 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
                 with Timer() as timer:
                     output = original_forward(*args, **kwargs)
                 times.append(timer.time())
-                
             
-            node_time[node_name] = np.median(times)
-            if isinstance(output, torch.Tensor):
-                node_memory[node_name] = output.numel() * output.element_size()
-                output = output.to('cpu', non_blocking = True)
+            assert(node.name not in node_time)
+            assert(node.name not in node_memory)
+            node_time[node.name] = times
+            node_memory[node.name] = get_memory(output)
+            output = to_device(output, 'cpu')
                 
             module.cpu()
-                
-            setattr(module, "forward", original_forward) # restore
+
             return output
         
         module.forward = timed_forward
     
-    def wrap_method(instance, method_name):
+    def wrap_method(node):
+        instance = node.args[0]
         def timed_method(*args, **kwargs):
-            method = getattr(args[0], method_name)
+            method = getattr(args[0], node.target)
             times = []
-            args = [t.to(device) if isinstance(t, torch.Tensor) else t for t in args]
-            kwargs = {x:y.to(device) if isinstance(y, torch.Tensor) else y for x,y in kwargs.items()}
+            args = to_device(args, device)
+            kwargs = to_device(kwargs, device)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 
@@ -94,16 +136,16 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
                     output = method(*args, **kwargs)
                 times.append(timer.time())
             
-            node_time[instance.name] = np.median(times)
-            if isinstance(output, torch.Tensor):
-                node_memory[instance.name] = output.numel() * output.element_size()
-                output = output.to('cpu', non_blocking = True)
+            assert(node.name not in node_time)
+            assert(node.name not in node_memory)
+            node_time[node.name] = times
+            node_memory[node.name] = get_memory(output)
+            output = to_device(output, 'cpu')
             
-            setattr(instance, method_name, method) # restore
+            restore.append(lambda : setattr(instance, node.target, method))
             return output
         
-        setattr(instance, method_name, timed_method)
-
+        setattr(instance, node.target, timed_method)
 
     node_time = {}
     node_memory = {}
@@ -113,13 +155,10 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
             wrap_function(node)
 
         elif node.op == 'call_module':
-            submodule = dict(graph_module.named_modules())[node.target]
-            wrap_module(submodule, node.name)
+            wrap_module(node)
 
         elif node.op == 'call_method':
-            instance = node.args[0]
-            wrap_method(instance, node.target)
-
+            wrap_method(node)
 
         elif node.op == 'get_attr':
             r = node.target.split('.')
@@ -127,11 +166,10 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
             for lvl in r:
                 attribute = getattr(attribute, lvl)
 
-            if isinstance(attribute, torch.Tensor):
-                node_memory[node.name] = attribute.numel() * attribute.element_size()
+            node_memory[node.name] = get_memory(attribute)
 
     graph_module.recompile()
-    return graph_module, node_time, node_memory
+    return graph_module, node_time, node_memory, restore
 
 def profile_operations(graph_module, input_sample):
     '''
@@ -143,21 +181,23 @@ def profile_operations(graph_module, input_sample):
     :type input_sample: Tensor
 
     :return: 2 dicts, one for time and one for memory used, respectively. Each one has the format {node_name: value}
-    :rtype: Dict[str, float], Dict[str, float]
+    :rtype: fx.GraphModule, Dict[str, List[float]], Dict[str, List[float]]
     '''
     # Add timing to the graph
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    graph_module, node_time, node_memory = add_profiling_to_graph(graph_module, device)
+    graph_module, node_time, node_memory, restore = add_profiling_to_graph(graph_module, device)
 
     # Execute the modified graph
     with torch.no_grad():
         graph_module(input_sample)
+
+    for f in restore: f()
 
     # Fill the operations that were not timed
     for node in graph_module.graph.nodes:
         if node.name not in node_time:
             node_time[node.name] = 0
         if node.name not in node_memory:
-            node_memory[node.name] = NON_TENSOR # if it's not a tensor, don't cut here as it creates problems for comms
+            node_memory[node.name] = 0 # if it's not a tensor, don't cut here as it creates problems for comms
 
     return node_time, node_memory

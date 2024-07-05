@@ -8,18 +8,20 @@ class SimpleCNN(nn.Module):
         self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
         self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
         self.maxpool = nn.MaxPool2d(2)
-        self.fc1 = nn.Linear(128 * 28 * 28, 512)
-        self.fc2 = nn.Linear(512, 10)
+        self.relu = nn.ReLU(inplace = True)
+        self.avgpool = nn.AvgPool2d(7)
+        self.fc1 = nn.Linear(128 * 8 * 8, 256)
+        self.fc2 = nn.Linear(256, 10)
 
     def forward(self, x):
-        x = torch.nn.functional.relu(self.conv1(x), inplace = True)
+        x = self.relu(self.conv1(x))
         x = self.maxpool(x)
-        x = torch.nn.functional.relu(self.conv2(x), inplace = True)
+        x = self.relu(self.conv2(x))
         x = self.maxpool(x)
-        x = torch.nn.functional.relu(self.conv3(x), inplace = True)
-        x = self.maxpool(x)
+        x = self.relu(self.conv3(x))
+        x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-        x = torch.nn.functional.relu(self.fc1(x), inplace = True)
+        x = self.relu(self.fc1(x))
         x = self.fc2(x)
         return x
 

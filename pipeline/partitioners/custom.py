@@ -2,6 +2,8 @@
 Handmade partition methods
 '''
 
+import numpy as np
+
 def split_graph(graph, times, memories, n = 3):
     '''
     Naively splits a graph into roughly equal blocks in terms of time.
@@ -21,7 +23,7 @@ def split_graph(graph, times, memories, n = 3):
     :rtype: List[List[fx.Node]]
     '''
     nodes = list(graph.graph.nodes)
-    total_time = sum(times.get(node.name, 0) for node in nodes)
+    total_time = sum(np.median(times.get(node.name, 0)) for node in nodes)
     target_time = total_time / n
 
     parts = []
@@ -29,7 +31,7 @@ def split_graph(graph, times, memories, n = 3):
     current_time = 0
 
     for node in nodes:
-        node_time = times.get(node.name, 0)
+        node_time = np.median(times.get(node.name, 0))
         if current_time + node_time > target_time * (len(parts) + 1) and len(parts) < n:
             parts.append(current_part)
             current_part = []
@@ -58,7 +60,7 @@ def split_graph_constrained(graph, times, memories, n=3):
     :rtype: List[List[fx.Node]]
     '''
     nodes = list(graph.graph.nodes)
-    total_time = sum(times.get(node.name, 0) for node in nodes)
+    total_time = sum(np.median(times.get(node.name, 0)) for node in nodes)
     target_time = total_time / n
 
     parts = [[] for _ in range(n)]
@@ -68,7 +70,7 @@ def split_graph_constrained(graph, times, memories, n=3):
     current_time = 0
     for node in reversed(nodes):
         parts[current_part].insert(0, node)
-        current_time += times.get(node.name, 0)
+        current_time += np.median(times.get(node.name, 0))
         for dep in node.all_input_nodes:
             if dep.name not in needed_inputs and dep not in parts[current_part]:
                 needed_inputs.append(dep.name)
