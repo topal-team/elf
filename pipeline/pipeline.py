@@ -433,7 +433,6 @@ def share_partition(model, placement, sample, mode):
     '''
     rank = dist.get_rank()
     # Rank 0 profiles & partition the graph, then shares it to everyone
-    # TODO: avoid loading everything on rank 0 as it can easily OOM
     # TODO: what if devices are heterogenous ? how to profile correctly ?
     if rank == 0:
         blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode = mode)

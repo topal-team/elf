@@ -3,10 +3,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Load the CSV files into DataFrames and plot each on a subplot
-df_full = pd.read_csv("results/GPTHanayo/full.csv")
-
 mode = sys.argv[1] if len(sys.argv) >= 1 else "device"
+# Load the CSV files into DataFrames and plot each on a subplot
+df_full = pd.read_csv(sys.argv[2] if len(sys.argv) >= 2 else "results/GPTHanayo/full.csv")
 
 if mode == "device":
     fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(15, 10))
@@ -117,37 +116,41 @@ elif mode == "mems":
 elif mode == "remat":
     df_r = pd.read_csv('results/GPTHanayo/remat/full.csv')
 
-    fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(15, 10))
-    axs = axs.flatten()
+    fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(15, 10))
 
-    for d in range(1):  # Assuming 4 devices as in previous sections
+    for d in range(4):  # Assuming 4 devices as in previous sections
         mbs = df_full["mb_size"].unique()
         filtered_names = df_full['name'].unique()
         filtered_names = [name for name in filtered_names if name not in ['GPipe', 'Hanayo 2-Waves', 'Hanayo 3-Waves']]
         n_schedules = len(filtered_names)
 
         for idx, name in enumerate(filtered_names):
-            total_time_full = df_full[df_full['name'] == name][f'total_time_{d}']
-            total_time_r = df_r[df_r['name'] == name][f'total_time_{d}']
+            if d == 0:
+                total_time_full = df_full[df_full['name'] == name][f'total_time_{d}']
+                total_time_r = df_r[df_r['name'] == name][f'total_time_{d}']
             mem_full = df_full[df_full['name'] == name][f'mem_{d}']
             mem_r = df_r[df_r['name'] == name][f'mem_{d}']
 
-            axs[2*d].plot(mbs, total_time_full, label=name)
-            axs[2*d].plot(mbs, total_time_r, label=f'{name} w/ remat')
-            axs[2*d+1].plot(mbs, mem_full, label=name)
-            axs[2*d+1].plot(mbs, mem_r, label=f'{name} w/ remat')
+            if d == 0:
+                axs[d].plot(mbs, total_time_full, label=name)
+                axs[d].plot(mbs, total_time_r, label=f'{name} w/ remat')
+            axs[d+1].plot(mbs, mem_full, label=name)
+            axs[d+1].plot(mbs, mem_r, label=f'{name} w/ remat')
 
-        axs[2*d].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
-        axs[2*d].tick_params(axis='both', which='major', labelsize=14)
-        axs[2*d].set_ylabel('Difference in total time (s)', fontdict={'size': 14})
-        axs[2*d].set_title(f'Iteration time on device {d}', fontdict={'size': 16})
-        axs[2*d].legend()
+        if d == 0:
+            axs[d].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+            axs[d].tick_params(axis='both', which='major', labelsize=14)
+            axs[d].set_xscale('log', base=2)
+            axs[d].set_ylabel('Difference in total time (s)', fontdict={'size': 14})
+            axs[d].set_title(f'Iteration time on device {d}', fontdict={'size': 16})
+            axs[d].legend()
 
-        axs[2*d+1].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
-        axs[2*d+1].tick_params(axis='both', which='major', labelsize=14)
-        axs[2*d+1].set_ylabel('Difference in memory usage (GB)', fontdict={'size': 14})
-        axs[2*d+1].set_title(f'Memory usage on device {d}', fontdict={'size': 16})
-        axs[2*d+1].legend()
+        axs[d+1].set_xlabel('Micro batches size with fixed batch size = 64', fontdict={'size': 14})
+        axs[d+1].tick_params(axis='both', which='major', labelsize=14)
+        axs[d+1].set_xscale('log', base=2)
+        axs[d+1].set_ylabel('Difference in memory usage (GB)', fontdict={'size': 14})
+        axs[d+1].set_title(f'Memory usage on device {d}', fontdict={'size': 16})
+        axs[d+1].legend()
 
 elif mode == "partitioner":
     del df_full

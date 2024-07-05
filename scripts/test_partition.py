@@ -5,8 +5,7 @@ import numpy as np
 sys.path.append('./')
 from pipeline.partitioners import *
 from pipeline.utils import Timer, TimerCPU
-from models.simple import SimpleTransformer
-from settings import model, inputs
+from models.simple import SimpleTransformer, SimpleCNN
 from argparse import ArgumentParser
 
 import logging
@@ -29,10 +28,16 @@ def compare_partitioners(model, sample):
     with TimerCPU() as timer:
         times, memories = profile_operations(trace, sample)
     print(f'Time taken to profile  : {timer.time():.3f}s')
+    n_profiled_mem = len(memories.keys())
+    n_profiled_mem_nz = len([v for v in memories.values() if v != 0])
+    n_profiled_t = len(times.keys())
+    n_profiled_t_nz = len([v for v in times.values() if v != 0])
+    print(f'Proportion of nodes profiled :')
+    print(f'\tMem - {(n_profiled_mem / len(trace.graph.nodes)) * 100:.2f}% (Non-Zero : {(n_profiled_mem_nz / len(trace.graph.nodes)) * 100:.2f}%)')
+    print(f'\tTime - {(n_profiled_t / len(trace.graph.nodes)) * 100:.2f}% (Non-Zero: {(n_profiled_t_nz / len(trace.graph.nodes)) * 100:.2f}%)')
 
     for name, partitioner in zip(['default', 'constrained', 'metis', 'dagP'],
                                  [split_graph, split_graph_constrained, split_graph_metis, split_graph_dagP]):
-        if name == 'dagP': continue
         print(f'-- {name} --')
         with TimerCPU() as timer:
             parts = partitioner(trace, times, memories, n)
@@ -65,6 +70,7 @@ if __name__ == '__main__':
     parser.add_argument('--mode', choices=['default', 'constrained', 'metis', 'dagP'], default = 'default', required = False, help='partition mode')
     parser.add_argument('--log', choices=['debug', 'info', 'none'], default='info', required=False, help="logging level")
     parser.add_argument('--compare', '-c', required=False, action='store_true')
+    parser.add_argument('--model', '-m', choices=["gpt", "tf", "cnn"], required=False, default="tf")
     args = parser.parse_args()
     match args.log:
         case 'debug':
@@ -75,9 +81,27 @@ if __name__ == '__main__':
             logging.getLogger().setLevel(100)
 
 
-    sample = inputs
-    # model = SimpleTransformer(500, 256, 6)
-    # sample = model.get_sample(2)
+    # from torchvision.models import resnet50
+    # from copy import deepcopy
+    # model = resnet50()
+    # m = torch.nn.Sequential(deepcopy(model.conv1), deepcopy(model.layer1[0]))
+    # trace = torch.fx.symbolic_trace(m)
+    # mod, times, memories = add_profiling_to_graph(trace, 'cpu')
+    # mod(torch.randn((4, 3, 224, 224)))
+    # print(times)
+    # print(len(mod.graph.nodes))
+    # exit(0)
+
+    match args.model:
+        case 'gpt':
+            from settings import model, inputs
+            sample = inputs
+        case 'tf':
+            model = SimpleTransformer(400, 256, 4)
+            sample = model.get_sample(4)
+        case 'cnn':
+            model = SimpleCNN()
+            sample = model.get_sample(32)
 
     print('# of trainable parameters : ', pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -85,8 +109,6 @@ if __name__ == '__main__':
         compare_partitioners(model, sample)
         exit(0)
     
-    # trace = torch.fx.symbolic_trace(model)
-
     start = time.time()
     parts, inputs, outputs = partition_graph(model, 4, sample, mode = args.mode)
     end = time.time()

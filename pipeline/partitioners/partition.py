@@ -61,7 +61,7 @@ def get_inputs_outputs(parts):
     for i, part in enumerate(parts):
         for node in part:
             if node.op == "placeholder":
-                inputs[i].add(node.name)
+                inputs[i].add(node.target)
                 part.remove(node)
                 continue
             elif node.op == "output":
@@ -91,7 +91,7 @@ def get_inputs_outputs_single(part):
     nodes = list(part.graph.nodes)
     for node in nodes:
         if node.op == "placeholder":
-            inputs.add(node.name)
+            inputs.add(node.target)
         if node.op == "output":
             for name in node.args[0]:
                 outputs.add(name)
