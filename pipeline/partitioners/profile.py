@@ -94,6 +94,9 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
             original_forward = module.forward
             setattr(module, "original_forward", module.forward)
             restore.append(lambda : setattr(module, "forward", original_forward))
+            next_forward = original_forward
+        else:
+            next_forward = getattr(module, "forward")
 
         def timed_forward(*args, **kwargs):
             nonlocal module
@@ -103,16 +106,18 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
             kwargs = to_device(kwargs, device)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-                
-            for _ in range(iters):
-                with Timer() as timer:
-                    output = original_forward(*args, **kwargs)
-                times.append(timer.time())
             
-            assert(node.name not in node_time)
-            assert(node.name not in node_memory)
-            node_time[node.name] = times
-            node_memory[node.name] = get_memory(output)
+            if node.name in node_time:
+                return original_forward(*args, **kwargs)
+            else:
+                for _ in range(iters):
+                    with Timer() as timer:
+                        output = original_forward(*args, **kwargs)
+                    times.append(timer.time())
+                node_time[node.name] = times
+                node_memory[node.name] = get_memory(output)
+                setattr(module, "forward", next_forward)
+
             output = to_device(output, 'cpu')
                 
             module.cpu()

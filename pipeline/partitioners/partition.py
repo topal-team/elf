@@ -72,7 +72,18 @@ def get_inputs_outputs(parts):
                 if dep not in part:
                     inputs[i].add(dep.name)
                     outputs[find_idx(dep)].add(dep.name)
-    
+
+    # Fix empty parts                    
+    for i, part in enumerate(parts):     
+        if len(part) != 0: continue
+        if i != 0:    
+            for output in outputs[i - 1]:
+                inputs[i].add(output)
+                outputs[i].add(output)
+        if i != len(parts) - 1:
+            for inp in inputs[i + 1]:
+                inputs[i].add(inp)
+                outputs[i].add(inp)
     return inputs, outputs
 
 def get_inputs_outputs_single(part):
@@ -145,6 +156,9 @@ def partition_graph(model, n, sample, mode = "default"):
                         - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
                         - dagP: like METIS, but uses dagP to enforce acyclicity of partition.")
     
+    while len(parts) != n:
+        parts.append([])
+
     inputs, outputs = get_inputs_outputs(parts)
     blocks = []
     for i, p in enumerate(parts):
