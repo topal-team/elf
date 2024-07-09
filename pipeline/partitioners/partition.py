@@ -3,6 +3,7 @@ API and main utils for graph partition
 '''
 
 import torch
+import numpy as np
 from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
@@ -72,7 +73,7 @@ def get_inputs_outputs(parts):
                 if dep not in part:
                     inputs[i].add(dep.name)
                     outputs[find_idx(dep)].add(dep.name)
-
+                    
     # Fix empty parts                    
     for i, part in enumerate(parts):     
         if len(part) != 0: continue
@@ -84,6 +85,7 @@ def get_inputs_outputs(parts):
             for inp in inputs[i + 1]:
                 inputs[i].add(inp)
                 outputs[i].add(inp)
+                
     return inputs, outputs
 
 def get_inputs_outputs_single(part):
@@ -158,14 +160,18 @@ def partition_graph(model, n, sample, mode = "default"):
     
     while len(parts) != n:
         parts.append([])
-
+        
     inputs, outputs = get_inputs_outputs(parts)
+
+    while len(parts) != n:
+        parts.append([])
+        
     blocks = []
     for i, p in enumerate(parts):
         graph = create_subgraph(trace, p, inputs[i], outputs[i])
         blocks.append(graph)
 
-    estimated_times = [sum([times.get(n.name, 0) for n in part]) for part in parts]
+    estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
     estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
     logger.info(f'Estimated times : {["%.3fs" % t for t in estimated_times]}')
     logger.info(f'Estimated memory transfers : {["%.1fMB" % t for t in estimated_mems]}')

@@ -6,4 +6,8 @@ else
     c=5
 fi
 
-wandb agent --count=$c topal-inria/metis-estimate/whsk7pdy
+for i in $(seq 1 $c) ; do
+    wandb agent --count=1 topal-inria/metis-estimate/sx2qwgf7 &
+done
+
+wait $(jobs -rp) && wandb sync --sync-all

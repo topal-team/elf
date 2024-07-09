@@ -82,8 +82,6 @@ class PipelineBlock():
             if x[key].dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
                 x[key].requires_grad = True
 
-        # logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
-
         with Timer() as timer:
             if  options.get('remat'):
                 with torch.no_grad(): y = self.model(**x)
@@ -201,7 +199,7 @@ class PipelineBlock():
             self.inputs.append(buffers)
             return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.params]
         else:
-            # logger.debug(f'{self} - Starting to receive activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
+            logger.debug(f'{self} - Starting to receive activations from layer {self.id - 1} on rank {src}')
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
                 for key in self.params:
@@ -234,7 +232,7 @@ class PipelineBlock():
             self.grads.append(buffers)
             return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.outputs]
         else:
-            # logger.debug(f'{self} - Starting to receive gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
+            logger.debug(f'{self} - Starting to receive gradients from layer {self.id + 1} on rank {src}')
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
                 for key in self.outputs:
@@ -262,6 +260,8 @@ class PipelineBlock():
         y = self.model(**dummy)
         
         self.out_metadata = {key: TensorMetadata(y[key].squeeze(0)) for key in self.outputs} # do not include batch size
+
+        logger.debug(f'{self} - Registered metadata { {k: v.shape for k,v in self.metadata.items()} } => { {k: v.shape for k,v in self.out_metadata.items()} }')
         
         if self.next is not None and self.next != self.rank:
             for key in self.outputs:
@@ -365,7 +365,6 @@ class Pipeline():
             if i > 0 and self.blocks[i - 1].rank == b.rank:
                 b.metadata = self.blocks[i - 1].out_metadata
             b.register_metadata()
-            # logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
         result, losses, times = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
         self.times = times

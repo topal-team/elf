@@ -72,6 +72,9 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
         original_target = node.target
         def timed_forward(*args, **kwargs):
             times = []
+            args = to_device(args, device)
+            kwargs = to_device(kwargs, device)
+            if torch.cuda.is_available(): torch.cuda.synchronize()
             for _ in range(iters):
                 with Timer() as timer:
                     output = original_target(*args, **kwargs)
@@ -108,7 +111,7 @@ def add_profiling_to_graph(graph_module, device, iters = 10):
                 torch.cuda.synchronize()
             
             if node.name in node_time:
-                return original_forward(*args, **kwargs)
+                output = original_forward(*args, **kwargs)
             else:
                 for _ in range(iters):
                     with Timer() as timer:

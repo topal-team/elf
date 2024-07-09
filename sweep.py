@@ -1,5 +1,3 @@
-# wandb agent felisamici/topal-internship/4ha7je2b
-
 import sys
 import torch
 import torch.distributed as dist
@@ -14,7 +12,6 @@ import argparse
 import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--minconn', action = 'store_true')
 parser.add_argument('--ufactor', type=int, default=30)
 parser.add_argument('--niter', type=int, default=10)
 parser.add_argument('--ncuts', type=int, default=100)
@@ -45,7 +42,9 @@ def evaluate_partition(parts, inputs, sample):
 
 def evaluate_pipeline(parts, sample, placement, schedule):
     sample = sample.cuda()
+    
     pipe = Pipeline(parts, sample, placement, schedule = schedule, partition = False)
+    
     # Warmup
     _ = pipe(sample.clone(), torch.empty(0), lambda x,y,**_: x.sum(), sample.size(0) // 8)
 
@@ -77,24 +76,24 @@ if __name__ == "__main__":
 
         graph = convert_fx(trace, times, memories)
         file = write_metis(graph)
-
+        
         file.flush()  # Ensure all data is written before executing
         file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
-        command = ["gpmetis", file.name, str(n), "-objtype=vol", "-contig"]
+        command = ["gpmetis", file.name, str(n), "-objtype=vol", "-contig", "-minconn"]
         command.append(f'-ufactor={args.ufactor}')
         command.append(f'-niter={args.niter}')
         command.append(f'-ncuts={args.ncuts}')
         command.append(f'-tpwgts={args.wfile}')
-        if args.minconn:
-            command.append(f'-minconn')
-
+        
         start = time.time()
         subprocess.run(command)  # Execute gpmetis
         partition_time = time.time() - start
 
         file.close()
-        # wfile.close()
         parts = read_metis(graph, f'{file.name}.part.{n}')
+        
+        while len(parts) != n:
+            parts.append([])
 
         inputs, outputs = get_inputs_outputs(parts)
         mem = sum(sum(memories[n] for n in out) for out in outputs.values())
@@ -123,6 +122,9 @@ if __name__ == "__main__":
         dist.destroy_process_group()
         
     if rank == 0:
-        with open(args.outfile, "w+") as f:
-            f.write(f'{t}\n{mem}\n{partition_time}')
-            f.flush()
+        with open(args.outfile, "wb") as f:
+            pickle.dump({
+                'time': t,
+                'mem': mem,
+                'partition_time': partition_time
+            }, f)
