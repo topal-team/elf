@@ -19,7 +19,7 @@ class PipelineBlock():
     Pipelines are made up of sequential blocks, numbered [0..n]
     Each block is one layer or group of contiguous layers placed on one device
     '''
-    def __init__(self, model, id_, placement, params, outputs):
+    def __init__(self, model, id_, placement, params, outputs, dp = 1):
         '''
         :param model: layer / group of layers that will perform the computation
         :type model: nn.Module
@@ -36,6 +36,12 @@ class PipelineBlock():
         # Block infos
         self.rank = placement[id_] # global rank
         self.model = model.cuda() if torch.cuda.is_available() else model
+        
+        if dp > 1:
+            ws = int(os.getenv('WORLD_SIZE'))
+            dppg = dist.new_group([i for i in range(ws) if (i % len(placement)) == (rank % len(placement))])
+            self.model = torch.nn.parallel.DistributedDataParallel(self.model, process_group = dppg)
+            
         self.id = id_ # rank in the model
         self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
@@ -309,8 +315,8 @@ class Pipeline():
             ids = [i for i in range(len(placement)) if placement[i] == rank]
             for i in range(len(ids)):
                 trace = torch.fx.symbolic_trace(model[i])
-                inputs[ids[i]], outputs[ids[i]] = get_inputs_outputs_single(trace)
-                model[i] = create_subgraph(trace, trace.graph.nodes, inputs[ids[i]], outputs[ids[i]])
+                new, inputs[ids[i]], outputs[ids[i]] = get_inputs_outputs_single(list(trace.graph.nodes))
+                model[i] = create_subgraph(trace, new, inputs[ids[i]], outputs[ids[i]])
 
         match schedule.lower():
             case 'afab':
@@ -415,7 +421,7 @@ def create_pipeline(layers, placement, inputs, outputs):
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
-    blocks = [PipelineBlock(layer, idx, placement, inputs[i], outputs[i]) for i, (idx, layer) in enumerate(list(zip(ids, layers)))]
+    blocks = [PipelineBlock(layer, idx, placement, inputs[idx], outputs[idx]) for (idx, layer) in list(zip(ids, layers))]
     for b in blocks:
         logger.info(f'{b} : inputs = {b.params}, outputs = {b.outputs}')
 
