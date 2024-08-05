@@ -370,7 +370,7 @@ class Pipeline():
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
-            sample = batch[0]
+            sample = batch
             self.blocks[0].metadata = {k: TensorMetadata(v) for k,v in zip(self.blocks[0].params, sample)}
 
         for i in range(len(self.blocks)):
