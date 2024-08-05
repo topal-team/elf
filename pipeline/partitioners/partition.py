@@ -103,16 +103,14 @@ def get_inputs_outputs_single(part):
     '''
     inputs = set()
     outputs = set()
-    nodes = list(part.graph.nodes)
-    for node in nodes:
+    for node in part:
         if node.op == "placeholder":
             inputs.add(node.target)
             part.remove(node)
         if node.op == "output":
-            for name in node.args[0]:
-                outputs.add(name)
+            outputs.add(node.args[0].name)
             part.remove(node)
-    return inputs, outputs
+    return part, inputs, outputs
 
 def partition_graph(model, n, sample, mode = "default"):
     '''
