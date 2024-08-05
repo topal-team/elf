@@ -2,7 +2,6 @@ import sys
 import torch
 import torch.distributed as dist
 from settings import *
-from models.simple import SimpleTransformer
 from pipeline.partitioners.profile import profile_operations
 from pipeline.partitioners.metis import *
 from pipeline.partitioners.partition import *
