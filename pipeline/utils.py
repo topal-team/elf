@@ -2,7 +2,6 @@
 Various useful classes / functions
 '''
 import time
-import gc
 import uuid
 import torch
 
@@ -54,7 +53,7 @@ class TensorMetadata():
         :param t: tensor
         :type t: Tensor
         '''
-        self.shape = t.shape
+        self.shape = list(t.shape)
         self.dtype = t.dtype
         self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
 
@@ -84,6 +83,9 @@ class TensorMetadata():
     def __repr__(self):
         return f'TensorMetadata({self.shape})'
 
+    def __str__(self):
+        return f'TensorMetadata({self.shape})'
+
 
 class Timer():
     '''
@@ -99,11 +101,14 @@ class Timer():
         print(timer.time())
         
     '''
-    def __new__(cls):
-        if torch.cuda.is_available():
-            return TimerGPU()
-        else:
-            return TimerCPU()
+    def __new__(cls, *args):
+        if args:
+            if args[0].lower() in ['gpu', 'cuda']:
+                return TimerGPU()
+            elif args[0].lower() == 'cpu':
+                return TimerCPU()
+        if torch.cuda.is_available(): return TimerGPU()
+        else: return TimerCPU()
 
 class TimerCPU():
     '''
@@ -113,7 +118,7 @@ class TimerCPU():
         self.start = time.perf_counter()
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *_):
         self.end = time.perf_counter()
 
     def time(self):
@@ -131,11 +136,11 @@ class TimerGPU():
         self.start_event.record()
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *_):
         self.end_event.record()
-        self.end_event.synchronize()
 
     def time(self):
+        self.end_event.synchronize()
         return self.start_event.elapsed_time(self.end_event) / 1000
 
 class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
@@ -173,12 +178,12 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
         def pack_to_cpu(tensor):
             key = uuid.uuid4()
             self.events[key] = torch.cuda.Event()
+            packed = torch.empty(
+                tensor.size(),
+                device = torch.device('cpu'),
+            dtype = tensor.dtype,
+            )
             with torch.cuda.stream(self.stream):
-                packed = torch.empty(
-                    tensor.size(),
-                    device = torch.device('cpu'),
-                    dtype = tensor.dtype,
-                )
                 packed.copy_(tensor, non_blocking = True)
                 self.tensors[key] = packed
                 self.events[key].record(self.stream)
@@ -213,18 +218,18 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
 
     # Copy back from device to host, asynchronously
     def prefetch(self):
-        with torch.cuda.stream(self.stream):
-            for key in list(self.events.keys()):
-                self.events[key] = torch.cuda.Event()
-                tensor = self.tensors[key]
-                unpacked = torch.empty(
-                    tensor.size(),
-                    dtype = tensor.dtype,
-                    device = torch.cuda.current_device(),
-                )
+        for key in list(self.events.keys()):
+            self.events[key] = torch.cuda.Event()
+            tensor = self.tensors[key]
+            unpacked = torch.empty(
+                tensor.size(),
+                dtype = tensor.dtype,
+                device = torch.cuda.current_device(),
+            )
+            with torch.cuda.stream(self.stream):
                 unpacked.copy_(tensor, non_blocking = True)
-                self.tensors[key] = unpacked
-                self.events[key].record(self.stream)
+            self.tensors[key] = unpacked
+            self.events[key].record(self.stream)
 
     # At some point we need to free memory ; this means potentially waiting for the copy to finish, so we want to do it just in time, not too early
     def wait_for_offloading(self):

@@ -37,7 +37,7 @@ def test_metadata():
     t = torch.empty((6, 3, 2), dtype = torch.bfloat16)
     metadata = TensorMetadata(t)
     assert metadata.dtype == torch.bfloat16
-    assert metadata.shape == torch.Size([6, 3, 2])
+    assert metadata.shape == [6, 3, 2]
 
     # Test tensor representation of metadata
     t = torch.empty((3, 1, 4), dtype = torch.float16)

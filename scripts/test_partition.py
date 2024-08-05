@@ -63,7 +63,7 @@ def compare_partitioners(model, sample):
 
         print(f'\tTime measured : {["%.3fs" % t for t in real_times]}')
         print(f'\tMedian : {np.median(real_times):.3f}s - Stddev : {np.std(real_times):.3f}')
-        print(f'\tMemory sent : {["%.1fMB" % m for m in memories_used]} (total = {sum(memories_used):.1f}MB)\n')
+        print(f'\tMemory sent : {["%.1fMB" % m for m in memories_used]} (total = {sum(memories_used[:-1]):.1f}MB)\n')
 
 if __name__ == '__main__':
     parser = ArgumentParser(description = "Demo/Test of pipelined model")
@@ -79,18 +79,6 @@ if __name__ == '__main__':
             logging.getLogger().setLevel(logging.INFO)
         case 'none':
             logging.getLogger().setLevel(100)
-
-
-    # from torchvision.models import resnet50
-    # from copy import deepcopy
-    # model = resnet50()
-    # m = torch.nn.Sequential(deepcopy(model.conv1), deepcopy(model.layer1[0]))
-    # trace = torch.fx.symbolic_trace(m)
-    # mod, times, memories = add_profiling_to_graph(trace, 'cpu')
-    # mod(torch.randn((4, 3, 224, 224)))
-    # print(times)
-    # print(len(mod.graph.nodes))
-    # exit(0)
 
     match args.model:
         case 'gpt':

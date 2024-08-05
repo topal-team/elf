@@ -44,6 +44,7 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
 def get_inputs_outputs(parts):
     '''
     Finds the dependencies between each block of a partition.
+    Removes inputs/outputs nodes of each part to merge them into 2 nodes.
 
     :param parts: partition of a model
     :type parts: List[List[fx.Node]]
@@ -78,6 +79,7 @@ def get_inputs_outputs(parts):
 def get_inputs_outputs_single(part):
     '''
     Get the input/output nodes of a single part from the graph
+    Removes inputs/outputs nodes of each part to merge them into 2 nodes
     Useful for already splitted graphs
 
     :param part: one part of a partitioned model
@@ -92,9 +94,11 @@ def get_inputs_outputs_single(part):
     for node in nodes:
         if node.op == "placeholder":
             inputs.add(node.target)
+            part.remove(node)
         if node.op == "output":
             for name in node.args[0]:
                 outputs.add(name)
+            part.remove(node)
     return inputs, outputs
 
 def partition_graph(model, n, sample, mode = "default"):

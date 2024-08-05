@@ -9,7 +9,7 @@ import torch.distributed as dist
 from .schedule import *
 from .engine import Engine
 from .utils import Timer, TensorMetadata, activations_offloading
-from .partitioners import partition_graph, get_inputs_outputs_single
+from .partitioners import partition_graph, get_inputs_outputs_single, create_subgraph
 from collections import deque
 import logging
 logger = logging.getLogger("pipeline")
@@ -59,6 +59,7 @@ class PipelineBlock():
         self.params = sorted(params) # name of input variables
         self.outputs = sorted(outputs) # name of output variables
         # sorted alphabetically to make sure the order is consistent across devices
+        # note: can this order matter ? can it be faster to communicate in some order depending on the tensor shapes/sizes ?
 
     def __str__(self) -> str:
         return f'[Layer {self.id} : GPU {self.rank}]'
@@ -73,6 +74,7 @@ class PipelineBlock():
         '''
         logger.debug(f'{self} - Computing one forward with options {options}')
         
+        # Wait for all communications to finish
         x = self.inputs.popleft()
         for key in self.params:
             work, i = x[key]
@@ -81,8 +83,6 @@ class PipelineBlock():
         
             if x[key].dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
                 x[key].requires_grad = True
-
-        # logger.debug(f'{self} - Forwarding tensor with shape {x.shape}')
 
         with Timer() as timer:
             if  options.get('remat'):
@@ -125,6 +125,7 @@ class PipelineBlock():
         else:
             act = self.activations.popleft()
             
+        # Wait for all communications to finish
         grads = self.grads.popleft()
         for key in self.outputs:
             work, g = grads[key]
@@ -133,6 +134,7 @@ class PipelineBlock():
 
         with Timer() as timer:
             for key in self.outputs:
+                # Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
                 act[key].backward(grads[key], retain_graph = (key != self.outputs[-1]))
         self.compute_time += timer.time()
 
@@ -201,7 +203,7 @@ class PipelineBlock():
             self.inputs.append(buffers)
             return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.params]
         else:
-            # logger.debug(f'{self} - Starting to receive activations with shape {buffer.shape} from layer {self.id - 1} on rank {src}')
+            logger.debug(f'{self} - Starting to receive activations with shape {self.metadata} from layer {self.id - 1} on rank {src}')
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
                 for key in self.params:
@@ -234,7 +236,7 @@ class PipelineBlock():
             self.grads.append(buffers)
             return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.outputs]
         else:
-            # logger.debug(f'{self} - Starting to receive gradients with shape {buffer.shape} from layer {self.id + 1} on rank {src}')
+            logger.debug(f'{self} - Starting to receive gradients with shape {self.out_metadata} from layer {self.id + 1} on rank {src}')
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
                 for key in self.outputs:
@@ -256,6 +258,7 @@ class PipelineBlock():
                 dist.recv(metadata, src = self.previous)
                 self.metadata[key] = TensorMetadata.from_tensor(metadata)
             
+        # We perform a forward pass with dummy data to get the output shapes (except for batch size) of all blocks
         dummy = {key: self.metadata[key].get_buffer(1) for key in self.params}
         if 'idx' in dummy:
             dummy['idx'][:] = 1 # avoid problems with embeddings :)
@@ -298,7 +301,14 @@ class Pipeline():
                 mode = "default"
             model, inputs, outputs = share_partition(model, placement, sample, mode)
         else:
-            inputs, outputs = get_inputs_outputs_single(torch.fx.symbolic_trace(model))
+            inputs = {}
+            outputs = {}
+            if isinstance(model, torch.nn.Module): model = [model]
+            ids = [i for i in range(len(placement)) if placement[i] == rank]
+            for i in range(len(ids)):
+                trace = torch.fx.symbolic_trace(model[i])
+                inputs[ids[i]], outputs[ids[i]] = get_inputs_outputs_single(trace)
+                model[i] = create_subgraph(trace, trace.graph.nodes, inputs[ids[i]], outputs[ids[i]])
 
         match schedule.lower():
             case 'afab':
@@ -328,6 +338,7 @@ class Pipeline():
         :return: result of the forward pass and loss value if the last block of the pipeline is managed by this process
         :rtype: Tensor, Tensor or None, None
         '''
+        # Split size can be an int or list of ints ; make it always a list
         if isinstance(split_size, int):
             n_micro_batches = batch.size(0) // split_size
             s = [split_size for _ in range(n_micro_batches)]
@@ -338,32 +349,42 @@ class Pipeline():
             assert sum(split_size) == batch.size(0), f'Splits do not cover the entire batch'
             n_micro_batches = len(split_size)
             
-        if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2) or options != self.options: # Different number of micro batches ; we have to recompute the schedule 
-
+        if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2) or options != self.options:
+            # Different number of micro batches ; we have to recompute the schedule
             self.schedule = self.scheduler(self.placement, n_micro_batches, **options)
             self.options = options
+
+            # Construct graph, detech cycle and add communication batching to fix them
             cycles = find_cycles(graph_from_schedule(self.schedule))
             if cycles and dist.get_rank() == 0:
                 logger.warning(f'Found potential deadlocks in the schedule ! Fixing them.')
                 for c in cycles: logger.debug(f'Cycle : {c}')
             for c in cycles:
                 fix_cycle(c)
+
             # Remove all operations that are not ours
             ids = list(map(lambda b: b.id, self.blocks)) # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
             self.schedule = list(filter(lambda op: op.block_id in ids, self.schedule))
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
-            self.blocks[0].metadata = {'idx': TensorMetadata(batch[0])} # TODO: should accept multiple inputs
+            sample = batch[0]
+            self.blocks[0].metadata = {k: TensorMetadata(v) for k,v in zip(self.blocks[0].params, sample)}
+
         for i in range(len(self.blocks)):
             b = self.blocks[i]
+            # Sync metadata of fused blocks
             if i > 0 and self.blocks[i - 1].rank == b.rank:
                 b.metadata = self.blocks[i - 1].out_metadata
-            b.register_metadata()
-            # logger.debug(f'{b} - Registered metadata {b.metadata.shape} -> {b.out_metadata.shape}')
 
+            b.register_metadata()
+            logger.debug(f'{b} - Registered metadata {b.metadata} -> {b.out_metadata}')
+
+        # Execute the schedule
         result, losses, times = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
+
         self.times = times
+        # Merge back the micro-batches outputs/losses into one batch
         if len(result) != 0:
             return torch.cat(result, dim = 0), torch.tensor(losses, device = torch.cuda.current_device()).sum(dim = 0, keepdim = True)
         else: return None, None
