@@ -197,9 +197,10 @@ def read_metis(graph, file):
         i = lines[l]
         # WE NEED TO HAVE CONTIGUOUS PARTITIONS
         # METIS does not enforce that, so we have to fix it by ignoring some attributions
-        if i not in mapping and (l < len(lines) - 1 and i == lines[l + 1]):
-            mapping.append(i)
-            parts.append([])
+        if i not in mapping:
+            if (l < len(lines) - 1 and i == lines[l + 1]):
+                mapping.append(i)
+                parts.append([])
             i = -1
         else:
             i = len(mapping) - 1

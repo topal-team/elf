@@ -265,6 +265,8 @@ class PipelineBlock():
         y = self.model(**dummy)
         
         self.out_metadata = {key: TensorMetadata(y[key].squeeze(0)) for key in self.outputs} # do not include batch size
+
+        logger.debug(f'{self} - Registered metadata { {k: v.shape for k,v in self.metadata.items()} } => { {k: v.shape for k,v in self.out_metadata.items()} }')
         
         if self.next is not None and self.next != self.rank:
             for key in self.outputs:

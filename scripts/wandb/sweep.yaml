@@ -1,0 +1,42 @@
+entity: topal-inria
+program: fullsweep.py
+project: metis-estimate
+method: bayes
+metric:
+  name: time
+  goal: minimize
+parameters:
+  ufactor:
+    min: 1
+    max: 1000
+  niter:
+    min: 1
+    max: 15000
+  ncuts:
+    min: 1
+    max: 15000
+  uf0:
+    min: 1
+    max: 10
+  uf1:
+    min: 1
+    max: 10
+  uf2:
+    min: 1
+    max: 10
+  uf3:
+    min: 1
+    max: 10
+  uf4:
+    min: 1
+    max: 10
+  uf5:
+    min: 1
+    max: 10
+  uf6:
+    min: 1
+    max: 10
+  uf7:
+    min: 1
+    max: 10
+  
