@@ -1,13 +1,4 @@
-## Script usage for PlaFRIM
-
-Use script ``start.sh`` to start multi-nodes tasks.\
-Usage:
-```bash
-sbatch --nodes=? ./start.sh {your_script}.py
-```
-By default, the script will use every GPU on every node, and start one process per gpu.
-
-## For Jean-Zay
+## Start on Jean-Zay
 
 I recommend allocating a node in interactive mode !
 Then, you can use :
@@ -28,7 +19,7 @@ pipe = Pipeline(model, sample)
 y, loss = pipe(inputs, targets, loss_fn)
 ```
 
-Note that ``sample`` is only necessary if you use automatic partitioning, as it is used for profiling.\
+Note that ``sample`` is only necessary if you use automatic partitioning, as it is used for profiling. Also, it is not used on processes other than the first one of the pipeline.\
 There are several arguments to modify its behaviour :
 - ``placement`` specifies the rank of each model block.
 - ``partition`` can be set to ``None`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device.
