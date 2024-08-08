@@ -55,12 +55,9 @@ def get_inputs_outputs(parts):
     inputs = {i: set() for i in range(len(parts))}
     outputs = {i: set() for i in range(len(parts))}
 
-    def find_idx(node):
-        for i, p in enumerate(parts):
-            if node in p:
-                return i
-
-    for i, part in enumerate(parts):
+    i = len(parts)
+    for part in reversed(parts):
+        i -= 1
         for node in part:
             if node.op == "placeholder":
                 inputs[i].add(node.target)
@@ -71,9 +68,11 @@ def get_inputs_outputs(parts):
                 part.remove(node)
                 continue
             for dep in node.all_input_nodes:
-                if dep not in part:
+                if dep not in part and dep.name not in inputs[i]:
                     inputs[i].add(dep.name)
-                    outputs[find_idx(dep)].add(dep.name)
+                    if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
+                        raise Exception(f'Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}.')
+                    outputs[i - 1].add(dep.name)
                     
     # Fix empty parts                    
     for i, part in enumerate(parts):     
@@ -164,9 +163,6 @@ def partition_graph(model, n, sample, mode = "default"):
         parts.append([])
         
     inputs, outputs = get_inputs_outputs(parts)
-
-    while len(parts) != n:
-        parts.append([])
         
     blocks = []
     for i, p in enumerate(parts):

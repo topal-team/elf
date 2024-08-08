@@ -42,10 +42,12 @@ def compare_partitioners(model, sample):
         with TimerCPU() as timer:
             parts = partitioner(trace, times, memories, n)
         print(f'\tTime taken to partition  : {timer.time():.3f}s')
+        while len(parts) != n:
+            parts.append([])
         
-        while len(parts) != n: parts.append([])
-
         inputs, outputs = get_inputs_outputs(parts)
+        for p in inputs:
+            print(f'Part {p} signature : {inputs[p]} -> {outputs[p]}')
 
         estimated_times = [sum(np.median(times[node.name]) for node in p) for p in parts]
         memories_used = [sum([memories[o] for o in out]) / (2<<20) for out in outputs.values()]
@@ -91,7 +93,7 @@ if __name__ == '__main__':
             from settings import model, inputs
             sample = inputs
         case 'tf':
-            model = SimpleTransformer(200, 128, 4)
+            model = SimpleTransformer(200, 128, 8)
             sample = model.get_sample(16)
         case 'cnn':
             model = SimpleCNN()

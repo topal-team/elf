@@ -69,6 +69,10 @@ def split_graph_constrained(graph, times, memories, n=3):
     current_part = n - 1
     current_time = 0
     for node in reversed(nodes):
+        if current_time > target_time and len(needed_inputs) <= 1:
+            current_part -= 1
+            current_time = 0
+            needed_inputs = []
         parts[current_part].insert(0, node)
         current_time += np.median(times.get(node.name, 0))
         for dep in node.all_input_nodes:
@@ -76,8 +80,8 @@ def split_graph_constrained(graph, times, memories, n=3):
                 needed_inputs.append(dep.name)
         if node.name in needed_inputs:
             needed_inputs.remove(node.name)
-        if current_time > target_time and len(needed_inputs) <= 1:
-            current_part -= 1
-            current_time = 0
-            
+
+    # Fill the pipeline with identity functions to match number of parts    
+    # while current_part >= 0:
+
     return parts
