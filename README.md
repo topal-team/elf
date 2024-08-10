@@ -40,7 +40,7 @@ The options can be anything that modifies the behaviour of the operation, as lon
 
 Different partition scheme are available. All of them rely on ``torch.fx.symbolic_trace``, so if your model cannot be traced properly you will probably have to partition it yourself.
 The different partition modes are:
-- ``default``: Naive graph partition that tries to balance computation times for each part
+- ``naive``: Naive graph partition that tries to balance computation times for each part
 - ``constrained``: Same as default, but with a hard constraint on each part to have exactly 1 input tensor and 1 output tensor
 - ``metis``: Call [METIS](http://glaros.dtc.umn.edu/gkhome/metis/metis/overview) to optimize the partition. Needs ``gpmetis`` to be installed. Currently has some known issues of cycles.
 - ``dagP``: Call [dagP](https://github.com/GT-TDAlab/dagP/) to partition. Needs ``rMLGP`` installed. 
