@@ -91,7 +91,7 @@ def get_inputs_outputs(parts):
 def get_inputs_outputs_single(part):
     '''
     Get the input/output nodes of a single part from the graph
-    Removes inputs/outputs nodes of each part to merge them into 2 nodes
+    Removes inputs/outputs nodes of each part. They should be added back later.
     Useful for already splitted graphs
 
     :param part: one part of a partitioned model
@@ -111,7 +111,7 @@ def get_inputs_outputs_single(part):
             part.remove(node)
     return part, inputs, outputs
 
-def partition_graph(model, n, sample, mode = "default"):
+def partition_graph(model, n, sample, mode = "naive"):
     '''
     Splits a graph into n parts of roughly equal time.
 
@@ -123,7 +123,7 @@ def partition_graph(model, n, sample, mode = "default"):
     :type sample: Tensor
     :param mode: Different modes are available:
 
-        - default: does not take into account memory, no constraint on the number of inputs/outputs
+        - naive: does not take into account memory, no constraint on the number of inputs/outputs
         - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
         - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
         - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
@@ -143,7 +143,7 @@ def partition_graph(model, n, sample, mode = "default"):
     sample = sample.to(device)
     times, memories = profile_operations(trace, sample)
 
-    if mode == "default":
+    if mode == "naive":
         parts = split_graph(trace, times, memories, n)
     elif mode == "constrained":
         parts = split_graph_constrained(trace, times, memories, n)
@@ -154,7 +154,7 @@ def partition_graph(model, n, sample, mode = "default"):
     else:
         raise Exception("Unknown graph partitioning mode : {mode}.\n\
                         Available modes:\n\t\
-                        - default: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
+                        - naive: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
                         - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor\n\t\
                         - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
                         - dagP: like METIS, but uses dagP to enforce acyclicity of partition.")

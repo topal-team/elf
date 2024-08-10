@@ -68,27 +68,38 @@ class FakeWorker():
         return self.done
 
 @pytest.mark.single
-@pytest.mark.skip("not up to date")
 def test_block():
     device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
 
-    model = nn.Linear(2, 1, bias = False)
+    class AdaptedLinear(nn.Linear):
+        def __init__(self, *args, **kwargs):
+            super(AdaptedLinear, self).__init__(*args, **kwargs)
+
+        def forward(self, input):
+            return {
+                'output': super().forward(input)
+            }
+        
+    input_var = "input"
+    output_var = "output"
+        
+    model = AdaptedLinear(2, 1, bias = False)
 
     # Test pipe links
-    block = PipelineBlock(model, id_ = 0, placement = [0, 2])
+    block = PipelineBlock(model, id_ = 0, placement = [0, 2], inputs = [input_var], outputs = [output_var])
 
     assert block.id == 0
     assert block.previous is None
     assert block.next == 2
     assert block.rank == 0
 
-    block = PipelineBlock(model, id_ = 1, placement = [1, 2])
+    block = PipelineBlock(model, id_ = 1, placement = [1, 2], inputs = [input_var], outputs = [output_var])
     assert block.id == 1
     assert block.previous == 1
     assert block.next is None
     assert block.rank == 2
 
-    block = PipelineBlock(model, id_ = 1, placement = [2, 1, 0])
+    block = PipelineBlock(model, id_ = 1, placement = [2, 1, 0], inputs = [input_var], outputs = [output_var])
     assert block.id == 1
     assert block.previous == 2
     assert block.next == 0
@@ -96,29 +107,30 @@ def test_block():
 
     # Test forward pass
     block.model.weight = nn.Parameter(torch.tensor([3., -1.], device = device))
-    assert len(block.inputs) == 0
-    inputs = torch.tensor([2., 4.], device = device)
-    block.inputs.append((FakeWorker(True), inputs))
+    assert len(block.inputs_to_forward) == 0
+    inputs = {input_var: [FakeWorker(True), torch.tensor([2., 4.], device = device)]}
+    block.inputs_to_forward.append(inputs)
 
     block.forward()
 
     expected_result = torch.tensor([2.], device = device)
-    assert torch.allclose(block.activations[0], expected_result)
-    assert torch.allclose(block.act_to_send[0], expected_result)
-    assert len(block.inputs) == 0
+    assert torch.allclose(block.act_to_keep[0][output_var], expected_result)
+    assert torch.allclose(block.act_to_send[0][output_var], expected_result)
+    assert len(block.inputs_to_forward) == 0
     assert len(block.inputs_to_keep) == 1
 
     # Test backward pass
-    block.grads.append((FakeWorker(True), torch.tensor(3., device = device)))
+    grads = {output_var: [FakeWorker(True), torch.tensor(3., device = device)]}
+    block.grads_to_backward.append(grads)
 
     block.backward()
     expected_grads_weights = torch.tensor([6., 12.], device = device)
     expected_grads_inputs = torch.tensor([9., -3.], device = device)
 
     assert torch.allclose(block.model.weight.grad.data, expected_grads_weights)
-    assert torch.allclose(inputs.grad.data, expected_grads_inputs)
+    assert torch.allclose(inputs[input_var].grad.data, expected_grads_inputs)
 
-    assert len(block.activations) == 0
+    assert len(block.act_to_keep) == 0
     assert len(block.inputs_to_keep) == 0
     assert len(block.grads_to_send) == 1
 
@@ -143,20 +155,20 @@ def test_block_multi(init_dist):
 
         block.model.weight = nn.Parameter(torch.tensor([[2.0], [2.0]], device = local_rank))
 
-        assert len(block.inputs) == 0
+        assert len(block.inputs_to_forward) == 0
         w = block.recv_forward(1) # Should do nothing as block has no previous
         assert w is None
-        assert len(block.inputs) == 0
-        block.inputs.append((None, torch.ones((2, 1), device = local_rank)))
+        assert len(block.inputs_to_forward) == 0
+        block.inputs_to_forward.append((None, torch.ones((2, 1), device = local_rank)))
 
-        assert len(block.activations) == 0
+        assert len(block.act_to_send) == 0
         block.forward()
-        assert len(block.activations) == 1
+        assert len(block.act_to_keep) == 1
         assert len(block.act_to_send) == 1
-        assert len(block.inputs) == 0
+        assert len(block.inputs_to_forward) == 0
         assert len(block.inputs_to_keep) == 1
 
-        assert torch.allclose(block.activations[0], torch.full((2, 2), 2.0, device = local_rank))
+        assert torch.allclose(block.act_to_keep[0], torch.full((2, 2), 2.0, device = local_rank))
 
         w = block.send_forward() # Should be matched by a recv_forward
         assert w is None
@@ -168,8 +180,8 @@ def test_block_multi(init_dist):
 
         y = block.backward()
         assert y is None # only the last block should return its result
-        assert len(block.grads) == 0
-        assert len(block.activations) == 0
+        assert len(block.grads_to_backward) == 0
+        assert len(block.act_to_keep) == 0
         assert len(block.inputs_to_keep) == 0
         assert len(block.grads_to_send) == 1
 
@@ -182,33 +194,33 @@ def test_block_multi(init_dist):
 
         block.model.weight = nn.Parameter(torch.tensor([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]], device = local_rank))
 
-        assert len(block.inputs) == 0
+        assert len(block.inputs_to_forward) == 0
 
         w = block.recv_forward(1)
         assert w is None
-        assert len(block.inputs) == 1
+        assert len(block.inputs_to_forward) == 1
 
-        assert len(block.activations) == 0
+        assert len(block.act_to_send) == 0
         y = block.forward()
-        assert len(block.activations) == 1
+        assert len(block.act_to_keep) == 1
         assert torch.allclose(y, torch.full((2, 3), 6.0, device = local_rank))
 
         assert len(block.act_to_send) == 0 # no next block, nothing to send
         w = block.send_forward() # does nothing
         assert w is None
-        assert len(block.activations) == 1
+        assert len(block.act_to_keep) == 1
         assert len(block.act_to_send) == 0
 
         w = block.recv_backward(1) # does nothing either
         assert w is None
-        assert len(block.grads) == 0
-        assert len(block.activations) == 1
+        assert len(block.grads_to_backward) == 0
+        assert len(block.act_to_keep) == 1
 
-        block.grads.append((None, torch.ones((2, 3), device = local_rank)))
+        block.grads_to_backward.append((None, torch.ones((2, 3), device = local_rank)))
 
         block.backward()
-        assert len(block.grads) == 0
-        assert len(block.activations) == 0
+        assert len(block.grads_to_backward) == 0
+        assert len(block.act_to_keep) == 0
         assert len(block.inputs_to_keep) == 0
         assert len(block.grads_to_send) == 1
 
@@ -316,11 +328,11 @@ def test_pipe_correctness_multi(init_dist):
 
     # Everything should be cleared after a full pass
     for b in pipe.blocks:
-        assert len(b.inputs) == 0
+        assert len(b.inputs_to_forward) == 0
         assert len(b.inputs_to_keep) == 0
-        assert len(b.activations) == 0
+        assert len(b.act_to_keep) == 0
         assert len(b.act_to_send) == 0
-        assert len(b.grads) == 0
+        assert len(b.grads_to_backward) == 0
     
     all_weights = [torch.empty_like(model.weight) for _ in range(world_size)] if rank == 0 else None
     all_grads = [torch.empty_like(model.weight) for _ in range(world_size)] if rank == 0 else None

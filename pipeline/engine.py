@@ -59,7 +59,7 @@ class Engine():
         self.comms.clear()
         stream.synchronize()
 
-    def train_step(self, batch, target, loss_fn, schedule, split_size, profile = False):
+    def train_step(self, batch, target, loss_fn, schedule, mb_sizes, profile = False):
         '''
         Executes a schedule on a batch of data
 
@@ -90,12 +90,12 @@ class Engine():
 
         :rtype: Tensor, Tensor, Dict[float]
         '''
-        splits = iter(batch.split(split_size, dim=0))
+        split_batches = [tensor.split(mb_sizes, dim = 0) for tensor in batch]
+        microbatches = iter(zip(*split_batches))
 
         result = []
         losses = []
-        i = 0
-        curr = 0
+        current_target = (0, 0) # micro batch id, position in target tensor
 
         dist.barrier() # useful for timing, but it probably slows down the execution a bit
         pipe_start = time.time()
@@ -120,43 +120,46 @@ class Engine():
                         
                 case OperationType.BACKWARD:
                     if block.next is None:
-                        nexti = curr + split_size[i]
+                        i, start = current_target
+                        end = start + mb_sizes[i]
                         with Timer() as timer:
-                            loss = compute_loss(block, result[i], target[curr:nexti], loss_fn)
+                            loss = compute_loss(block, result[i], target[start:end], loss_fn)
                         block.compute_time += timer.time()
                         losses.append(loss)
                         logger.debug(f'{block} - Computed loss = {loss}')
-                        i += 1
-                        curr = nexti
+                        current_target = (i + 1, end)
 
                     self._run_comms()
                     block.backward(**op.options)
                     
                 case OperationType.SEND_FORWARD:
                     if (op.options.get("dst") or block.next) == block.rank:
+                        # The next block is on the same device ; we want to bypass p2p comms
                         next_block = self.id_to_block.get(str(op.block_id + 1))
-                        key = list(next_block.params)[0]
                         next_block.inputs.append({key: [None, value.detach()] for key, value in block.act_to_send.popleft().items()})
+
                     if comm := block.send_forward(**op.options):
                         self.comms.extend(comm)
                         
                 case OperationType.SEND_BACKWARD:
                     if (op.options.get("src") or block.previous) == block.rank:
+                        # The previous block is on the same device ; we want to bypass p2p comms
                         next_block = self.id_to_block.get(str(op.block_id - 1))
-                        key = list(next_block.outputs)[0]
-                        next_block.grads.append({key: [None, value.detach()] for key, value in block.grads_to_send.popleft().items()})
+                        next_block.grads_to_backward.append({key: [None, value.detach()] for key, value in block.grads_to_send.popleft().items()})
+
                     if comm := block.send_backward(**op.options):
                         self.comms.extend(comm)
                         
                 case OperationType.RECV_FORWARD:
                     if block.previous is None:
-                        key = list(block.params)[0] # TODO: multiple inputs for first block
-                        block.inputs.append({key: [None, next(splits)]})
-                    if comm := block.recv_forward(split_size[op.mb_id], **op.options):
+                        microbatch = next(microbatches)
+                        block.inputs_to_forward.append({key: [None, value] for key, value in zip(block.inputs, microbatch)})
+
+                    if comm := block.recv_forward(mb_sizes[op.mb_id], **op.options):
                         self.comms.extend(comm)
                         
                 case OperationType.RECV_BACKWARD:
-                    if comm := block.recv_backward(split_size[op.mb_id], **op.options):
+                    if comm := block.recv_backward(mb_sizes[op.mb_id], **op.options):
                         self.comms.extend(comm)
                         
                 case _:
@@ -207,5 +210,5 @@ def compute_loss(block, output, target, loss_fn):
     loss = loss_fn(output, target, reduction = "sum")
     loss.backward()
     key = list(block.outputs)[0] # TODO: multiple outputs
-    block.grads.append({key: [None, output.grad.data]})
+    block.grads_to_backward.append({key: [None, output.grad.data]})
     return loss

@@ -19,7 +19,7 @@ class PipelineBlock():
     Pipelines are made up of sequential blocks, numbered [0..n]
     Each block is one layer or group of contiguous layers placed on one device
     '''
-    def __init__(self, model, id_, placement, params, outputs, dp = 1):
+    def __init__(self, model, id_, placement, inputs, outputs, dp = 1):
         '''
         :param model: layer / group of layers that will perform the computation
         :type model: nn.Module
@@ -27,8 +27,8 @@ class PipelineBlock():
         :type id_: int
         :param placement: mapping of each id on a device
         :type placement: List[int]
-        :param params: name of variables taken as input by the block
-        :type params: List[str]
+        :param inputs: name of variables taken as input by the block
+        :type inputs: List[str]
         :param outputs: name of variables returned by the block
         :type outputs: List[str]
         '''
@@ -46,11 +46,14 @@ class PipelineBlock():
         self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
         # Queues of tensors to process
-        self.inputs = deque() # Waiting for forward
-        self.activations = deque() # Kept for backward
-        self.grads = deque() # Waiting for backward
+        # Structure of one element is {variable1: [Work, Tensor], variable2: [Work, Tensor], ..}
+        self.inputs_to_forward = deque() # Waiting for forward
+        self.grads_to_backward = deque() # Waiting for backward
+
+        # Structure of one element is {variable1: Tensor, variable2: Tensor, ..}
         self.act_to_send = deque() # Sent to next block
         self.grads_to_send = deque() # Sent to previous block
+        self.act_to_keep = deque() # Kept for backward
         self.inputs_to_keep = deque() # Kept for backward
 
         # Ranks where the previous/next blocks in the model are placed
@@ -62,7 +65,7 @@ class PipelineBlock():
 
         self.compute_time = 0 # used to measure idle time
 
-        self.params = sorted(params) # name of input variables
+        self.inputs = sorted(inputs) # name of input variables
         self.outputs = sorted(outputs) # name of output variables
         # sorted alphabetically to make sure the order is consistent across devices
         # note: can this order matter ? can it be faster to communicate in some order depending on the tensor shapes/sizes ?
@@ -81,8 +84,8 @@ class PipelineBlock():
         logger.debug(f'{self} - Computing one forward with options {options}')
         
         # Wait for all communications to finish
-        x = self.inputs.popleft()
-        for key in self.params:
+        x = self.inputs_to_forward.popleft()
+        for key in self.inputs:
             work, i = x[key]
             if work is not None: work.wait()
             x[key] = i
@@ -96,11 +99,11 @@ class PipelineBlock():
             elif options.get('offload'):
                 with activations_offloading():
                     y = self.model(**x)
-                self.activations.append(y)
+                self.act_to_keep.append(y)
                 # x = x.cpu()
             else:
                 y = self.model(**x)
-                self.activations.append(y)
+                self.act_to_keep.append(y)
                 
         self.compute_time += timer.time()
            
@@ -126,13 +129,13 @@ class PipelineBlock():
                 act = self.model(**x)
             self.compute_time += timer.time()
         elif options.get('offload'):
-            act = self.activations.popleft().cuda()
+            act = self.act_to_keep.popleft().cuda()
             # x = x.cuda()
         else:
-            act = self.activations.popleft()
+            act = self.act_to_keep.popleft()
             
         # Wait for all communications to finish
-        grads = self.grads.popleft()
+        grads = self.grads_to_backward.popleft()
         for key in self.outputs:
             work, g = grads[key]
             if work is not None: work.wait()
@@ -197,26 +200,32 @@ class PipelineBlock():
         :rtype: List[dist.P2POp] or None
         '''
         src = options.get("src") or self.previous
-        if options.get("offload") and len(self.activations) > 0:
+        if options.get("offload") and len(self.act_to_keep) > 0:
             # Free memory just before allocating the next buffer
             activations_offloading().wait_for_offloading()
             
         if src is None or src == self.rank: return
         
-        buffers = {key: [None, self.metadata[key].get_buffer(mb_size)] for key in self.params}
+        buffers = {}
+        for key in self.inputs:
+            buffers[key] = [None, self.metadata[key].get_buffer(mb_size)]
 
         if options.get("batch"):
-            self.inputs.append(buffers)
-            return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.params]
+            # This communication needs to be batched ;
+            # instead of executing it, we instanciate an object with the right setup and return it
+            self.inputs_to_forward.append(buffers)
+            return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.inputs]
+        
         else:
             logger.debug(f'{self} - Starting to receive activations with shape {self.metadata} from layer {self.id - 1} on rank {src}')
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
-                for key in self.params:
+                for key in self.inputs:
                     work = dist.irecv(buffers[key][1], src)
                     buffers[key][0] = work
-            torch.cuda.current_stream().wait_stream(stream)
-            self.inputs.append(buffers)
+
+            torch.cuda.current_stream().wait_stream(stream) # needed ?
+            self.inputs_to_forward.append(buffers)
 
     def recv_backward(self, mb_size, **options):
         '''
@@ -236,11 +245,16 @@ class PipelineBlock():
 
         if src is None or src == self.rank: return
 
-        buffers = {key: [None, self.out_metadata[key].get_buffer(mb_size)] for key in self.outputs}
+        buffers = {}
+        for key in self.outputs:
+            buffers[key] = [None, self.out_metadata[key].get_buffer(mb_size)]
 
         if options.get("batch"):
-            self.grads.append(buffers)
+            # This communication needs to be batched ;
+            # instead of executing it, we instanciate an object with the right setup and return it
+            self.grads_to_backward.append(buffers)
             return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.outputs]
+        
         else:
             logger.debug(f'{self} - Starting to receive gradients with shape {self.out_metadata} from layer {self.id + 1} on rank {src}')
             stream = torch.cuda.Stream()
@@ -248,8 +262,9 @@ class PipelineBlock():
                 for key in self.outputs:
                     work = dist.irecv(buffers[key][1], src)
                     buffers[key][0] = work
-            torch.cuda.current_stream().wait_stream(stream)
-            self.grads.append(buffers)
+
+            torch.cuda.current_stream().wait_stream(stream) # needed ?
+            self.grads_to_backward.append(buffers)
     
     def register_metadata(self):
         '''
@@ -258,22 +273,26 @@ class PipelineBlock():
         .. warning::
             We assume that every micro batch has the same shape, except for the micro batch size
         '''
+        # Receive metadata of inputs
         if self.previous is not None and self.previous != self.rank:
-            for key in self.params:
+            for key in self.inputs:
                 metadata = torch.empty(TensorMetadata.MAX_SIZE, device = self.device)
                 dist.recv(metadata, src = self.previous)
                 self.metadata[key] = TensorMetadata.from_tensor(metadata)
             
         # We perform a forward pass with dummy data to get the output shapes (except for batch size) of all blocks
-        dummy = {key: self.metadata[key].get_buffer(1) for key in self.params}
-        if 'idx' in dummy:
-            dummy['idx'][:] = 1 # avoid problems with embeddings :)
+        dummy = {key: self.metadata[key].get_buffer(1) for key in self.inputs}
+        for buffer in dummy.values():
+            if buffer.dtype == torch.int64:
+                buffer[:] = 1 # avoid problems with embeddings that can go out of vocab size :)
         y = self.model(**dummy)
         
-        self.out_metadata = {key: TensorMetadata(y[key].squeeze(0)) for key in self.outputs} # do not include batch size
+        # save shapes except batch size
+        self.out_metadata = {key: TensorMetadata(y[key].squeeze(0)) for key in self.outputs} 
 
-        logger.debug(f'{self} - Registered metadata { {k: v.shape for k,v in self.metadata.items()} } => { {k: v.shape for k,v in self.out_metadata.items()} }')
+        logger.debug(f'{self} - Registered metadata {self.metadata} => {self.out_metadata}')
         
+        # Send metadata to next block
         if self.next is not None and self.next != self.rank:
             for key in self.outputs:
                 dist.send(self.out_metadata[key].to_tensor(), dst = self.next)
@@ -282,14 +301,14 @@ class Pipeline():
     '''
     Model wrapper for pipelining that manages the pipeline setup
     '''
-    def __init__(self, model, sample, placement = "auto", partition = True, schedule = "afab"):
+    def __init__(self, model, sample, placement = "auto", partition = "naive", schedule = "afab"):
         '''
         :param model: the entire model to pipeline
         :type model: nn.Module
         :param placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
         :type placement: List[int] or str
-        :param partition: if your model is already partitioned, set to False. Otherwise set to True (default), which will try to create balanced blocks according to their number of parameters
-        :type partition: boolean
+        :param partition: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = naive), which will try to create balanced blocks according to their number of parameters
+        :type partition: boolean or str
         :param schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b"), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
         :type schedule: str or function(List[int], int, **kwargs) -> List[Operation]
         '''
@@ -299,16 +318,13 @@ class Pipeline():
         rank = dist.get_rank()
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
-        if partition:
-            if shutil.which("rMLGP"):
-                mode = "dagP"
-            elif shutil.which("gpmetis"):
-                mode = "metis"
-            else:
-                if rank == 0: logger.info(f'METIS or dagP not found; relying on manual graph partitioning. Consider installing METIS as it is more efficient: https://github.com/KarypisLab/METIS')
-                mode = "default"
-            model, inputs, outputs = share_partition(model, placement, sample, mode)
-        else:
+        if isinstance(partition, str):
+            if rank == 0:
+                assert partition in ["naive, constrained, dagP, metis"], "Partition strategies available are : [naive, constrained, dagP, metis]"
+                if partition == "dagP": assert shutil.which("rMLGP"), "dagP chosen as partition strategy, but can't find it. Please make sure it is installed and findable in the PATH."
+                if partition == "dagP": assert shutil.which("gpmetis"), "METIS chosen as partition strategy, but can't find it. Please make sure it is installed and findable in the PATH."
+            model, inputs, outputs = share_partition(model, placement, sample, partition)
+        elif not partition:
             inputs = {}
             outputs = {}
             if isinstance(model, torch.nn.Module): model = [model]
@@ -317,6 +333,8 @@ class Pipeline():
                 trace = torch.fx.symbolic_trace(model[i])
                 new, inputs[ids[i]], outputs[ids[i]] = get_inputs_outputs_single(list(trace.graph.nodes))
                 model[i] = create_subgraph(trace, new, inputs[ids[i]], outputs[ids[i]])
+        else:
+            raise Exception(f"Partition strategy should be either False for pre-partitioned model, or a string among [naive, constrained, dagP, metis].")
 
         match schedule.lower():
             case 'afab':
@@ -349,14 +367,15 @@ class Pipeline():
         # Split size can be an int or list of ints ; make it always a list
         if isinstance(split_size, int):
             n_micro_batches = batch.size(0) // split_size
-            s = [split_size for _ in range(n_micro_batches)]
+            mb_sizes = [split_size for _ in range(n_micro_batches)]
             if batch.size(0) % split_size != 0:
-                s.append(batch.size(0) % split_size)
-            split_size = s
+                mb_sizes.append(batch.size(0) % split_size)
         else:
             assert sum(split_size) == batch.size(0), f'Splits do not cover the entire batch'
+            mb_sizes = split_size
             n_micro_batches = len(split_size)
             
+        # TODO: the schedule can have a slightly different length with all_reduce etc
         if len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2) or options != self.options:
             # Different number of micro batches ; we have to recompute the schedule
             self.schedule = self.scheduler(self.placement, n_micro_batches, **options)
@@ -373,11 +392,16 @@ class Pipeline():
             # Remove all operations that are not ours
             ids = list(map(lambda b: b.id, self.blocks)) # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
             self.schedule = list(filter(lambda op: op.block_id in ids, self.schedule))
+
+        # We expect a list of arguments, not a single tensor
+        if isinstance(batch, torch.Tensor):
+            batch = [batch]
             
         # Full forward pass to register metadata used to allocate tensors later
         if self.blocks[0].previous is None:
-            sample = batch
-            self.blocks[0].metadata = {k: TensorMetadata(v) for k,v in zip(self.blocks[0].params, sample)}
+            # Take all
+            for k,v in zip(self.blocks[0].inputs, batch):
+                self.blocks[0].metadata[k] = TensorMetadata(v[0]) # Don't register batch size
 
         for i in range(len(self.blocks)):
             b = self.blocks[i]
@@ -389,12 +413,13 @@ class Pipeline():
             logger.debug(f'{b} - Registered metadata {b.metadata} -> {b.out_metadata}')
 
         # Execute the schedule
-        result, losses, times = self.engine.train_step(batch, target, loss_fn, self.schedule, split_size, profile)
+        result, losses, times = self.engine.train_step(batch, target, loss_fn, self.schedule, mb_sizes, profile)
 
         self.times = times
         # Merge back the micro-batches outputs/losses into one batch
         if len(result) != 0:
             return torch.cat(result, dim = 0), torch.tensor(losses, device = torch.cuda.current_device()).sum(dim = 0, keepdim = True)
+        
         else: return None, None
 
     def parameters(self):
@@ -410,8 +435,8 @@ def create_pipeline(layers, placement, inputs, outputs):
     :type layers: List[nn.Module]
     :param placement: list of device ranks
     :type placement: List[int]
-    :param params: name of variables taken as input by each block
-    :type params: List[List[str]]
+    :param inputs: name of variables taken as input by each block
+    :type inputs: List[List[str]]
     :param outputs: name of variables returned by each block
     :type outputs: List[List[str]]
 
@@ -423,7 +448,7 @@ def create_pipeline(layers, placement, inputs, outputs):
     ids = [i for i in range(len(placement)) if placement[i] == rank]
     blocks = [PipelineBlock(layer, idx, placement, inputs[idx], outputs[idx]) for (idx, layer) in list(zip(ids, layers))]
     for b in blocks:
-        logger.info(f'{b} : inputs = {b.params}, outputs = {b.outputs}')
+        logger.info(f'{b} : inputs = {b.inputs}, outputs = {b.outputs}')
 
     return blocks
 
@@ -439,7 +464,7 @@ def share_partition(model, placement, sample, mode):
     :type sample: Tensor
     :param mode: partitioner to use ; available options are :
     
-        - "default": naive
+        - "naive": simple load balancing algorithm
         - "constrained": naive with less communication
         - "metis": use METIS
         - "dagP": use dagP / rMLGP
