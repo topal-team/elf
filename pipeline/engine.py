@@ -5,7 +5,6 @@ Execution of the pipeline
 import torch
 import torch.distributed as dist
 import time
-import torch.distributed as dist
 from .schedule import OperationType
 from .utils import Timer
 

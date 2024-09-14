@@ -21,10 +21,10 @@ def to_device(x, device):
     '''
     if isinstance(x, torch.Tensor) or isinstance(x, torch.nn.Module):
         return x.to(device, non_blocking = True)
-    elif hasattr(x, '__iter__') and not isinstance(x, str):
-        return type(x)(to_device(item, device) for item in x)
     elif isinstance(x, dict):
         return {k: to_device(v, device) for k, v in x.items()}
+    elif hasattr(x, '__iter__') and not isinstance(x, (str, torch.fx.proxy.Proxy)):
+        return type(x)(to_device(item, device) for item in x)
     return x
 
 def get_memory(x):
@@ -40,10 +40,10 @@ def get_memory(x):
     '''
     if isinstance(x, torch.Tensor):
         return x.numel() * x.element_size()
-    elif hasattr(x, '__iter__') and not isinstance(x, str):
-        return sum([get_memory(v) for v in x])
     elif isinstance(x, dict):
         return sum([get_memory(v) for v in x.values()])
+    elif hasattr(x, '__iter__') and not isinstance(x, (str, torch.fx.proxy.Proxy)):
+        return sum([get_memory(v) for v in x])
     return 0
 
 def add_profiling_to_graph(graph_module, device, iters = 10):

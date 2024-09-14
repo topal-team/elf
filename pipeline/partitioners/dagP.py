@@ -3,6 +3,7 @@ Utils to partition a computation graph using dagP
 '''
 
 import os
+import shutil
 import tempfile
 import subprocess
 from .metis import read_metis, convert_fx
@@ -24,6 +25,7 @@ def split_graph_dagP(graph, times, memories, n):
     :return: ``n`` lists of nodes corresponding to each part
     :rtype: List[List[fx.Node]]
     '''
+    assert shutil.which("rMLGP"), "dagP chosen as partition strategy, but can't find it. Please make sure it is installed and findable in the PATH."
     graph = convert_fx(graph, times, memories)
     file = write_dagP(graph)
     execute_dagP(file, n)

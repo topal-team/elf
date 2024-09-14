@@ -139,7 +139,8 @@ def partition_graph(model, n, sample, mode = "naive"):
     :rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
     '''
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    trace = torch.fx.symbolic_trace(model.to(device))
+    trace = torch.fx.symbolic_trace(model)
+    logger.info(f'Traced module has {len(trace.graph.nodes)} nodes')
     sample = sample.to(device)
     times, memories = profile_operations(trace, sample)
 

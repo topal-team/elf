@@ -4,7 +4,6 @@ Core pipeline objects
 
 import os
 import torch
-import shutil
 import torch.distributed as dist
 from .schedule import *
 from .engine import Engine
@@ -301,13 +300,13 @@ class Pipeline():
     '''
     Model wrapper for pipelining that manages the pipeline setup
     '''
-    def __init__(self, model, sample, placement = "auto", partition = "naive", schedule = "afab"):
+    def __init__(self, model, sample, placement = "auto", partition = "metis", schedule = "afab"):
         '''
         :param model: the entire model to pipeline
         :type model: nn.Module
         :param placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
         :type placement: List[int] or str
-        :param partition: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = naive), which will try to create balanced blocks according to their number of parameters
+        :param partition: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their number of parameters
         :type partition: boolean or str
         :param schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b"), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
         :type schedule: str or function(List[int], int, **kwargs) -> List[Operation]
@@ -319,10 +318,6 @@ class Pipeline():
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if isinstance(partition, str):
-            if rank == 0:
-                assert partition in ["naive, constrained, dagP, metis"], "Partition strategies available are : [naive, constrained, dagP, metis]"
-                if partition == "dagP": assert shutil.which("rMLGP"), "dagP chosen as partition strategy, but can't find it. Please make sure it is installed and findable in the PATH."
-                if partition == "dagP": assert shutil.which("gpmetis"), "METIS chosen as partition strategy, but can't find it. Please make sure it is installed and findable in the PATH."
             model, inputs, outputs = share_partition(model, placement, sample, partition)
         elif not partition:
             inputs = {}
@@ -446,7 +441,7 @@ def create_pipeline(layers, placement, inputs, outputs):
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
-    blocks = [PipelineBlock(layer, idx, placement, inputs[idx], outputs[idx]) for (idx, layer) in list(zip(ids, layers))]
+    blocks = [PipelineBlock(layer, idx, placement, inputs[i], outputs[i]) for i, (idx, layer) in enumerate(list(zip(ids, layers)))]
     for b in blocks:
         logger.info(f'{b} : inputs = {b.inputs}, outputs = {b.outputs}')
 
@@ -481,16 +476,19 @@ def share_partition(model, placement, sample, mode):
     :rtype: List[nn.Module], List[List[str]], List[List[str]]
     '''
     rank = dist.get_rank()
+    
     # Rank 0 profiles & partition the graph, then shares it to everyone
     # TODO: what if devices are heterogenous ? how to profile correctly ?
+    input_list = None
     if rank == 0:
+        assert mode in ["naive", "constrained", "dagP", "metis"], "Partition strategies available are : [naive, constrained, dagP, metis]"
+
         blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode = mode)
         partition = list(zip(blocks, inputs.values(), outputs.values()))
         input_list = [[] for _ in range(max(placement) + 1)]
         for i, p in enumerate(placement):
             input_list[p].append(partition[i])
-    else:
-        input_list = None
+
     output_list = [None]
     dist.scatter_object_list(output_list, input_list, src = 0)
     model, inputs, outputs = ([m.cuda() for m, _, _ in output_list[0]],
