@@ -285,9 +285,13 @@ class PipelineBlock():
             if buffer.dtype == torch.int64:
                 buffer[:] = 1 # avoid problems with embeddings that can go out of vocab size :)
         y = self.model(**dummy)
-        
-        # save shapes except batch size
-        self.out_metadata = {key: TensorMetadata(y[key].squeeze(0)) for key in self.outputs} 
+
+        for key in self.outputs:
+            if not isinstance(y[key], torch.Tensor):
+                raise RuntimeError(f"Non-tensor output from block {self} : key {key} has type {type(y[key])}.")
+            
+            # save shapes except batch size
+            self.out_metadata[key] = TensorMetadata(y[key].squeeze(0))
 
         logger.debug(f'{self} - Registered metadata {self.metadata} => {self.out_metadata}')
         
@@ -318,16 +322,9 @@ class Pipeline():
         if placement == "auto":
             placement = list(range(int(os.environ["WORLD_SIZE"])))
         if isinstance(partition, str):
-            model, inputs, outputs = share_partition(model, placement, sample, partition)
+            model, inputs, outputs = shared_partition(model, placement, sample, partition)
         elif not partition:
-            inputs = {}
-            outputs = {}
-            if isinstance(model, torch.nn.Module): model = [model]
-            ids = [i for i in range(len(placement)) if placement[i] == rank]
-            for i in range(len(ids)):
-                trace = torch.fx.symbolic_trace(model[i])
-                new, inputs[ids[i]], outputs[ids[i]] = get_inputs_outputs_single(list(trace.graph.nodes))
-                model[i] = create_subgraph(trace, new, inputs[ids[i]], outputs[ids[i]])
+            model, inputs, outputs = local_partition(model, placement)
         else:
             raise Exception(f"Partition strategy should be either False for pre-partitioned model, or a string among [naive, constrained, dagP, metis].")
 
@@ -441,13 +438,15 @@ def create_pipeline(layers, placement, inputs, outputs):
     rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else 'cpu'
 
     ids = [i for i in range(len(placement)) if placement[i] == rank]
-    blocks = [PipelineBlock(layer, idx, placement, inputs[i], outputs[i]) for i, (idx, layer) in enumerate(list(zip(ids, layers)))]
-    for b in blocks:
-        logger.info(f'{b} : inputs = {b.inputs}, outputs = {b.outputs}')
+    blocks = []
+    for i in range(len(layers)):
+        new_block = PipelineBlock(layers[i], ids[i], placement, inputs[i], outputs[i])
+        blocks.append(new_block)
+        logger.info(f'{new_block} : inputs = {new_block.inputs}, outputs = {new_block.outputs}')
 
     return blocks
 
-def share_partition(model, placement, sample, mode):
+def shared_partition(model, placement, sample, mode):
     '''
     Partitions a model according to a placement & mode, then shares it to every process to be consistent
 
@@ -494,4 +493,34 @@ def share_partition(model, placement, sample, mode):
     model, inputs, outputs = ([m.cuda() for m, _, _ in output_list[0]],
                               [i for _, i, _ in output_list[0]],
                               [o for _, _, o in output_list[0]])
+    return model, inputs, outputs
+
+def local_partition(model, placement):
+    '''
+    Partitions a pre-partitioned model locally for each process.
+
+    This function takes a model that has already been partitioned and identifies the model parts
+    assigned to the current rank, traces them, and extracts their inputs and outputs.
+
+    :param model: The pre-partitioned model. Can be a single nn.Module or a list of nn.Modules.
+    :type model: nn.Module or List[nn.Module]
+    :param placement: A list indicating the rank assignment for each part of the model.
+    :type placement: List[int]
+
+    :return: A tuple containing:
+        - The partitioned model parts for the current rank
+        - A list of inputs for each model part
+        - A list of outputs for each model part
+    :rtype: Tuple[List[nn.Module], List[List[str]], List[List[str]]]
+    '''
+    rank = dist.get_rank()
+    inputs = []
+    outputs = []
+    if isinstance(model, torch.nn.Module): model = [model]
+    ids = [i for i in range(len(placement)) if placement[i] == rank]
+    for i in range(len(ids)):
+        trace = torch.fx.symbolic_trace(model[i])
+        new, inputs[i], outputs[i] = get_inputs_outputs_single(list(trace.graph.nodes))
+        model[i] = create_subgraph(trace, new, inputs[i], outputs[i])
+
     return model, inputs, outputs
