@@ -158,6 +158,9 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
         # ...
         loss.backward() # all tensors are on GPU for backward
     
+    .. warning::
+        Activation offloading has some known issues that cause CPU memory to be overused.
+    
     '''
     # Singleton pattern
     _instance = None

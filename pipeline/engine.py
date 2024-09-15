@@ -169,7 +169,7 @@ class Engine():
 
         logger.debug(f'[Rank {self.rank}] - Finished execution !')
         
-        self._run_comms()
+        self._run_comms() # finish all comms
         torch.cuda.synchronize()
         cooldown_end = time.time()
         dist.barrier()
@@ -204,10 +204,17 @@ def compute_loss(block, output, target, loss_fn):
     :return: loss value
     :rtype: Tensor
     '''
+    if (len(block.outputs) != 1):
+        raise RuntimeError(f"Multiple outputs not supported yet for loss computation")
+
     output = output.detach()
     output.requires_grad = True
+
     loss = loss_fn(output, target, reduction = "sum")
     loss.backward()
-    key = list(block.outputs)[0] # TODO: multiple outputs
+    
+     # TODO: multiple outputs
+    key = list(block.outputs)[0]
     block.grads_to_backward.append({key: [None, output.grad.data]})
+
     return loss
