@@ -76,7 +76,6 @@ def compare_partitioners(model, sample):
 
 if __name__ == '__main__':
     parser = ArgumentParser(description = "Demo/Test of pipelined model")
-    parser.add_argument('--mode', choices=['default', 'constrained', 'metis', 'dagP'], default = 'default', required = False, help='partition mode')
     parser.add_argument('--log', choices=['debug', 'info', 'none'], default='info', required=False, help="logging level")
     parser.add_argument('--model', '-m', choices=["gpt", "tf", "cnn"], required=False, default="tf")
     args = parser.parse_args()
