@@ -1,87 +1,93 @@
 import torch
-import torch.nn as nn 
+import torch.nn as nn
+
 
 class SimpleCNN(nn.Module):
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
-        self.maxpool = nn.MaxPool2d(2)
-        self.relu = nn.ReLU(inplace = True)
-        self.avgpool = nn.AvgPool2d(7)
-        self.fc1 = nn.Linear(128 * 8 * 8, 256)
-        self.fc2 = nn.Linear(256, 10)
+	def __init__(self):
+		super(SimpleCNN, self).__init__()
+		self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, stride=1, padding=1)
+		self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
+		self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
+		self.maxpool = nn.MaxPool2d(2)
+		self.relu = nn.ReLU(inplace=True)
+		self.avgpool = nn.AvgPool2d(7)
+		self.fc1 = nn.Linear(128 * 8 * 8, 256)
+		self.fc2 = nn.Linear(256, 10)
 
-    def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.maxpool(x)
-        x = self.relu(self.conv2(x))
-        x = self.maxpool(x)
-        x = self.relu(self.conv3(x))
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+	def forward(self, x):
+		x = self.relu(self.conv1(x))
+		x = self.maxpool(x)
+		x = self.relu(self.conv2(x))
+		x = self.maxpool(x)
+		x = self.relu(self.conv3(x))
+		x = self.avgpool(x)
+		x = x.view(x.size(0), -1)
+		x = self.relu(self.fc1(x))
+		x = self.fc2(x)
+		return x
 
-    def get_sample(self, batch_size):
-        return torch.randn(batch_size, 3, 224, 224)
+	def get_sample(self, batch_size):
+		return torch.randn(batch_size, 3, 224, 224)
+
 
 class SimpleAttention(nn.Module):
-    def __init__(self, hidden_dim):
-        super(SimpleAttention, self).__init__()
-        self.hidden_dim = hidden_dim
-        
-        self.query = nn.Linear(hidden_dim, hidden_dim)
-        self.key = nn.Linear(hidden_dim, hidden_dim)
-        self.value = nn.Linear(hidden_dim, hidden_dim)
-        self.softmax = nn.Softmax(dim=-1)
+	def __init__(self, hidden_dim):
+		super(SimpleAttention, self).__init__()
+		self.hidden_dim = hidden_dim
 
-    def forward(self, inputs):
-        # Linear projections
-        Q = self.query(inputs)
-        K = self.key(inputs)
-        V = self.value(inputs)
+		self.query = nn.Linear(hidden_dim, hidden_dim)
+		self.key = nn.Linear(hidden_dim, hidden_dim)
+		self.value = nn.Linear(hidden_dim, hidden_dim)
+		self.softmax = nn.Softmax(dim=-1)
 
-        # Compute attention scores
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.hidden_dim, dtype=torch.float32))
-        
-        # Apply softmax to get attention weights
-        attention_weights = self.softmax(scores)
+	def forward(self, inputs):
+		# Linear projections
+		Q = self.query(inputs)
+		K = self.key(inputs)
+		V = self.value(inputs)
 
-        # Compute the weighted sum of values
-        context = torch.matmul(attention_weights, V)
+		# Compute attention scores
+		scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(
+			torch.tensor(self.hidden_dim, dtype=torch.float32)
+		)
 
-        return context
+		# Apply softmax to get attention weights
+		attention_weights = self.softmax(scores)
 
-    def get_sample(self, batch_size):
-        return torch.randn(batch_size, 64, self.hidden_dim)
-    
+		# Compute the weighted sum of values
+		context = torch.matmul(attention_weights, V)
+
+		return context
+
+	def get_sample(self, batch_size):
+		return torch.randn(batch_size, 64, self.hidden_dim)
+
+
 class SimpleTransformer(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_blocks = 4):
-        super(SimpleTransformer, self).__init__()
+	def __init__(self, input_dim, hidden_dim, n_blocks=4):
+		super(SimpleTransformer, self).__init__()
 
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+		self.input_dim = input_dim
+		self.hidden_dim = hidden_dim
 
-        self.embed = nn.Embedding(input_dim, hidden_dim)
-        self.head = nn.Linear(hidden_dim, input_dim)
-        self.blocks = []
-        for i in range(n_blocks):
-            self.blocks.append(nn.Sequential(SimpleAttention(hidden_dim),
-                                nn.LayerNorm(hidden_dim),
-                                nn.Linear(hidden_dim, hidden_dim)))
-            self.add_module(f'block_{i}', self.blocks[-1])
-    
-    def forward(self, x):
-        x = self.embed(x)
+		self.embed = nn.Embedding(input_dim, hidden_dim)
+		self.head = nn.Linear(hidden_dim, input_dim)
+		self.blocks = []
+		for i in range(n_blocks):
+			self.blocks.append(
+				nn.Sequential(
+					SimpleAttention(hidden_dim), nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)
+				)
+			)
+			self.add_module(f"block_{i}", self.blocks[-1])
 
-        for b in self.blocks:
-            x = b(x)
-        x = self.head(x)
-        return x.view(-1, x.size(-1))
+	def forward(self, x):
+		x = self.embed(x)
 
-    
-    def get_sample(self, batch_size):
-        return torch.randint(0, self.input_dim, (batch_size, 64, self.hidden_dim))
+		for b in self.blocks:
+			x = b(x)
+		x = self.head(x)
+		return x.view(-1, x.size(-1))
+
+	def get_sample(self, batch_size):
+		return torch.randint(0, self.input_dim, (batch_size, 64, self.hidden_dim))

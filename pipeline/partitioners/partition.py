@@ -1,6 +1,6 @@
-'''
+"""
 API and main utils for graph partition
-'''
+"""
 
 import torch
 import numpy as np
@@ -10,168 +10,176 @@ from .metis import split_graph_metis
 from .dagP import split_graph_dagP
 
 import logging
+
 logger = logging.getLogger("partition")
 
+
 def create_subgraph(graph_module, nodes, inputs, outputs):
-    '''
-    Creates a module from one block of a partition.
-    The module takes as input a dictionary {inputs1: value1, inputs2: value2, ..} where the keys are the values in parameter inputs.
-    and returns a similar dictionary, with keys from parameter outputs.
+	"""
+	Creates a module from one block of a partition.
+	The module takes as input a dictionary {inputs1: value1, inputs2: value2, ..} where the keys are the values in parameter inputs.
+	and returns a similar dictionary, with keys from parameter outputs.
 
-    :return: a graph that can be used like a nn.Module
-    :rtype: fx.GraphModule
-    '''
-    subgraph = torch.fx.Graph()
-    env = {}
+	:return: a graph that can be used like a nn.Module
+	:rtype: fx.GraphModule
+	"""
+	subgraph = torch.fx.Graph()
+	env = {}
 
-    def load_arg(a):
-        return env[a.name]
+	def load_arg(a):
+		return env[a.name]
 
-    with subgraph.inserting_before():
-        for i in inputs:
-            node = subgraph.placeholder(i)
-            env[node.name] = node
+	with subgraph.inserting_before():
+		for i in inputs:
+			node = subgraph.placeholder(i)
+			env[node.name] = node
 
-    for node in nodes:
-        env[node.name] = subgraph.node_copy(node, load_arg)
+	for node in nodes:
+		env[node.name] = subgraph.node_copy(node, load_arg)
 
-    with subgraph.inserting_after():
-        subgraph.output({
-            o: env[o] for o in outputs
-        })
-        
-    return torch.fx.GraphModule(graph_module, subgraph)
+	with subgraph.inserting_after():
+		subgraph.output({o: env[o] for o in outputs})
+
+	return torch.fx.GraphModule(graph_module, subgraph)
+
 
 def get_inputs_outputs(parts):
-    '''
-    Finds the dependencies between each block of a partition.
-    Removes inputs/outputs nodes of each part to merge them into 2 nodes.
+	"""
+	Finds the dependencies between each block of a partition.
+	Removes inputs/outputs nodes of each part to merge them into 2 nodes.
 
-    :param parts: partition of a model
-    :type parts: List[List[fx.Node]]
-    :return: 2 dicts, one for inputs and one for outputs, respectively. Each one has the format: {partition_idx: [target1, target2, ..]} where targets are node names.
-    :rtype: Dict[int, List[str]], Dict[int, List[str]]
-    '''
-    inputs = {i: set() for i in range(len(parts))}
-    outputs = {i: set() for i in range(len(parts))}
+	:param parts: partition of a model
+	:type parts: List[List[fx.Node]]
+	:return: 2 dicts, one for inputs and one for outputs, respectively. Each one has the format: {partition_idx: [target1, target2, ..]} where targets are node names.
+	:rtype: Dict[int, List[str]], Dict[int, List[str]]
+	"""
+	inputs = {i: set() for i in range(len(parts))}
+	outputs = {i: set() for i in range(len(parts))}
 
-    i = len(parts)
-    for part in reversed(parts):
-        i -= 1
-        for node in part:
-            if node.op == "placeholder":
-                inputs[i].add(node.target)
-                part.remove(node)
-                continue
-            elif node.op == "output":
-                outputs[i].add(node.args[0].name)
-                part.remove(node)
-                continue
-            for dep in node.all_input_nodes:
-                if dep not in part and dep.name not in inputs[i]:
-                    inputs[i].add(dep.name)
-                    if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
-                        raise Exception(f'Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}.')
-                    outputs[i - 1].add(dep.name)
-                    
-    # Fix empty parts                    
-    for i, part in enumerate(parts):     
-        if len(part) != 0: continue
-        if i != 0:    
-            for output in outputs[i - 1]:
-                inputs[i].add(output)
-                outputs[i].add(output)
-        if i != len(parts) - 1:
-            for inp in inputs[i + 1]:
-                inputs[i].add(inp)
-                outputs[i].add(inp)
-                
-    return inputs, outputs
+	i = len(parts)
+	for part in reversed(parts):
+		i -= 1
+		for node in part:
+			if node.op == "placeholder":
+				inputs[i].add(node.target)
+				part.remove(node)
+				continue
+			elif node.op == "output":
+				outputs[i].add(node.args[0].name)
+				part.remove(node)
+				continue
+			for dep in node.all_input_nodes:
+				if dep not in part and dep.name not in inputs[i]:
+					inputs[i].add(dep.name)
+					if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
+						raise Exception(
+							f"Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}."
+						)
+					outputs[i - 1].add(dep.name)
+
+	# Fix empty parts
+	for i, part in enumerate(parts):
+		if len(part) != 0:
+			continue
+		if i != 0:
+			for output in outputs[i - 1]:
+				inputs[i].add(output)
+				outputs[i].add(output)
+		if i != len(parts) - 1:
+			for inp in inputs[i + 1]:
+				inputs[i].add(inp)
+				outputs[i].add(inp)
+
+	return inputs, outputs
+
 
 def get_inputs_outputs_single(part):
-    '''
-    Get the input/output nodes of a single part from the graph
-    Removes inputs/outputs nodes of each part. They should be added back later.
-    Useful for already splitted graphs
+	"""
+	Get the input/output nodes of a single part from the graph
+	Removes inputs/outputs nodes of each part. They should be added back later.
+	Useful for already splitted graphs
 
-    :param part: one part of a partitioned model
-    :type part: List[fx.Node]
+	:param part: one part of a partitioned model
+	:type part: List[fx.Node]
 
-    :return: names of the input and output variables
-    :rtype: List[str], List[str]
-    '''
-    inputs = set()
-    outputs = set()
-    for node in part:
-        if node.op == "placeholder":
-            inputs.add(node.target)
-            part.remove(node)
-        if node.op == "output":
-            outputs.add(node.args[0].name)
-            part.remove(node)
-    return part, inputs, outputs
+	:return: names of the input and output variables
+	:rtype: List[str], List[str]
+	"""
+	inputs = set()
+	outputs = set()
+	for node in part:
+		if node.op == "placeholder":
+			inputs.add(node.target)
+			part.remove(node)
+		if node.op == "output":
+			outputs.add(node.args[0].name)
+			part.remove(node)
+	return part, inputs, outputs
 
-def partition_graph(model, n, sample, mode = "naive"):
-    '''
-    Splits a graph into n parts of roughly equal time.
 
-    :param model: torch model
-    :type model: nn.Module
-    :param n: number of parts to create
-    :type n: int
-    :param sample: example of inputs to feed to the model (used for profiling)
-    :type sample: Tensor
-    :param mode: Different modes are available:
+def partition_graph(model, n, sample, mode="naive"):
+	"""
+	Splits a graph into n parts of roughly equal time.
 
-        - naive: does not take into account memory, no constraint on the number of inputs/outputs
-        - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
-        - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
-        - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
-    
-    :type mode: str
+	:param model: torch model
+	:type model: nn.Module
+	:param n: number of parts to create
+	:type n: int
+	:param sample: example of inputs to feed to the model (used for profiling)
+	:type sample: Tensor
+	:param mode: Different modes are available:
 
-    :return: 
+	    - naive: does not take into account memory, no constraint on the number of inputs/outputs
+	    - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
+	    - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
+	    - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
 
-        - ``n`` new modules corresponding to the partition
-        - name of input variables for each module. Each one of them takes its inputs as named parameters with these names
-        - name of output variables for each module. Each one of them outputs a dictionary with these names as keys
+	:type mode: str
 
-    :rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
-    '''
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    trace = torch.fx.symbolic_trace(model)
-    logger.info(f'Traced module has {len(trace.graph.nodes)} nodes')
-    sample = sample.to(device)
-    times, memories = profile_operations(trace, sample)
+	:return:
 
-    if mode == "naive":
-        parts = split_graph(trace, times, memories, n)
-    elif mode == "constrained":
-        parts = split_graph_constrained(trace, times, memories, n)
-    elif mode == "metis":
-        parts = split_graph_metis(trace, times, memories, n)
-    elif mode == "dagP":
-        parts = split_graph_dagP(trace, times, memories, n)
-    else:
-        raise Exception("Unknown graph partitioning mode : {mode}.\n\
+	    - ``n`` new modules corresponding to the partition
+	    - name of input variables for each module. Each one of them takes its inputs as named parameters with these names
+	    - name of output variables for each module. Each one of them outputs a dictionary with these names as keys
+
+	:rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
+	"""
+	device = "cuda" if torch.cuda.is_available() else "cpu"
+	trace = torch.fx.symbolic_trace(model)
+	logger.info(f"Traced module has {len(trace.graph.nodes)} nodes")
+	sample = sample.to(device)
+	times, memories = profile_operations(trace, sample)
+
+	if mode == "naive":
+		parts = split_graph(trace, times, memories, n)
+	elif mode == "constrained":
+		parts = split_graph_constrained(trace, times, memories, n)
+	elif mode == "metis":
+		parts = split_graph_metis(trace, times, memories, n)
+	elif mode == "dagP":
+		parts = split_graph_dagP(trace, times, memories, n)
+	else:
+		raise Exception(
+			"Unknown graph partitioning mode : {mode}.\n\
                         Available modes:\n\t\
                         - naive: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
                         - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor\n\t\
                         - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
-                        - dagP: like METIS, but uses dagP to enforce acyclicity of partition.")
-    
-    while len(parts) != n:
-        parts.append([])
-        
-    inputs, outputs = get_inputs_outputs(parts)
-        
-    blocks = []
-    for i, p in enumerate(parts):
-        graph = create_subgraph(trace, p, inputs[i], outputs[i])
-        blocks.append(graph)
+                        - dagP: like METIS, but uses dagP to enforce acyclicity of partition."
+		)
 
-    estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
-    estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
-    logger.info(f'Estimated times : {["%.3fs" % t for t in estimated_times]}')
-    logger.info(f'Estimated memory transfers : {["%.1fMB" % t for t in estimated_mems]}')
-    return blocks, inputs, outputs
+	while len(parts) != n:
+		parts.append([])
+
+	inputs, outputs = get_inputs_outputs(parts)
+
+	blocks = []
+	for i, p in enumerate(parts):
+		graph = create_subgraph(trace, p, inputs[i], outputs[i])
+		blocks.append(graph)
+
+	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
+	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
+	logger.info(f'Estimated times : {["%.3fs" % t for t in estimated_times]}')
+	logger.info(f'Estimated memory transfers : {["%.1fMB" % t for t in estimated_mems]}')
+	return blocks, inputs, outputs

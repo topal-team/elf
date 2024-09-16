@@ -3,157 +3,150 @@ import torch.nn as nn
 
 import rockmate
 import rkgb
-import sys
+
 
 def sequential_tfno(model, devices, dtype=torch.float32):
-    """
-    Returns an ``nn.Sequential`` of TFNO model balanced across the given devices.
-    N.B.: this function does not dedup devices.
-    """
-    # put all layers into a list
-    lifting = model.lifting
-    blocks = [model.fno_blocks[i] for i in range(model.n_layers)]
-    projection = model.projection
+	"""
+	Returns an ``nn.Sequential`` of TFNO model balanced across the given devices.
+	N.B.: this function does not dedup devices.
+	"""
+	# put all layers into a list
+	lifting = model.lifting
+	blocks = [model.fno_blocks[i] for i in range(model.n_layers)]
+	projection = model.projection
 
-    layers = [lifting, *blocks, projection]
+	layers = [lifting, *blocks, projection]
 
-    # partition layers into the given devices
-    def numel(layer):
-        return sum([p.numel() for p in layer.parameters()])
+	# partition layers into the given devices
+	def numel(layer):
+		return sum([p.numel() for p in layer.parameters()])
 
-    total_numel = sum([numel(layer) for layer in layers])
-    print("total numel", total_numel)
-    phase_numel = total_numel // len(devices)
-    delim_numel = phase_numel
-    accum_numel = 0
+	total_numel = sum([numel(layer) for layer in layers])
+	print("total numel", total_numel)
+	phase_numel = total_numel // len(devices)
+	delim_numel = phase_numel
+	accum_numel = 0
 
-    # seal one pipeline phase when its numel is larger than phase_numel
-    phases = [[]]
-    for layer in layers:
-        phases[-1].append(layer)
-        accum_numel += numel(layer)
-        if accum_numel > delim_numel:
-            delim_numel += phase_numel
-            phases.append([])
+	# seal one pipeline phase when its numel is larger than phase_numel
+	phases = [[]]
+	for layer in layers:
+		phases[-1].append(layer)
+		accum_numel += numel(layer)
+		if accum_numel > delim_numel:
+			delim_numel += phase_numel
+			phases.append([])
 
-    # pack all remaining layers into the last phase
-    while len(phases) > len(devices):
-        phases[-2].extend(phases[-1])
-        phases.pop()
-    
-    for i, phase in enumerate(phases):
-        for layer in phase:
-            layer.to(device=torch.device(devices[i]))
-        # break
+	# pack all remaining layers into the last phase
+	while len(phases) > len(devices):
+		phases[-2].extend(phases[-1])
+		phases.pop()
 
-    # create nn.Sequential
-    return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
+	for i, phase in enumerate(phases):
+		for layer in phase:
+			layer.to(device=torch.device(devices[i]))
+		# break
+
+	# create nn.Sequential
+	return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
+
 
 def sequential_fno(model, devices, dtype=torch.float32):
-    """
-    Returns an ``nn.Sequential`` of FNO models balanced across the given devices.
-    N.B.: this function does not dedup devices.
-    """
+	"""
+	Returns an ``nn.Sequential`` of FNO models balanced across the given devices.
+	N.B.: this function does not dedup devices.
+	"""
 
-    
-    layers = [layer for layer in model.children()]
-    # print(layers)
+	layers = [layer for layer in model.children()]
+	# print(layers)
 
-    # partition layers into the given devices
-    def numel(layer):
-        return sum([p.numel() for p in layer.parameters()])
+	# partition layers into the given devices
+	def numel(layer):
+		return sum([p.numel() for p in layer.parameters()])
 
-    total_numel = sum([numel(layer) for layer in layers])
-    # print("total numel", total_numel)
-    phase_numel = total_numel // len(devices)
-    delim_numel = phase_numel
-    accum_numel = 0
+	total_numel = sum([numel(layer) for layer in layers])
+	# print("total numel", total_numel)
+	phase_numel = total_numel // len(devices)
+	delim_numel = phase_numel
+	accum_numel = 0
 
-    # seal one pipeline phase when its numel is larger than phase_numel
-    phases = [[]]
-    for layer in layers:
-        phases[-1].append(layer)
-        accum_numel += numel(layer)
-        if accum_numel > delim_numel:
-            delim_numel += phase_numel
-            phases.append([])
+	# seal one pipeline phase when its numel is larger than phase_numel
+	phases = [[]]
+	for layer in layers:
+		phases[-1].append(layer)
+		accum_numel += numel(layer)
+		if accum_numel > delim_numel:
+			delim_numel += phase_numel
+			phases.append([])
 
-    # pack all remaining layers into the last phase
-    while len(phases) > len(devices):
-        phases[-2].extend(phases[-1])
-        phases.pop()
-    
-    for i, phase in enumerate(phases):
-        # print(phase)
-        for layer in phase:
-            layer.to(device=torch.device(devices[i]))
-        # break
+	# pack all remaining layers into the last phase
+	while len(phases) > len(devices):
+		phases[-2].extend(phases[-1])
+		phases.pop()
 
-    # create nn.Sequential
-    return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
+	for i, phase in enumerate(phases):
+		# print(phase)
+		for layer in phase:
+			layer.to(device=torch.device(devices[i]))
+		# break
+
+	# create nn.Sequential
+	return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
+
 
 class PipelineFNO(nn.Sequential):
+	def __init__(self, model, devices, microbatch_size, input_shape, checkpoint=False, budget=None):
+		super(PipelineFNO, self).__init__()
+		# operator = FNO(n_modes=(16, 16), hidden_channels=64, in_channels=3, out_channels=1)
+		self.sequential_model = sequential_fno(model, devices)
+		self.microbatch_size = microbatch_size
+		rkMods = []
 
-    def __init__(self, model, devices, microbatch_size, input_shape, checkpoint = False, budget = None):
+		if checkpoint and budget is not None:
+			for module in self.sequential_model.children():
+				device = next(module.named_parameters())[1].device
+				input = torch.randn(microbatch_size, *input_shape[1:], requires_grad=True)
 
-        super(PipelineFNO, self).__init__()
-        # operator = FNO(n_modes=(16, 16), hidden_channels=64, in_channels=3, out_channels=1)
-        self.sequential_model = sequential_fno(model, devices)
-        self.microbatch_size = microbatch_size
-        rkMods = []
+				# list_solver = [rockmate.solvers.HILP()]
+				list_solver = [rockmate.solvers.TwRemat()]
+				max_size_S_graph_for_no_partitioning = 0
+				partitioners = [rkgb.Ptools.Partitioner_seq(sub_partitioner=rkgb.Ptools.Partitioner())]
 
-        if checkpoint and budget != None :
-            for module in self.sequential_model.children():
-                device  = next(module.named_parameters())[1].device
-                input = torch.randn(microbatch_size, *input_shape[1:], requires_grad=True)
+				input = input.to(device)
+				rkMod = rockmate.HRockmate(
+					module,
+					input,
+					budget,
+					list_solvers=list_solver,
+					partitioners=partitioners,
+					# solve_sched = False,
+					max_size_S_graph_for_no_partitioning=max_size_S_graph_for_no_partitioning,
+				)
 
+				with torch.no_grad():
+					output = module(input)
+					input_shape = output.shape
 
-                # list_solver = [rockmate.solvers.HILP()]
-                list_solver = [rockmate.solvers.TwRemat()]
-                max_size_S_graph_for_no_partitioning = 0
-                partitioners = [rkgb.Ptools.Partitioner_seq(sub_partitioner=rkgb.Ptools.Partitioner())]
+				torch.cuda.empty_cache()
 
-                
-                input = input.to(device)
-                rkMod = rockmate.HRockmate(
-                        module, input, budget, 
-                        list_solvers=list_solver, 
-                        partitioners=partitioners,
-                        # solve_sched = False,
-                        max_size_S_graph_for_no_partitioning=max_size_S_graph_for_no_partitioning
-                    )
+				rkMod.solve_sched(budget, rec=False)
+				rkMod.get_compiled_fct()
 
-                with torch.no_grad():
-                    output = module(input)
-                    input_shape = output.shape
+				rkMods.append(rkMod)
 
-                torch.cuda.empty_cache()
+			del input
 
-                rkMod.solve_sched(budget, rec=False)
-                rkMod.get_compiled_fct()
+			self.sequential_model = nn.Sequential(*rkMods)
+			print(self.sequential_model)
 
-                rkMods.append(rkMod)
+	def forward(self, x):
+		for module in self.sequential_model.children():
+			device = next(module.named_parameters())[1].device
+			print("forward", module, device)
+			x = x.to(device)
+			x = module(x)
 
-            del input
-            
-            self.sequential_model = nn.Sequential(*rkMods)
-            print(self.sequential_model)
-    
-    def forward(self, x):
-        
-        for module in self.sequential_model.children():
-            
-            device  = next(module.named_parameters())[1].device
-            print("forward", module, device)
-            x = x.to(device)
-            x = module(x)
+		return x
 
-        return x
-
-        
-
-
-        
 
 # input_shape = (16, 64, 1)
 # devices = [f"cuda:{d}" for d in range(torch.cuda.device_count())]

@@ -1,6 +1,6 @@
-'''
+"""
 Automatic partition of a computation graph
-'''
+"""
 
 from .metis import *
 from .dagP import *
