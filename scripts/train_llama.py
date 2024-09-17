@@ -7,7 +7,6 @@ import datasets
 from transformers import AutoTokenizer
 from models.llama3 import Llama, ModelArgs
 import argparse
-from tqdm import tqdm
 
 import os
 import torch.distributed as dist
@@ -75,20 +74,21 @@ def main():
 	# Initialize model
 	model_args = ModelArgs(
 		dim=128,
-		n_layers=32,
-		n_heads=8,
+		n_layers=64,
+		n_heads=4,
 		vocab_size=tokenizer.vocab_size + 2,
 		max_seq_len=args.max_seq_len,
 	)
 
-	sample = torch.randint(0, 10, (args.batch_size, args.max_seq_len))
+	sample = torch.randint(0, 10, (args.batch_size // ws, args.max_seq_len))
 	model = Llama(model_args)
 	if rank == 0:
 		print(
 			"# of trainable parameters : ",
 			pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
 		)
-	pipe = Pipeline(model, sample, partition="metis", schedule="1f1b")
+	placement = list(range(ws)) * 2
+	pipe = Pipeline(model, sample, placement=placement, partition="metis", schedule="1f1b")
 
 	# Initialize optimizer
 	optimizer = torch.optim.AdamW(pipe.parameters(), lr=args.lr)
@@ -97,21 +97,21 @@ def main():
 	model.train()
 	for epoch in range(args.epochs):
 		total_loss = 0
-		for batch in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}"):
+		i = 0
+		for i, batch in enumerate(dataloader):
 			# Transform batch["input_ids"] into a single tensor
 			input_ids = torch.stack(batch["input_ids"], -1).cuda()
-			# attention_mask = batch["attention_mask"].cuda()
 
 			optimizer.zero_grad()
 
-			outputs, loss = pipe(input_ids, input_ids, model.loss, split_size=args.batch_size // 4)
-			# outputs = model(input_ids)
-			# loss = model.loss(outputs, input_ids)
+			_, loss = pipe(input_ids, input_ids, model.loss, split_size=args.batch_size // ws)
 
 			optimizer.step()
 
 			if rank == ws - 1:
 				total_loss += loss.item()
+				if i % 100 == 99:
+					print(f"[{epoch + 1} | {i}] : {total_loss / i:.4f}")
 
 		if rank == ws - 1:
 			avg_loss = total_loss / len(dataloader)

@@ -9,8 +9,8 @@ Changes:
 Run example:
 
 python llama31.py \
-	--ckpt_dir llama-models/models/llama3_1/Meta-Llama-3.1-8B \
-	--tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model
+    --ckpt_dir llama-models/models/llama3_1/Meta-Llama-3.1-8B \
+    --tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model
 """
 
 from dataclasses import dataclass
@@ -29,7 +29,6 @@ class ModelArgs:
 	dim: int = 4096
 	n_layers: int = 32
 	n_heads: int = 32
-	n_kv_heads: Optional[int] = 4
 	vocab_size: int = -1
 	multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
 	ffn_dim_multiplier: Optional[float] = 2
@@ -43,9 +42,6 @@ class ModelArgs:
 	def __init__(self, **kwargs):
 		for k, v in kwargs.items():
 			setattr(self, k, v)
-		self.n_kv_heads = self.n_heads
-		self.n_kv_heads = self.n_heads
-		self.n_heads = self.n_heads
 
 
 # -----------------------------------------------------------------------------
@@ -88,7 +84,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 	# freqs_cis is (seq_len, head_dim/2, 2), e.g. (8, 64, 2)
 	xshaped = x.float().reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2)
 	# xshaped is (bs, seqlen, n_heads, head_dim/2, 2), e.g. (4, 8, 32, 64, 2)
-	freqs_cis = freqs_cis.view(1, xshaped.size(1), 1, xshaped.size(3), 2)
+	freqs_cis = freqs_cis.reshape(1, xshaped.size(1), 1, xshaped.size(3), 2)
 	# freqs_cis becomes (1, seqlen, 1, head_dim/2, 2), e.g. (1, 8, 1, 64, 2)
 	x_out2 = torch.stack(
 		[
@@ -103,41 +99,29 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 	return x_out2.type_as(x)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-	bs, slen, n_kv_heads, head_dim = x.shape
-	return (
-		x[:, :, :, None, :]
-		.expand(bs, slen, n_kv_heads, n_rep, head_dim)
-		.reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-	)
-
-
 class Attention(nn.Module):
 	def __init__(self, args: ModelArgs):
 		super().__init__()
 		self.flash = args.flash  # use flash attention?
-		self.n_kv_heads = args.n_heads
-		model_parallel_size = 1  # AK: model parallel size is 1 for 1 GPU
-		self.n_local_heads = args.n_heads // model_parallel_size
-		self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
-		self.n_rep = self.n_local_heads // self.n_local_kv_heads
+		self.n_heads = args.n_heads
 		self.head_dim = args.dim // args.n_heads
 
 		self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-		self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-		self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+		self.wk = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+		self.wv = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
 		self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+
+		self.register_buffer("freqs_cis", args.freqs_cis.clone().detach())
 
 	def forward(self, x: torch.Tensor, max_seqlen: Optional[int]):
 		bsz, seqlen, _ = x.shape
 		xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-		xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-		xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-		xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-		# xq = apply_rotary_emb(xq, freqs_cis)
-		# xk = apply_rotary_emb(xk, freqs_cis)
-		xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-		xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+		xq = xq.reshape(bsz, seqlen, self.n_heads, self.head_dim)
+		xk = xk.reshape(bsz, seqlen, self.n_heads, self.head_dim)
+		xv = xv.reshape(bsz, seqlen, self.n_heads, self.head_dim)
+		freqs_cis = self.freqs_cis[:max_seqlen]
+		xq = apply_rotary_emb(xq, freqs_cis)
+		xk = apply_rotary_emb(xk, freqs_cis)
 		xq, xk, xv = (x.transpose(1, 2) for x in (xq, xk, xv))
 		mask = torch.full((max_seqlen, max_seqlen), float("-inf"))
 		mask = torch.triu(mask, diagonal=1)
@@ -194,21 +178,20 @@ class Llama(nn.Module):
 		self.n_layers = params.n_layers
 		self.device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device("cpu")
 
-		self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
-		self.layers = nn.ModuleList(TransformerBlock(params) for _ in range(params.n_layers))
-		self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-		self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
-
-		self.freqs_cis = precompute_freqs_cis(
+		params.freqs_cis = precompute_freqs_cis(
 			params.dim // params.n_heads,
 			params.max_seq_len * 2,
 			params.rope_theta,
 			params.use_scaled_rope,
 		)
 
+		self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
+		self.layers = nn.ModuleList(TransformerBlock(params) for _ in range(params.n_layers))
+		self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+		self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+
 	def forward(self, inputs: torch.Tensor):
 		h = self.tok_embeddings(inputs)
-		# freqs_cis = self.freqs_cis[:self.params.max_seq_len]
 		for layer in self.layers:
 			h = layer(h, self.params.max_seq_len)
 		h = self.norm(h)

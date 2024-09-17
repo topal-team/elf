@@ -3,72 +3,81 @@ Utils for operation profiling
 """
 
 import torch
+import numpy as np
 from pipeline.utils import Timer
 
 DONT_CUT_HERE = 2 << 40
 
 
 class Profiler(torch.fx.Interpreter):
-	def __init__(self, *args, **kwargs):
+	def __init__(self, niter=10, *args, **kwargs):
 		self.times = {}
 		self.memories = {}
+		self.niter = niter
 		self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 		super(Profiler, self).__init__(*args, **kwargs)
+
+	def to_device(self, x, device):
+		"""
+		Moves ``x`` to the specified device if it is a tensor
+		If ``x`` is an iterable or dictionary, recursively moves every tensor contained in it to the device too
+		Otherwise does not do anything
+
+		:param x: object to move to device memory
+		:type x: Any
+		:param device: destination
+		:type device: str or torch.device
+
+		:return: moved objects
+		:rtype: same as ``x``
+		"""
+		if isinstance(x, torch.Tensor) or isinstance(x, torch.nn.Module):
+			return x.to(device, non_blocking=True)
+
+		elif isinstance(x, torch.fx.Node):
+			self.env[x] = self.to_device(self.env[x], device)
+			return x
+
+		elif isinstance(x, dict):
+			return {k: self.to_device(v, device) for k, v in x.items()}
+
+		elif hasattr(x, "__iter__") and not isinstance(x, (str, torch.fx.proxy.Proxy)):
+			return type(x)(self.to_device(item, device) for item in x)
+
+		return x
+
+	def move_dependencies(self, node, device):
+		for i in range(len(node.args)):
+			node.update_arg(i, self.to_device(node.args[i], device))
+		for key, kwarg in node.kwargs.items():
+			node.update_kwarg(key, self.to_device(node.kwargs[key], device))
+
+		# Special case: modules are not in args/kwargs but in target.
+		if node.op == "call_module":
+			self.to_device(self.fetch_attr(node.target), device)
 
 	def run_node(self, node):
 		# Move all inputs to the specified device
 		# self.env is an internal from Interpreter; it's hacky to modifiy it
-		for arg in node.args:
-			if isinstance(arg, torch.fx.Node):
-				self.env[arg] = to_device(self.env[arg], self.device)
-		for kwarg in node.kwargs.values():
-			if isinstance(kwarg, torch.fx.Node):
-				self.env[kwarg] = to_device(self.env[kwarg], self.device)
+		self.move_dependencies(node, self.device)
 
 		if torch.cuda.is_available():
 			torch.cuda.synchronize()
 
-		with Timer() as timer:
-			result = super().run_node(node)
+		times = []
+		for _ in range(self.niter):
+			with Timer() as timer:
+				result = super().run_node(node)
+			times.append(timer.time())
 
-		# Move back to CPU
-		for arg in node.args:
-			if isinstance(arg, torch.fx.Node):
-				self.env[arg] = to_device(self.env[arg], "cpu")
-		for kwarg in node.kwargs.values():
-			if isinstance(kwarg, torch.fx.Node):
-				self.env[kwarg] = to_device(self.env[kwarg], "cpu")
+		result = self.to_device(result, "cpu")
 
-		self.times[node.name] = timer.time()
+		self.move_dependencies(node, "cpu")
+
+		self.times[node.name] = np.median(times)
 		self.memories[node.name] = get_memory(result)
 
 		return result
-
-
-def to_device(x, device):
-	"""
-	Moves ``x`` to the specified device if it is a tensor
-	If ``x`` is an iterable or dictionary, recursively moves every tensor contained in it to the device too
-	Otherwise does not do anything
-
-	:param x: object to move to device memory
-	:type x: Any
-	:param device: destination
-	:type device: str or torch.device
-
-	:return: moved objects
-	:rtype: same as ``x``
-	"""
-	if isinstance(x, torch.Tensor) or isinstance(x, torch.nn.Module):
-		return x.to(device, non_blocking=True)
-
-	elif isinstance(x, dict):
-		return {k: to_device(v, device) for k, v in x.items()}
-
-	elif hasattr(x, "__iter__") and not isinstance(x, (str, torch.fx.proxy.Proxy)):
-		return type(x)(to_device(item, device) for item in x)
-
-	return x
 
 
 def get_memory(x):
@@ -93,7 +102,7 @@ def get_memory(x):
 	return 0
 
 
-def profile_operations(graph_module, input_sample):
+def profile_operations(graph_module, input_sample, niter=10):
 	"""
 	Get time and memory for each node of a traced module, when running forward on a sample.
 
@@ -101,11 +110,22 @@ def profile_operations(graph_module, input_sample):
 	:type graph_module: fx.GraphModule
 	:param input_sample: example of inputs to feed to the model
 	:type input_sample: Tensor
+	:param niter: number of times each operation will be profiled
+	:type niter: int
 
 	:return: 2 dicts, one for time and one for memory used, respectively. Each one has the format {node_name: value}
 	:rtype: fx.GraphModule, Dict[str, List[float]], Dict[str, List[float]]
 	"""
-	profiler = Profiler(graph_module)
-	profiler.run(input_sample)
+	profiler = Profiler(niter, graph_module)
+	with torch.no_grad():
+		profiler.boxed_run([input_sample])
+
+	# With boxed runs placeholders bypass the profiler, we need to manually add them afterwards
+	for node in graph_module.graph.nodes:
+		if node.op != "placeholder":
+			continue
+		if node.name not in profiler.times:
+			profiler.times[node.name] = 0
+			profiler.memories[node.name] = get_memory(input_sample)  # TODO: handle multiple inputs
 
 	return profiler.times, profiler.memories

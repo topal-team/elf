@@ -8,9 +8,13 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from models.rcn import RCN
-from tqdm import tqdm
 from pipeline import Pipeline
 import torch.distributed as dist
+
+import logging
+
+logger = logging.getLogger("train_rcn")
+logging.basicConfig(level=logging.INFO)
 
 
 def pretty_print_params(n):
@@ -31,9 +35,9 @@ torch.cuda.set_device(local_rank)
 dist.init_process_group(backend="nccl")
 
 # Define hyperparameters
-num_epochs = 10
-batch_size = 16
-learning_rate = 0.001
+num_epochs = 3
+batch_size = 64
+learning_rate = 0.0005
 
 # Define data transforms
 transform = transforms.Compose(
@@ -49,43 +53,38 @@ train_dataset = datasets.CIFAR10(root="/data", train=True, download=False, trans
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
 
 # Initialize the RCN model
-model = RCN(in_channels=3, hidden_channels=128, num_blocks=16, num_columns=4)
+model = RCN(in_channels=3, hidden_channels=64, num_blocks=8, num_columns=2)
+model.train()
 if rank == 0:
 	print(
 		"# of trainable parameters : ",
 		pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
 	)
 
-model.train()
-sample = torch.randn((4, 3, 224, 224))
-pipe = Pipeline(model, sample, schedule="1f1b", partition="metis")
+sample = torch.randn((batch_size // ws, 3, 224, 224))
+placement = list(range(ws)) * 2
+pipe = Pipeline(model, sample, placement=placement, schedule="1f1b", partition="metis")
 
 # Define loss function and optimizer
 optimizer = optim.Adam(pipe.parameters(), lr=learning_rate)
-
 # Training loop
 for epoch in range(num_epochs):
 	running_loss = 0.0
-	for i, (inputs, labels) in enumerate(tqdm(train_loader)):
+	for i, (inputs, labels) in enumerate(train_loader):
 		inputs, labels = inputs.cuda(), labels.cuda()
 
 		optimizer.zero_grad()
-		outputs, loss = pipe(
-			inputs, labels, loss_fn=nn.functional.cross_entropy, split_size=batch_size // 4
-		)
+		_, loss = pipe(inputs, labels, loss_fn=nn.functional.cross_entropy, split_size=batch_size // ws)
 		optimizer.step()
 
-		if rank == ws - 1:
-			running_loss += loss.item()
-			if i % 200 == 199:  # print every 200 mini-batches
+		if rank == placement[-1]:
+			running_loss += loss.detach().item()
+			if i % 100 == 99:  # print every 100 mini-batches
 				print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / 200:.3f}")
 				running_loss = 0.0
 
 if rank == 0:
 	print("Finished Training")
-
-	# Save the model
-	torch.save(model.state_dict(), "rcn_cifar100.pth")
 
 if dist.is_initialized():
 	dist.destroy_process_group()

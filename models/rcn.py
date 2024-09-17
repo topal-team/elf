@@ -8,19 +8,19 @@ class ReversibleColumnBlock(nn.Module):
 		super(ReversibleColumnBlock, self).__init__()
 		self.conv1 = nn.Conv2d(channels // 2, channels // 2, kernel_size, padding=padding)
 		self.conv2 = nn.Conv2d(channels // 2, channels // 2, kernel_size, padding=padding)
-		self.bn1 = nn.BatchNorm2d(channels // 2)
-		self.bn2 = nn.BatchNorm2d(channels // 2)
+		self.ln1 = nn.LayerNorm([channels // 2, 224, 224])  # Adjusted for 224x224 input
+		self.ln2 = nn.LayerNorm([channels // 2, 224, 224])  # Adjusted for 224x224 input
 
 	def forward(self, x):
 		x1, x2 = torch.chunk(x, 2, dim=1)
-		y1 = x1 + self.conv1(F.relu(self.bn1(x2)))
-		y2 = x2 + self.conv2(F.relu(self.bn2(y1)))
+		y1 = x1 + self.conv1(F.relu(self.ln1(x2)))
+		y2 = x2 + self.conv2(F.relu(self.ln2(y1)))
 		return torch.cat([y1, y2], dim=1)
 
 	def inverse(self, y):
 		y1, y2 = torch.chunk(y, 2, dim=1)
-		x2 = y2 - self.conv2(F.relu(self.bn2(y1)))
-		x1 = y1 - self.conv1(F.relu(self.bn1(x2)))
+		x2 = y2 - self.conv2(F.relu(self.ln2(y1)))
+		x1 = y1 - self.conv1(F.relu(self.ln1(x2)))
 		return torch.cat([x1, x2], dim=1)
 
 

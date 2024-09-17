@@ -439,6 +439,11 @@ class Pipeline:
 			batch, target, loss_fn, self.schedule, mb_sizes, profile
 		)
 
+		# First and last block have some remaining tensors
+		for block in self.blocks:
+			block.grads_to_send.clear()
+			block.act_to_send.clear()
+
 		self.times = times
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:

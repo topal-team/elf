@@ -2,6 +2,7 @@
 Utils to partition a computation graph using METIS
 """
 
+import os
 import shutil
 import random
 import tempfile
@@ -9,7 +10,7 @@ import subprocess
 
 # Some edges should not be part of the cut; for instance values that are not torch.Tensor are a problem to send/recv for pipelining.
 # To avoid that we put a soft constraint by giving them a huge communication cost.
-NON_TENSOR = 2 << 20
+NON_TENSOR = 2 << 40
 
 
 class Node:
@@ -157,7 +158,10 @@ def split_graph_metis(graph, times, memories, n):
 	graph = convert_fx(graph, times, memories)
 	file = write_metis(graph)
 	execute_metis(file, n)
-	file.close()
+	try:
+		file.close()
+	except FileNotFoundError:
+		pass
 	parts = read_metis(graph, f"{file.name}.part.{n}")
 
 	return parts
@@ -209,15 +213,18 @@ def read_metis(graph, file):
 		# WE NEED TO HAVE CONTIGUOUS PARTITIONS
 		# METIS does not enforce that, so we have to fix it by ignoring some attributions
 		if i not in mapping:
-			if line < len(lines) - 1 and i == lines[line + 1]:
-				mapping.append(i)
-				parts.append([])
+			parts.append([])
+			mapping.append(i)
 			i = -1
 		else:
-			i = len(mapping) - 1
+			i = mapping.index(i)
 		parts[i].append(nodes[n].node)
 		assert nodes[n].idx == n + 1
 		n += 1
+
+	f.close()
+	os.remove(f.name)
+	return parts
 
 
 def execute_metis(file, n):

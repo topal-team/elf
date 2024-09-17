@@ -56,6 +56,16 @@ def get_inputs_outputs(parts):
 	inputs = {i: set() for i in range(len(parts))}
 	outputs = {i: set() for i in range(len(parts))}
 
+	def add_outputs(i, arg):
+		if isinstance(arg, (list, tuple)):
+			for item in arg:
+				add_outputs(i, item)
+		elif hasattr(arg, "name"):
+			outputs[i].add(arg.name)
+		elif isinstance(arg, dict):
+			for value in arg.values():
+				add_outputs(i, value)
+
 	i = len(parts)
 	for part in reversed(parts):
 		i -= 1
@@ -65,7 +75,8 @@ def get_inputs_outputs(parts):
 				part.remove(node)
 				continue
 			elif node.op == "output":
-				outputs[i].add(node.args[0].name)
+				for arg in node.args:
+					add_outputs(i, arg)
 				part.remove(node)
 				continue
 			for dep in node.all_input_nodes:
@@ -117,6 +128,29 @@ def get_inputs_outputs_single(part):
 	return part, inputs, outputs
 
 
+def duplicate_symsizes(graph, times, memories):
+	i = 0
+	for node in graph.nodes:
+		if node.name == "sym_size_int":
+			to_replace = {}
+			for user in node.users:
+				i += 1
+				with graph.inserting_before(user):
+					new_sym_size = node.graph.create_node(
+						"call_function", torch.ops.aten.sym_size, (user.args[0], node.args[1]), {}
+					)
+				to_replace[user] = new_sym_size
+
+			for user, new_sym_size in to_replace.items():
+				user.replace_input_with(node, new_sym_size)
+				times[new_sym_size.name] = times[node.name]
+				memories[new_sym_size.name] = memories[node.name]
+
+			graph.erase_node(node)
+			i -= 1
+	logger.info(f"Symsize duplication created {i} nodes.")
+
+
 def partition_graph(model, n, sample, mode="naive"):
 	"""
 	Splits a graph into n parts of roughly equal time.
@@ -129,26 +163,44 @@ def partition_graph(model, n, sample, mode="naive"):
 	:type sample: Tensor
 	:param mode: Different modes are available:
 
-	    - naive: does not take into account memory, no constraint on the number of inputs/outputs
-	    - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
-	    - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
-	    - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
+		- naive: does not take into account memory, no constraint on the number of inputs/outputs
+		- constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
+		- metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
+		- dagP: like METIS, but uses dagP to enforce acyclicity of partition.
 
 	:type mode: str
 
 	:return:
 
-	    - ``n`` new modules corresponding to the partition
-	    - name of input variables for each module. Each one of them takes its inputs as named parameters with these names
-	    - name of output variables for each module. Each one of them outputs a dictionary with these names as keys
+		- ``n`` new modules corresponding to the partition
+		- name of input variables for each module. Each one of them takes its inputs as named parameters with these names
+		- name of output variables for each module. Each one of them outputs a dictionary with these names as keys
 
 	:rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
 	"""
 	device = "cuda" if torch.cuda.is_available() else "cpu"
-	trace = torch.fx.symbolic_trace(model)
+	try:
+		dim = torch.export.Dim("batch")
+		dynamic_shapes = ({0: dim},)
+		trace = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes).module()
+
+	except Exception as err_export:
+		logger.info("Graph extraction using torch.export failed; falling back to torch.fx.")
+		logger.debug(str(err_export))
+		try:
+			trace = torch.fx.symbolic_trace(model)
+		except Exception as err_fx:
+			logger.info("Graph extraction failed with torch.fx. Cannot partition the model.")
+			logger.debug(str(err_fx))
+			exit(1)
+
 	logger.info(f"Traced module has {len(trace.graph.nodes)} nodes")
+
 	sample = sample.to(device)
 	times, memories = profile_operations(trace, sample)
+
+	duplicate_symsizes(trace.graph, times, memories)
+	trace.recompile()
 
 	if mode == "naive":
 		parts = split_graph(trace, times, memories, n)
@@ -161,11 +213,11 @@ def partition_graph(model, n, sample, mode="naive"):
 	else:
 		raise Exception(
 			"Unknown graph partitioning mode : {mode}.\n\
-                        Available modes:\n\t\
-                        - naive: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
-                        - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor\n\t\
-                        - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
-                        - dagP: like METIS, but uses dagP to enforce acyclicity of partition."
+						Available modes:\n\t\
+						- naive: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
+						- constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor\n\t\
+						- metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
+						- dagP: like METIS, but uses dagP to enforce acyclicity of partition."
 		)
 
 	while len(parts) != n:
