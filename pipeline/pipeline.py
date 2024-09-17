@@ -21,7 +21,7 @@ class PipelineBlock:
 	Each block is one layer or group of contiguous layers placed on one device
 	"""
 
-	def __init__(self, model, id_, placement, inputs, outputs, dp=1):
+	def __init__(self, model, id_, placement, inputs, outputs):
 		"""
 		:param model: layer / group of layers that will perform the computation
 		:type model: nn.Module
@@ -38,13 +38,6 @@ class PipelineBlock:
 		# Block infos
 		self.rank = placement[id_]  # global rank
 		self.model = model.cuda() if torch.cuda.is_available() else model
-
-		if dp > 1:
-			ws = int(os.getenv("WORLD_SIZE"))
-			dppg = dist.new_group(
-				[i for i in range(ws) if (i % len(placement)) == (rank % len(placement))]
-			)
-			self.model = torch.nn.parallel.DistributedDataParallel(self.model, process_group=dppg)
 
 		self.id = id_  # rank in the model
 		self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
@@ -330,6 +323,8 @@ class Pipeline:
 		"""
 		:param model: the entire model to pipeline
 		:type model: nn.Module
+		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model.
+		:type sample: torch.Tensor or List[torch.Tensor]
 		:param placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
 		:type placement: List[int] or str
 		:param partition: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their number of parameters
@@ -343,14 +338,15 @@ class Pipeline:
 			)
 
 		if placement == "auto":
-			placement = list(range(int(os.environ["WORLD_SIZE"])))
+			ws = int(os.getenv("WORLD_SIZE"))
+			placement = [i for i in range(ws)]
 		if isinstance(partition, str):
 			model, inputs, outputs = shared_partition(model, placement, sample, partition)
 		elif not partition:
 			model, inputs, outputs = local_partition(model, placement)
 		else:
 			raise Exception(
-				"Partition strategy should be either False for pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
+				"Partition strategy should be either False when using pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
 			)
 
 		match schedule.lower():
@@ -365,14 +361,23 @@ class Pipeline:
 
 		self.blocks = create_pipeline(model, placement, inputs, outputs)
 		self.placement = placement
-		self.engine = Engine(self.blocks)
 		self.schedule = []
-		self.options = {}
+		self.engine = Engine(self.blocks)
+
+		# Used to avoid re-generating schedule every time
+		self.last_options = {}
+		self.last_nmb = 0
 
 	def __call__(self, batch, target, loss_fn, split_size=1, profile=False, **options):
 		"""
 		Execute the schedule on a batch of data
 
+		:param batch: input data
+		:type batch: torch.Tensor or List[torch.Tensor]
+		:param target: targets
+		:type target: torch.Tensor
+		:param loss_fn: loss function to be used. We recommend using torch's built-in loss functions, but you can pass any function that matches the signature. Be careful, summing the loss of every micro-batch should be equivalent to computing the loss on the full batch (i.e., no average over batch dimension)
+		:type loss_fn: Function (Tensor, Tensor) -> Tensor
 		:param split_size: either one size for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or a list of possibly different micro batch sizes. In that case the sum of the sizes must be equal to the batch size.
 		:type split_size: int or List[int]
 		:param profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
@@ -392,13 +397,11 @@ class Pipeline:
 			mb_sizes = split_size
 			n_micro_batches = len(split_size)
 
-		# TODO: the schedule can have a slightly different length with all_reduce etc
-		if (
-			len(self.schedule) != (n_micro_batches * len(self.blocks) * 3 * 2) or options != self.options
-		):
+		if n_micro_batches != self.last_nmb or options != self.last_options:
 			# Different number of micro batches ; we have to recompute the schedule
 			self.schedule = self.scheduler(self.placement, n_micro_batches, **options)
-			self.options = options
+			self.last_options = options
+			self.last_nmb = n_micro_batches
 
 			# Construct graph, detech cycle and add communication batching to fix them
 			cycles = find_cycles(graph_from_schedule(self.schedule))

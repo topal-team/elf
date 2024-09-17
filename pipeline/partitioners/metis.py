@@ -33,9 +33,8 @@ class Node:
 		self.time = time
 		self.idx = idx
 		self.mem = mem
-		# TODO: change to children/parents
-		self.edges_in = []
-		self.edges_out = []
+		self.parents = []
+		self.children = []
 
 	def to_metis_line(self):
 		"""
@@ -49,9 +48,9 @@ class Node:
 		"""
 		line = f"{self.mem} {self.time}"
 
-		for v in self.edges_in:
+		for v in self.parents:
 			line += f" {v}"
-		for v, _ in self.edges_out:
+		for v, _ in self.children:
 			line += f" {v}"
 		return line + f"% {self.idx} - {self.node.name}"
 
@@ -74,7 +73,7 @@ class Node:
 		:rtype: str
 		"""
 		dot = ""
-		for v, e in self.edges_out:
+		for v, e in self.children:
 			dot += f"{self.idx}->{v} [weight={e}];\n"
 		return dot
 
@@ -130,8 +129,8 @@ def convert_fx(module, times, memories):
 		indices[node.name] = i + 1
 		for dep in node.all_input_nodes:
 			weight = memories[dep.name]
-			graph[dep.name].edges_out.append((indices[node.name], weight))
-			graph[node.name].edges_in.append((indices[dep.name]))
+			graph[dep.name].children.append((indices[node.name], weight))
+			graph[node.name].parents.append((indices[dep.name]))
 
 	return graph
 
@@ -179,7 +178,7 @@ def write_metis(graph):
 	"""
 	file = tempfile.NamedTemporaryFile("w+", dir=".")
 	n = len(graph)
-	m = sum(map(lambda n: len(n.edges_in), list(graph.values())))
+	m = sum(map(lambda n: len(n.parents), list(graph.values())))
 	fmt = "110"
 	ncon = 1
 	file.write(f"{n} {m} {fmt} {ncon}\n")

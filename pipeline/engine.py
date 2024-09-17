@@ -79,8 +79,8 @@ class Engine:
 		:type loss_fn: function (Tensor, Tensor) -> Tensor
 		:param schedule: list of operations. For more info, see schedule.
 		:type schedule: list[Operation]
-		:param split_size: list of micro batch sizes. The list should cover the entire batch, i.e. ``sum(split_size) == batch_size``
-		:type split_size: int or List[int]
+		:param mb_sizes: list of micro batch sizes. The list should cover the entire batch, i.e. ``sum(mb_sizes) == batch_size``
+		:type mb_sizes: int or List[int]
 		:param profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
 		:type profile: boolean
 

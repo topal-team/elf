@@ -1,10 +1,46 @@
-.. pipeline documentation master file, created by
-   sphinx-quickstart on Fri Jun 21 14:24:10 2024.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
+.. pipeline documentation master file
 
-Welcome to Pipeline's documentation!
-====================================
+Pipeline: Efficient Model Parallelism
+=====================================
+
+.. image:: _static/logo.webp
+   :alt: Pipeline Logo
+   :align: right
+   :width: 100px
+   :class: rounded-corners
+
+Welcome to the documentation for Pipeline, a powerful library for efficient model parallelism in deep learning.
+
+.. raw:: html
+
+   <style>
+   .rounded-corners {
+       border-radius: 10px;
+   }
+   </style>
+
+Features
+--------
+
+- Automatic model partitioning
+- Support for various scheduling algorithms
+- Easy integration with existing PyTorch models
+- Profiling with Nsight Systems
+
+Quick Start
+-----------
+
+.. code-block:: python
+
+   from pipeline import Pipeline
+   
+   model = YourLargeModel()
+   pipe = Pipeline(model, sample)
+
+   output, loss = pipe(inputs, targets, loss_fn)
+
+API Reference
+-------------
 
 .. autosummary::
    :toctree: generated
@@ -13,3 +49,10 @@ Welcome to Pipeline's documentation!
 
    pipeline
    pipeline.partitioners
+
+Indices and tables
+==================
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`

@@ -21,6 +21,7 @@ class Profiler(torch.fx.Interpreter):
 		"""
 		Moves ``x`` to the specified device if it is a tensor
 		If ``x`` is an iterable or dictionary, recursively moves every tensor contained in it to the device too
+		If ``x`` is a Node, modifies its value directly in the Interpreter's environment
 		Otherwise does not do anything
 
 		:param x: object to move to device memory
@@ -47,6 +48,14 @@ class Profiler(torch.fx.Interpreter):
 		return x
 
 	def move_dependencies(self, node, device):
+		"""
+		Moves all of the node's arguments to the specified device.
+
+		:param node: The node whose dependencies need to be moved
+		:type node: torch.fx.Node
+		:param device: The target device to move dependencies to
+		:type device: str or torch.device
+		"""
 		for i in range(len(node.args)):
 			node.update_arg(i, self.to_device(node.args[i], device))
 		for key, kwarg in node.kwargs.items():

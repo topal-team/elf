@@ -129,6 +129,18 @@ def get_inputs_outputs_single(part):
 
 
 def duplicate_symsizes(graph, times, memories):
+	"""
+	Duplicates symbolic size nodes in the graph to avoid sharing between different parts of the model. Having a unique ``sym_size`` node creates dependencies from the entire graph, making it impossible to partition it without long-range connections.
+
+	:param graph: The computational graph to modify
+	:type graph: torch.fx.Graph
+	:param times: A dictionary mapping node names to their execution times
+	:type times: Dict[str, float]
+	:param memories: A dictionary mapping node names to their memory usage
+	:type memories: Dict[str, int]
+
+	:return: None. The function modifies the graph in-place.
+	"""
 	i = 0
 	for node in graph.nodes:
 		if node.name == "sym_size_int":
@@ -163,18 +175,18 @@ def partition_graph(model, n, sample, mode="naive"):
 	:type sample: Tensor
 	:param mode: Different modes are available:
 
-		- naive: does not take into account memory, no constraint on the number of inputs/outputs
-		- constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
-		- metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
-		- dagP: like METIS, but uses dagP to enforce acyclicity of partition.
+	        - naive: does not take into account memory, no constraint on the number of inputs/outputs
+	        - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
+	        - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
+	        - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
 
 	:type mode: str
 
 	:return:
 
-		- ``n`` new modules corresponding to the partition
-		- name of input variables for each module. Each one of them takes its inputs as named parameters with these names
-		- name of output variables for each module. Each one of them outputs a dictionary with these names as keys
+	        - ``n`` new modules corresponding to the partition
+	        - name of input variables for each module. Each one of them takes its inputs as named parameters with these names
+	        - name of output variables for each module. Each one of them outputs a dictionary with these names as keys
 
 	:rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
 	"""
