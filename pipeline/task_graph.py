@@ -1,6 +1,5 @@
 """
-Manipulate dependency graphs corresponding to schedules.
-This is helpful to do static analysis before execution, for instance to prevent dependencies cycles.
+Manipulate dependency graphs corresponding to schedules
 """
 
 import sys

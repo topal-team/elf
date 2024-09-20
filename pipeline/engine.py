@@ -1,5 +1,5 @@
 """
-Execution of the pipeline
+Execution manager
 """
 
 import torch
@@ -11,6 +11,18 @@ from .utils import Timer
 import logging
 
 logger = logging.getLogger("engine")
+
+
+def _fake_p2p(data):
+	"""
+	Simulates P2P communication by creating a fake work.
+
+	:param data: Input data to be processed
+	:type data: Iterator[Tuple[str, Tensor]]
+	:return: Dictionary with fake communication buffers
+	:rtype: dict
+	"""
+	return {key: [None, value.detach()] for key, value in data}
 
 
 def op_to_str(op):
@@ -44,7 +56,7 @@ class Engine:
 		self.rank = self.blocks[0].rank if blocks else None
 		for b in self.blocks:
 			assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
-		self.id_to_block = {str(b.id): b for b in self.blocks}
+		self.id_to_block = {b.id: b for b in self.blocks}
 		self.comms = []
 
 	def _run_comms(self):
@@ -110,16 +122,20 @@ class Engine:
 		warmup_start = None
 
 		for op in schedule:
-			block = self.id_to_block.get(str(op.block_id))
+			block = self.id_to_block.get(op.block_id)
 			if block is None:
 				continue  # not my job
 
 			logger.debug(f"Computing {op} on block {block} with options {op.options}")
+
 			if profile:
 				torch.cuda.nvtx.range_push(f"{block}:{op}")
 			if warmup_start is None and op.op != OperationType.RECV_FORWARD:
+				# Warmup time is the time spent waiting for the first forward
+				# The first operation after that is the end of warmup
 				torch.cuda.synchronize()
 				warmup_start = time.time()
+
 			match op.op:
 				case OperationType.FORWARD:
 					self._run_comms()
@@ -131,9 +147,7 @@ class Engine:
 					if block.next is None:
 						i, start = current_target
 						end = start + mb_sizes[i]
-						with Timer() as timer:
-							loss = compute_loss(block, result[i], target[start:end], loss_fn)
-						block.compute_time += timer.time()
+						loss = compute_loss(block, result[i], target[start:end], loss_fn)
 						losses.append(loss)
 						logger.debug(f"{block} - Computed loss = {loss}")
 						current_target = (i + 1, end)
@@ -142,23 +156,23 @@ class Engine:
 					block.backward(**op.options)
 
 				case OperationType.SEND_FORWARD:
-					if (op.options.get("dst") or block.next) == block.rank:
-						# The next block is on the same device ; we want to bypass p2p comms
-						next_block = self.id_to_block.get(str(op.block_id + 1))
-						next_block.inputs.append(
-							{key: [None, value.detach()] for key, value in block.act_to_send.popleft().items()}
-						)
+					if op.options.get("dst", block.next) == block.rank:
+						# The next block is on the same device ; we bypass p2p comms
+						next_block = self.id_to_block.get(op.block_id + 1)
+						acts = block.act_to_send.popleft()
+						acts = {block.name_mapping_out.to_input(k): v for k, v in acts.items()}
+						next_block.inputs_to_forward.append(_fake_p2p(acts.items()))
 
 					if comm := block.send_forward(**op.options):
 						self.comms.extend(comm)
 
 				case OperationType.SEND_BACKWARD:
-					if (op.options.get("src") or block.previous) == block.rank:
-						# The previous block is on the same device ; we want to bypass p2p comms
-						next_block = self.id_to_block.get(str(op.block_id - 1))
-						next_block.grads_to_backward.append(
-							{key: [None, value.detach()] for key, value in block.grads_to_send.popleft().items()}
-						)
+					if op.options.get("src", block.previous) == block.rank:
+						# The previous block is on the same device ; we bypass p2p comms
+						next_block = self.id_to_block.get(op.block_id - 1)
+						grads = block.grads_to_send.popleft()
+						grads = {block.name_mapping_in.to_output(k): v for k, v in grads.items()}
+						next_block.grads_to_backward.append(_fake_p2p(grads.items()))
 
 					if comm := block.send_backward(**op.options):
 						self.comms.extend(comm)
@@ -166,9 +180,8 @@ class Engine:
 				case OperationType.RECV_FORWARD:
 					if block.previous is None:
 						microbatch = next(microbatches)
-						block.inputs_to_forward.append(
-							{key: [None, value] for key, value in zip(block.inputs, microbatch)}
-						)
+						inputs = zip(block.inputs, microbatch)
+						block.inputs_to_forward.append(_fake_p2p(inputs))
 
 					if comm := block.recv_forward(mb_sizes[op.mb_id], **op.options):
 						self.comms.extend(comm)
@@ -183,13 +196,14 @@ class Engine:
 			if profile:
 				torch.cuda.nvtx.range_pop()
 
-		logger.debug(f"[Rank {self.rank}] - Finished execution !")
+		logger.debug(f"[Rank {self.rank}] - Finished execution")
 
 		self._run_comms()  # finish all comms
 		torch.cuda.synchronize()
 		cooldown_end = time.time()
 		dist.barrier()
 		pipe_end = time.time()
+
 		compute_time = 0
 		for block in self.blocks:
 			compute_time += block.compute_time
@@ -227,14 +241,16 @@ def compute_loss(block, output, target, loss_fn):
 	output = output.detach()
 	output.requires_grad = True
 
-	try:
-		loss = loss_fn(output, target, reduction="sum")
-	except TypeError:
-		loss = loss_fn(output, target)
-	loss.backward()
+	with Timer() as timer:
+		try:
+			loss = loss_fn(output, target, reduction="sum")
+		except TypeError:
+			loss = loss_fn(output, target)
+		loss.backward()
+	block.compute_time += timer.time()
 
 	# TODO: multiple outputs
 	key = list(block.outputs)[0]
-	block.grads_to_backward.append({key: [None, output.grad.data]})
+	block.grads_to_backward.append(_fake_p2p([(key, output.grad.data)]))
 
 	return loss

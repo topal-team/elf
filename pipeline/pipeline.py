@@ -1,317 +1,20 @@
 """
-Core pipeline objects
+Pipeline API and setup
 """
 
 import os
 import torch
 import torch.distributed as dist
+from .block import PipelineBlock
 from .schedule import *
 from .engine import Engine
-from .utils import Timer, TensorMetadata, activations_offloading
+from .utils import TensorMetadata, NameMapping
+from .task_graph import graph_from_schedule, find_cycles, fix_cycle
 from .partitioners import partition_graph, get_inputs_outputs_single, create_subgraph
-from collections import deque
+
 import logging
 
 logger = logging.getLogger("pipeline")
-
-
-class PipelineBlock:
-	"""
-	Pipelines are made up of sequential blocks, numbered [0..n]
-	Each block is one layer or group of contiguous layers placed on one device
-	"""
-
-	def __init__(self, model, id_, placement, inputs, outputs):
-		"""
-		:param model: layer / group of layers that will perform the computation
-		:type model: nn.Module
-		:param id_: number of this block in the pipeline
-		:type id_: int
-		:param placement: mapping of each id on a device
-		:type placement: List[int]
-		:param inputs: name of variables taken as input by the block
-		:type inputs: List[str]
-		:param outputs: name of variables returned by the block
-		:type outputs: List[str]
-		"""
-		super(PipelineBlock, self).__init__()
-		# Block infos
-		self.rank = placement[id_]  # global rank
-		self.model = model.cuda() if torch.cuda.is_available() else model
-
-		self.id = id_  # rank in the model
-		self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-
-		# Queues of tensors to process
-		# Structure of one element is {variable1: [Work, Tensor], variable2: [Work, Tensor], ..}
-		self.inputs_to_forward = deque()  # Waiting for forward
-		self.grads_to_backward = deque()  # Waiting for backward
-
-		# Structure of one element is {variable1: Tensor, variable2: Tensor, ..}
-		self.act_to_send = deque()  # Sent to next block
-		self.grads_to_send = deque()  # Sent to previous block
-		self.act_to_keep = deque()  # Kept for backward
-		self.inputs_to_keep = deque()  # Kept for backward
-
-		# Ranks where the previous/next blocks in the model are placed
-		self.previous = None if self.id == 0 else placement[self.id - 1]
-		self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
-
-		self.metadata = {}
-		self.out_metadata = {}
-
-		self.compute_time = 0  # used to measure idle time
-
-		self.inputs = sorted(inputs)  # name of input variables
-		self.outputs = sorted(outputs)  # name of output variables
-		# sorted alphabetically to make sure the order is consistent across devices
-		# note: can this order matter ? can it be faster to communicate in some order depending on the tensor shapes/sizes ?
-
-	def __str__(self) -> str:
-		return f"[Layer {self.id} : GPU {self.rank}]"
-
-	def forward(self, **options):
-		"""
-		Perform the forward pass for one tensor of activations and register it as computed
-
-		:param **options: options to modify the forward behaviour
-		:return: if this is the last block of the pipeline, returns its output. Otherwise returns None
-		:rtype: Tensor or None
-		"""
-		logger.debug(f"{self} - Computing one forward with options {options}")
-
-		# Wait for all communications to finish
-		x = self.inputs_to_forward.popleft()
-		for key in self.inputs:
-			work, i = x[key]
-			if work is not None:
-				work.wait()
-			x[key] = i
-
-			if x[key].dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-				x[key].requires_grad = True
-
-		with Timer() as timer:
-			if options.get("remat"):
-				with torch.no_grad():
-					y = self.model(**x)
-			elif options.get("offload"):
-				with activations_offloading():
-					y = self.model(**x)
-				self.act_to_keep.append(y)
-				# x = x.cpu()
-			else:
-				y = self.model(**x)
-				self.act_to_keep.append(y)
-
-		self.compute_time += timer.time()
-
-		self.act_to_send.append(y)
-		self.inputs_to_keep.append(x)
-
-		if self.next is None:
-			return self.act_to_send.popleft()
-
-	def backward(self, **options):
-		"""
-		Perform the backward pass for one tensor of gradients and register it as computed
-		Backward assumes activations AND grads to be on top of the queue
-
-		:param **options: options to modify the backward behaviour
-		"""
-		logger.debug(f"{self} - Computing one backward with options {options}")
-
-		x = self.inputs_to_keep.popleft()
-
-		if options.get("remat"):
-			with Timer() as timer:
-				act = self.model(**x)
-			self.compute_time += timer.time()
-		elif options.get("offload"):
-			act = self.act_to_keep.popleft().cuda()
-			# x = x.cuda()
-		else:
-			act = self.act_to_keep.popleft()
-
-		# Wait for all communications to finish
-		grads = self.grads_to_backward.popleft()
-		for key in self.outputs:
-			work, g = grads[key]
-			if work is not None:
-				work.wait()
-			grads[key] = g
-
-		with Timer() as timer:
-			for key in self.outputs:
-				# Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
-				act[key].backward(grads[key], retain_graph=(key != self.outputs[-1]))
-		self.compute_time += timer.time()
-
-		self.grads_to_send.append(
-			{key: value.grad.data for key, value in x.items() if value.requires_grad}
-		)
-
-	def send_forward(self, **options):
-		"""
-		Send one activation to the next layer in the model
-
-		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
-		:rtype: List[dist.P2POp] or None
-		"""
-		dst = options.get("dst") or self.next
-		if dst is None or dst == self.rank:
-			return
-
-		activations = self.act_to_send.popleft()
-
-		if options.get("batch"):
-			return [dist.P2POp(dist.isend, a, dst) for a in activations.values()]
-		else:
-			logger.debug(f"{self} - Sending activations to layer {self.id + 1} on rank {dst}")
-			for a in activations.values():
-				dist.isend(a, dst)
-
-	def send_backward(self, **options):
-		"""
-		Send one gradient tensor to the previous layer in the model
-
-		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
-		:rtype: List[dist.P2POp] or None
-		"""
-		dst = options.get("dst") or self.previous
-		if dst is None or dst == self.rank:
-			return
-
-		grads = self.grads_to_send.popleft()
-
-		if options.get("batch"):
-			return [dist.P2POp(dist.isend, g, dst) for g in grads.values()]
-		else:
-			logger.debug(f"{self} - Sending gradients to layer {self.id - 1} on rank {dst}")
-			for g in grads.values():
-				dist.isend(g, dst)
-
-	def recv_forward(self, mb_size, **options):
-		"""
-		Receive and store one activation to forward
-
-		:param mb_size: size of the micro batch to receive
-		:type mb_size: int
-		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
-		:rtype: List[dist.P2POp] or None
-		"""
-		src = options.get("src") or self.previous
-		if options.get("offload") and len(self.act_to_keep) > 0:
-			# Free memory just before allocating the next buffer
-			activations_offloading().wait_for_offloading()
-
-		if src is None or src == self.rank:
-			return
-
-		buffers = {}
-		for key in self.inputs:
-			buffers[key] = [None, self.metadata[key].get_buffer(mb_size)]
-
-		if options.get("batch"):
-			# This communication needs to be batched ;
-			# instead of executing it, we instanciate an object with the right setup and return it
-			self.inputs_to_forward.append(buffers)
-			return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.inputs]
-
-		else:
-			logger.debug(
-				f"{self} - Starting to receive activations with shape {self.metadata} from layer {self.id - 1} on rank {src}"
-			)
-			stream = torch.cuda.Stream()
-			with torch.cuda.stream(stream):
-				for key in self.inputs:
-					work = dist.irecv(buffers[key][1], src)
-					buffers[key][0] = work
-
-			torch.cuda.current_stream().wait_stream(stream)  # needed ?
-			self.inputs_to_forward.append(buffers)
-
-	def recv_backward(self, mb_size, **options):
-		"""
-		Receive and store one gradient to backward
-
-		:param mb_size: size of the micro batch to receive
-		:type mb_size: int
-		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
-		:rtype: List[dist.P2POp] or None
-		"""
-		src = options.get("src") or self.next
-
-		if options.get("offload"):
-			# Start moving activations back to gpu
-			activations_offloading().prefetch()
-
-		if src is None or src == self.rank:
-			return
-
-		buffers = {}
-		for key in self.outputs:
-			buffers[key] = [None, self.out_metadata[key].get_buffer(mb_size)]
-
-		if options.get("batch"):
-			# This communication needs to be batched ;
-			# instead of executing it, we instanciate an object with the right setup and return it
-			self.grads_to_backward.append(buffers)
-			return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.outputs]
-
-		else:
-			logger.debug(
-				f"{self} - Starting to receive gradients with shape {self.out_metadata} from layer {self.id + 1} on rank {src}"
-			)
-			stream = torch.cuda.Stream()
-			with torch.cuda.stream(stream):
-				for key in self.outputs:
-					work = dist.irecv(buffers[key][1], src)
-					buffers[key][0] = work
-
-			torch.cuda.current_stream().wait_stream(stream)  # needed ?
-			self.grads_to_backward.append(buffers)
-
-	def register_metadata(self):
-		"""
-		Performs a pseudo forward pass to register the input and output shapes
-
-		.. warning::
-		    We assume that every micro batch has the same shape, except for the micro batch size
-		"""
-		# Receive metadata of inputs
-		if self.previous is not None and self.previous != self.rank:
-			for key in self.inputs:
-				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=self.previous)
-				self.metadata[key] = TensorMetadata.from_tensor(metadata)
-
-		# We perform a forward pass with dummy data to get the output shapes (except for batch size) of all blocks
-		dummy = {key: self.metadata[key].get_buffer(1) for key in self.inputs}
-		for buffer in dummy.values():
-			if buffer.dtype == torch.int64:
-				buffer[:] = 1  # avoid problems with embeddings that can go out of vocab size :)
-		y = self.model(**dummy)
-
-		for key in self.outputs:
-			if not isinstance(y[key], torch.Tensor):
-				raise RuntimeError(
-					f"Non-tensor output from block {self} : key {key} has type {type(y[key])}."
-				)
-
-			# save shapes except batch size
-			self.out_metadata[key] = TensorMetadata(y[key].squeeze(0))
-
-		logger.debug(f"{self} - Registered metadata {self.metadata} => {self.out_metadata}")
-
-		# Send metadata to next block
-		if self.next is not None and self.next != self.rank:
-			for key in self.outputs:
-				dist.send(self.out_metadata[key].to_tensor(), dst=self.next)
 
 
 class Pipeline:
@@ -321,13 +24,13 @@ class Pipeline:
 
 	def __init__(self, model, sample, placement="auto", partition="metis", schedule="afab"):
 		"""
-		:param model: the entire model to pipeline
+		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
 		:type model: nn.Module
 		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model.
 		:type sample: torch.Tensor or List[torch.Tensor]
-		:param placement: list of device ranks. Block i of the pipeline will be placed on rank placement[i]. Leave to default ("auto") for automatic placement, which is [0, 1, .., world size - 1]
+		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement, which is ``[0, 1, .., world size - 1]``
 		:type placement: List[int] or str
-		:param partition: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their number of parameters
+		:param partition: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
 		:type partition: boolean or str
 		:param schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b"), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
 		:type schedule: str or function(List[int], int, **kwargs) -> List[Operation]
@@ -337,34 +40,40 @@ class Pipeline:
 				"Trying to create a pipeline but no multi-gpu distributed setup has been found."
 			)
 
+		ws = int(os.getenv("WORLD_SIZE"))
 		if placement == "auto":
-			ws = int(os.getenv("WORLD_SIZE"))
 			placement = [i for i in range(ws)]
+
+		assert max(placement) < ws, "Placement is out of bounds"
+
 		if isinstance(partition, str):
-			model, inputs, outputs = shared_partition(model, placement, sample, partition)
+			try:
+				model, inputs, outputs = shared_partition(model, placement, sample, partition)
+			except Exception as e:
+				logger.error(
+					"Error partitioning the model. This probably means that your model uses features either not supported by torch.fx/torch.export, or by this library (such as skip connections). If the error persists, consider using a pre-partitioned model"
+				)
+				raise e
 		elif not partition:
-			model, inputs, outputs = local_partition(model, placement)
+			try:
+				model, inputs, outputs = local_partition(model, placement)
+			except Exception as e:
+				logger.error(
+					"Error partitioning the model. This probably means that your model uses features either not supported by torch.fx/torch.export"
+				)
+				raise e
 		else:
 			raise Exception(
 				"Partition strategy should be either False when using pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
 			)
 
-		match schedule.lower():
-			case "afab":
-				self.scheduler = generate_afab_schedule
-			case "1f1b":
-				self.scheduler = generate_1f1b_schedule
-			case "hanayo":
-				self.scheduler = generate_hanayo_schedule
-			case _:
-				self.scheduler = schedule
-
-		self.blocks = create_pipeline(model, placement, inputs, outputs)
 		self.placement = placement
-		self.schedule = []
+		self.scheduler = self._get_scheduler(schedule)
+		self.blocks = self._create_pipeline(model, inputs, outputs)
 		self.engine = Engine(self.blocks)
 
 		# Used to avoid re-generating schedule every time
+		self.schedule = []
 		self.last_options = {}
 		self.last_nmb = 0
 
@@ -384,58 +93,23 @@ class Pipeline:
 		:type profile: boolean
 
 		:return: result of the forward pass and loss value if the last block of the pipeline is managed by this process
-		:rtype: Tensor, Tensor or None, None
+		:rtype: (Tensor, Tensor) or (None, None)
 		"""
-		# Split size can be an int or list of ints ; make it always a list
-		if isinstance(split_size, int):
-			n_micro_batches = batch.size(0) // split_size
-			mb_sizes = [split_size for _ in range(n_micro_batches)]
-			if batch.size(0) % split_size != 0:
-				mb_sizes.append(batch.size(0) % split_size)
-		else:
-			assert sum(split_size) == batch.size(0), "Splits do not cover the entire batch"
-			mb_sizes = split_size
-			n_micro_batches = len(split_size)
-
-		if n_micro_batches != self.last_nmb or options != self.last_options:
-			# Different number of micro batches ; we have to recompute the schedule
-			self.schedule = self.scheduler(self.placement, n_micro_batches, **options)
-			self.last_options = options
-			self.last_nmb = n_micro_batches
-
-			# Construct graph, detech cycle and add communication batching to fix them
-			cycles = find_cycles(graph_from_schedule(self.schedule))
-			if cycles and dist.get_rank() == 0:
-				logger.warning("Found potential deadlocks in the schedule ! Fixing them.")
-				for c in cycles:
-					logger.debug(f"Cycle : {c}")
-			for c in cycles:
-				fix_cycle(c)
-
-			# Remove all operations that are not ours
-			ids = list(
-				map(lambda b: b.id, self.blocks)
-			)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
-			self.schedule = list(filter(lambda op: op.block_id in ids, self.schedule))
-
 		# We expect a list of arguments, not a single tensor
 		if isinstance(batch, torch.Tensor):
 			batch = [batch]
 
-		# Full forward pass to register metadata used to allocate tensors later
-		if self.blocks[0].previous is None:
-			# Take all
-			for k, v in zip(self.blocks[0].inputs, batch):
-				self.blocks[0].metadata[k] = TensorMetadata(v[0])  # Don't register batch size
+		mb_sizes = self._get_mb_sizes(split_size, batch)
+		n_micro_batches = len(mb_sizes)
 
-		for i in range(len(self.blocks)):
-			b = self.blocks[i]
-			# Sync metadata of fused blocks
-			if i > 0 and self.blocks[i - 1].rank == b.rank:
-				b.metadata = self.blocks[i - 1].out_metadata
+		if n_micro_batches != self.last_nmb or options != self.last_options:
+			# We have to recompute the schedule
+			self._generate_schedule(n_micro_batches, options)
 
-			b.register_metadata()
-			logger.debug(f"{b} - Registered metadata {b.metadata} -> {b.out_metadata}")
+			self.last_options = options
+			self.last_nmb = n_micro_batches
+
+		self._register_metadata(batch)
 
 		# Execute the schedule
 		result, losses, times = self.engine.train_step(
@@ -448,45 +122,135 @@ class Pipeline:
 			block.act_to_send.clear()
 
 		self.times = times
+
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:
-			return torch.cat(result, dim=0), torch.tensor(losses, device=torch.cuda.current_device()).sum(
-				dim=0, keepdim=True
-			)
-
+			result = torch.cat(result, dim=0)
+			losses = torch.tensor(losses, device=torch.cuda.current_device())
+			losses = losses.sum(dim=0, keepdim=True)
+			return result, losses
 		else:
 			return None, None
 
 	def parameters(self):
 		return [{"params": block.model.parameters()} for block in self.blocks]
 
+	def _get_mb_sizes(self, split_size, batch):
+		"""
+		Determine the sizes of micro-batches based on the given split_size and batch.
 
-def create_pipeline(layers, placement, inputs, outputs):
-	"""
-	Transforms a list of layers placed on different devices to a working pipeline
+		:param split_size: Either an int for equal-sized micro-batches or a list of ints for custom sizes.
+		:type split_size: int or List[int]
+		:param batch: The input batch to be split.
+		:type batch: List[torch.Tensor]
+		:return: A list of micro-batch sizes.
+		:rtype: List[int]
+		"""
+		# Split size can be an int or list of ints ; make it always a list
+		# Assuming all elements in the list have the same batch size
+		batch_size = batch[0].size(0)
+		if isinstance(split_size, int):
+			n_micro_batches = batch_size // split_size
+			mb_sizes = [split_size for _ in range(n_micro_batches)]
+			if batch_size % split_size != 0:
+				mb_sizes.append(batch_size % split_size)
+		else:
+			assert sum(split_size) == batch_size, "Splits do not cover the entire batch"
+			mb_sizes = split_size
 
-	:param layers: List of layers / groups of layers coming from a partitioned model. This list has to be sequential in terms of computation
-	:type layers: List[nn.Module]
-	:param placement: list of device ranks
-	:type placement: List[int]
-	:param inputs: name of variables taken as input by each block
-	:type inputs: List[List[str]]
-	:param outputs: name of variables returned by each block
-	:type outputs: List[List[str]]
+		return mb_sizes
 
-	:return: list of blocks handled by this process with everything set up for the pipeline to work
-	:rtype: List[PipelineBlock]
-	"""
-	rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else "cpu"
+	def _get_scheduler(self, schedule):
+		match schedule.lower():
+			case "afab":
+				return generate_afab_schedule
+			case "1f1b":
+				return generate_1f1b_schedule
+			case "hanayo":
+				return generate_hanayo_schedule
+			case _:
+				return schedule
 
-	ids = [i for i in range(len(placement)) if placement[i] == rank]
-	blocks = []
-	for i in range(len(layers)):
-		new_block = PipelineBlock(layers[i], ids[i], placement, inputs[i], outputs[i])
-		blocks.append(new_block)
-		logger.info(f"{new_block} : inputs = {new_block.inputs}, outputs = {new_block.outputs}")
+	def _generate_schedule(self, n_micro_batches, options):
+		"""
+		Generate a schedule for one execution.
 
-	return blocks
+		:param n_micro_batches: Number of micro-batches
+		:type n_micro_batches: int
+		:param options: Additional options for the scheduler
+		:type options: dict
+		:return: Generated schedule
+		:rtype: List[Operation]
+		"""
+		schedule = self.scheduler(self.placement, n_micro_batches, **options)
+
+		# Construct graph, detech cycle and add communication batching to fix them
+		cycles = find_cycles(graph_from_schedule(schedule))
+		if cycles and dist.get_rank() == 0:
+			logger.warning("Found potential deadlocks in the schedule ! Fixing them.")
+			for c in cycles:
+				logger.debug(f"Cycle : {c}")
+		for c in cycles:
+			fix_cycle(c)
+
+		# Remove all operations that are not ours
+		ids = list(
+			map(lambda b: b.id, self.blocks)
+		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
+		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
+
+	def _register_metadata(self, batch):
+		"""
+		Register metadata for input tensors.
+
+		This method is called before the first forward pass to register the metadata
+		(shape and dtype) of input tensors. This information is used to allocate
+		tensors for communication later in the pipeline.
+
+		:param batch: Input batch of tensors
+		:type batch: List[torch.Tensor]
+		"""
+		# Full forward pass to register metadata used to allocate tensors later
+		if self.blocks[0].previous is None:
+			# Take all
+			for k, v in zip(self.blocks[0].inputs, batch):
+				self.blocks[0].metadata[k] = TensorMetadata(v[0])  # Don't register batch size
+
+		for i in range(len(self.blocks)):
+			b = self.blocks[i]
+			# Sync metadata of fused blocks
+			if i > 0 and self.blocks[i - 1].id == b.id - 1:
+				mapping = NameMapping(b.inputs, self.blocks[i - 1].outputs)
+				b.name_mapping_in = mapping
+				self.blocks[i - 1].name_mapping_out = mapping
+				b.metadata = {mapping.to_input(k): v for k, v in self.blocks[i - 1].out_metadata.items()}
+				logger.debug(f"Synced metadata of {b} and {self.blocks[i - 1]} : {mapping}")
+
+			b.register_metadata()
+
+	def _create_pipeline(self, layers, inputs, outputs):
+		"""
+		Transforms a list of layers placed on different devices to a working pipeline
+
+		:param layers: List of layers / groups of layers coming from a partitioned model. This list has to be sequential in terms of computation
+		:type layers: List[nn.Module]
+		:param inputs: name of variables taken as input by each block
+		:type inputs: List[List[str]]
+		:param outputs: name of variables returned by each block
+		:type outputs: List[List[str]]
+
+		:return: list of blocks handled by this process with everything set up for the pipeline to work
+		:rtype: List[PipelineBlock]
+		"""
+		rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else "cpu"
+
+		ids = [i for i in range(len(self.placement)) if self.placement[i] == rank]
+		blocks = []
+		for i in range(len(layers)):
+			new_block = PipelineBlock(layers[i], ids[i], self.placement, inputs[i], outputs[i])
+			blocks.append(new_block)
+			logger.info(f"{new_block} : inputs = {new_block.inputs}, outputs = {new_block.outputs}")
+		return blocks
 
 
 def shared_partition(model, placement, sample, mode):
@@ -565,8 +329,8 @@ def local_partition(model, placement):
 	:rtype: Tuple[List[nn.Module], List[List[str]], List[List[str]]]
 	"""
 	rank = dist.get_rank()
-	inputs = []
-	outputs = []
+	inputs = {}
+	outputs = {}
 	if isinstance(model, torch.nn.Module):
 		model = [model]
 	ids = [i for i in range(len(placement)) if placement[i] == rank]

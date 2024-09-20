@@ -1,20 +1,21 @@
 """
-Manage different types of schedule. All scheduling algorithm (GPipe, 1f1b, ...) are defined here.
+Manage different types of schedule.
 A schedule is a list of operations (see Operation) that will be executed in order by each device.
 Every rank should generate the entire schedule for all ranks, in order to detect and fix cycles/deadlocks.
 """
 
+from .task_graph import OperationType, Operation
 import logging
 
 logger = logging.getLogger("schedule")
 
 
-def add_forward_pass(schedule, block_id, mb_id, rank, options):
+def _add_forward_pass(schedule, block_id, mb_id, rank, options):
 	for op_type in [OperationType.RECV_FORWARD, OperationType.FORWARD, OperationType.SEND_FORWARD]:
 		schedule.append(Operation(block_id, mb_id, op_type, rank, **options))
 
 
-def add_backward_pass(schedule, block_id, mb_id, rank, options):
+def _add_backward_pass(schedule, block_id, mb_id, rank, options):
 	for op_type in [OperationType.RECV_BACKWARD, OperationType.BACKWARD, OperationType.SEND_BACKWARD]:
 		schedule.append(Operation(block_id, mb_id, op_type, rank, **options))
 
@@ -41,12 +42,12 @@ def generate_afab_schedule(placement, n_micro_batches, **options):
 		ids = [i for i in range(len(placement)) if placement[i] == rank]
 		for i in range(n_micro_batches):
 			for id_ in ids:
-				add_forward_pass(schedule, id_, i, rank, options)
+				_add_forward_pass(schedule, id_, i, rank, options)
 
 		# All backward
 		for i in range(n_micro_batches):
 			for id_ in reversed(ids):
-				add_backward_pass(schedule, id_, i, rank, options)
+				_add_backward_pass(schedule, id_, i, rank, options)
 
 	assert len(schedule) == n_micro_batches * n_stages * 2 * 3
 	return schedule
@@ -79,7 +80,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 		# Warmup phase : each device can compute until the micro batch forward is finished (n_stages), but it can only start after it was forwarded through all the previous layers (rank)
 		while i < (stages_per_device * n_micro_batches) and i < (n_stages - rank):
 			i += 1
-			add_forward_pass(schedule, b_f * n_devices + rank, fwds[b_f], rank, options)
+			_add_forward_pass(schedule, b_f * n_devices + rank, fwds[b_f], rank, options)
 			fwds[b_f] += 1
 
 			# each layer has time to compute n_devices micro batches before work arrives for the next layer
@@ -95,14 +96,14 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 		# Steady state
 		while i < (stages_per_device * n_micro_batches):
 			i += 1
-			add_backward_pass(schedule, b_b * n_devices + rank, bwds[b_b], rank, options)
+			_add_backward_pass(schedule, b_b * n_devices + rank, bwds[b_b], rank, options)
 			bwds[b_b] += 1
 
 			# Same as before, except that we can compute 2x less micro batches because half of the time is spent doing forwards
 			if (i - state) % (n_devices // 2) == 0 or (i - state) % n_micro_batches == 0:
 				b_b = (b_b - 1) % stages_per_device
 
-			add_forward_pass(schedule, b_f * n_devices + rank, fwds[b_f], rank, options)
+			_add_forward_pass(schedule, b_f * n_devices + rank, fwds[b_f], rank, options)
 			fwds[b_f] += 1
 
 			if (i >= n_stages and i % (n_devices // 2) == 0) or (i % n_micro_batches) == 0:
@@ -112,7 +113,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 			stages_per_device * n_micro_batches * 2 - (stages_per_device * n_micro_batches - state)
 		):
 			i += 1
-			add_backward_pass(schedule, b_b * n_devices + rank, bwds[b_b], rank, options)
+			_add_backward_pass(schedule, b_b * n_devices + rank, bwds[b_b], rank, options)
 			bwds[b_b] += 1
 
 			# Finish all backwards
@@ -151,15 +152,15 @@ def generate_hanayo_schedule(placement, n_micro_batches, **options):
 	for rank in range(n_devices):
 		done[rank] = min(n_devices - rank, n_micro_batches)
 		for i in range(done[rank]):
-			add_forward_pass(schedule, ids[rank][0], i, rank, options)
+			_add_forward_pass(schedule, ids[rank][0], i, rank, options)
 
 	for w in range(n_waves):
 		for mb in range(n_micro_batches):
 			for rank in reversed(range(n_devices)):
-				add_forward_pass(schedule, ids[rank][2 * w + 1], mb, rank, options)
+				_add_forward_pass(schedule, ids[rank][2 * w + 1], mb, rank, options)
 
 				if done[rank] < n_micro_batches * n_waves:
-					add_forward_pass(
+					_add_forward_pass(
 						schedule,
 						ids[rank][2 * (done[rank] // n_micro_batches)],
 						done[rank] % n_micro_batches,
@@ -168,7 +169,7 @@ def generate_hanayo_schedule(placement, n_micro_batches, **options):
 					)
 					done[rank] += 1
 				else:
-					add_backward_pass(
+					_add_backward_pass(
 						schedule,
 						ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)],
 						enod[rank] % n_micro_batches,
@@ -180,10 +181,10 @@ def generate_hanayo_schedule(placement, n_micro_batches, **options):
 	for w in range(n_waves):
 		for mb in range(n_micro_batches):
 			for rank in reversed(range(n_devices)):
-				add_backward_pass(schedule, ids[rank][-2 * (w + 1)], mb, rank, options)
+				_add_backward_pass(schedule, ids[rank][-2 * (w + 1)], mb, rank, options)
 
 				if enod[rank] < n_micro_batches * n_waves:
-					add_backward_pass(
+					_add_backward_pass(
 						schedule,
 						ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)],
 						enod[rank] % n_micro_batches,
@@ -193,23 +194,3 @@ def generate_hanayo_schedule(placement, n_micro_batches, **options):
 					enod[rank] += 1
 
 	return schedule
-
-
-if __name__ == "__main__":
-	from graph import *
-
-	placement = [0, 1, 2, 3, 3, 2, 1, 0]
-	schedule = generate_hanayo_schedule(placement, 2)
-	graph = graph_from_schedule(schedule)
-	if cycles := find_cycles(graph):
-		logger.warning("Found potential deadlocks in the schedule !")
-		for c in cycles:
-			print(c)
-		print()
-
-	for rank in range(max(placement) + 1):
-		local_schedule = list(filter(lambda op: op.rank == rank, schedule))
-		print(f"Rank {rank}")
-		print(local_schedule, "\n")
-else:
-	from .graph import *

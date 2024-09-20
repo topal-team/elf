@@ -118,12 +118,24 @@ def get_inputs_outputs_single(part):
 	"""
 	inputs = set()
 	outputs = set()
+
+	def add_outputs(arg):
+		if isinstance(arg, (list, tuple)):
+			for item in arg:
+				add_outputs(item)
+		elif hasattr(arg, "name"):
+			outputs.add(arg.name)
+		elif isinstance(arg, dict):
+			for value in arg.values():
+				add_outputs(value)
+
 	for node in part:
 		if node.op == "placeholder":
 			inputs.add(node.target)
 			part.remove(node)
 		if node.op == "output":
-			outputs.add(node.args[0].name)
+			for arg in node.args:
+				add_outputs(arg)
 			part.remove(node)
 	return part, inputs, outputs
 
@@ -192,18 +204,19 @@ def partition_graph(model, n, sample, mode="naive"):
 	"""
 	device = "cuda" if torch.cuda.is_available() else "cpu"
 	try:
-		dim = torch.export.Dim("batch")
-		dynamic_shapes = ({0: dim},)
-		trace = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes).module()
+		trace = torch.fx.symbolic_trace(model)
 
-	except Exception as err_export:
-		logger.info("Graph extraction using torch.export failed; falling back to torch.fx.")
-		logger.debug(str(err_export))
+	except Exception as err_fx:
+		logger.info("Graph extraction failed with torch.fx. Cannot partition the model.")
+		logger.debug(str(err_fx))
+
 		try:
-			trace = torch.fx.symbolic_trace(model)
-		except Exception as err_fx:
-			logger.info("Graph extraction failed with torch.fx. Cannot partition the model.")
-			logger.debug(str(err_fx))
+			dim = torch.export.Dim("batch")
+			dynamic_shapes = ({0: dim},)
+			trace = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes).module()
+		except Exception as err_export:
+			logger.info("Graph extraction using torch.export failed; falling back to torch.fx.")
+			logger.debug(str(err_export))
 			exit(1)
 
 	logger.info(f"Traced module has {len(trace.graph.nodes)} nodes")

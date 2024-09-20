@@ -1,5 +1,5 @@
 import pytest
-from ..graph import Operation, OperationType, graph_from_schedule
+from ..task_graph import Operation, OperationType, graph_from_schedule
 
 
 @pytest.mark.single

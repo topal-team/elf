@@ -91,6 +91,32 @@ class TensorMetadata:
 		return f"TensorMetadata({self.shape})"
 
 
+class NameMapping:
+	"""
+	Mapping between input/output variable names of two blocks
+	"""
+
+	def __init__(self, inputs, outputs):
+		self.inputs_to_outputs = {inp: out for inp, out in zip(inputs, outputs)}
+		self.outputs_to_inputs = {out: inp for inp, out in zip(inputs, outputs)}
+
+	def to_output(self, name):
+		return self.inputs_to_outputs[name]
+
+	def to_input(self, name):
+		return self.outputs_to_inputs[name]
+
+	def __repr__(self):
+		s = "NameMapping:(\n"
+		for inp, out in self.inputs_to_outputs.items():
+			s += f"  {inp} <-> {out}\n"
+		s += ")"
+		return s
+
+	def __str__(self):
+		return "NameMapping"
+
+
 class Timer:
 	"""
 	Utility context to time the execution of some code

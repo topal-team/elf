@@ -56,7 +56,7 @@ if __name__ == "__main__":
 	inputs = inputs.cuda()
 
 	for s, placement, schedule in setups:
-		pipe = Pipeline(model, inputs.cuda(), placement, schedule=schedule)
+		pipe = Pipeline(model, inputs, placement, schedule=schedule)
 		for size in split_sizes:
 			# if global_rank == 0: print(f'Memory allocated : {torch.cuda.memory_allocated() / 2**30:.3f} GB')
 
@@ -67,14 +67,14 @@ if __name__ == "__main__":
 			if global_rank == 0:
 				logger.info(f"{s} - Warming up")
 			for i in range(warmups):
-				_ = pipe(inputs.clone(), torch.empty(0), lambda x, y, **_: x.sum(), size, **options)
+				_ = pipe(inputs.clone(), torch.empty(0), lambda x, _: x.sum(), size, **options)
 			torch.cuda.reset_peak_memory_stats()
 
 			if global_rank == 0:
 				logger.info(f"{s} - Benchmark")
 			times = []
 			for i in range(iters):
-				_ = pipe(inputs.detach(), torch.empty(0), lambda x, y, **_: x.sum(), size, **options)
+				_ = pipe(inputs.detach(), torch.empty(0), lambda x, _: x.sum(), size, **options)
 				model.zero_grad()
 				times.append(pipe.times)
 

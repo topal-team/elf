@@ -1,6 +1,6 @@
 .. pipeline documentation master file
 
-Pipeline: Efficient Model Parallelism
+Pipeline: Efficient Parallelism for Training
 =====================================
 
 .. image:: _static/logo.webp
@@ -9,7 +9,7 @@ Pipeline: Efficient Model Parallelism
    :width: 100px
    :class: rounded-corners
 
-Welcome to the documentation for Pipeline, a powerful library for efficient model parallelism in deep learning.
+Welcome to the documentation for Pipeline, a library for efficient parallelism in deep learning.
 
 .. raw:: html
 
@@ -39,8 +39,19 @@ Quick Start
 
    output, loss = pipe(inputs, targets, loss_fn)
 
+
 API Reference
 -------------
+
+Pipeline Object
+~~~~~~~~~~~~~~~
+
+.. autoclass:: pipeline.Pipeline
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+   .. automethod:: __init__
 
 .. autosummary::
    :toctree: generated
