@@ -8,7 +8,7 @@ from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
 from .dagP import split_graph_dagP
-
+from .utils import RemoveInplaceTransformer
 import logging
 
 logger = logging.getLogger("partition")
@@ -221,6 +221,7 @@ def partition_graph(model, n, sample, mode="naive"):
 
 	logger.info(f"Traced module has {len(trace.graph.nodes)} nodes")
 
+	trace = RemoveInplaceTransformer(trace).transform()
 	sample = sample.to(device)
 	times, memories = profile_operations(trace, sample)
 
