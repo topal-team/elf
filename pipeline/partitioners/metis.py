@@ -118,7 +118,9 @@ def convert_fx(module, times, memories):
 	max_memory = max(tensor_memories)
 	memory_range = max_memory - min_memory
 	scaled_memories = {
-		name: to_weight(1 + 99 * ((memory - min_memory) / memory_range)) if memory != 0 else NON_TENSOR
+		name: to_weight(1 + 99 * ((memory - min_memory) / memory_range))
+		if memory != NON_TENSOR
+		else NON_TENSOR
 		for name, memory in memories.items()
 	}
 	memories = scaled_memories

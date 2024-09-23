@@ -17,6 +17,7 @@ class OperationType(Enum):
 	RECV_BACKWARD = 3
 	BACKWARD = 4
 	SEND_BACKWARD = 5
+	ALL_REDUCE_PARAM_GRADS = 6
 
 	def __repr__(self) -> str:
 		return self.name.lower()

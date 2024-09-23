@@ -22,6 +22,7 @@ def test_afab():
 		Operation(0, 1, OperationType.RECV_BACKWARD, 0),
 		Operation(0, 1, OperationType.BACKWARD, 0),
 		Operation(0, 1, OperationType.SEND_BACKWARD, 0),
+		Operation(0, None, OperationType.ALL_REDUCE_PARAM_GRADS, 0),
 		Operation(1, 0, OperationType.RECV_FORWARD, 1),
 		Operation(1, 0, OperationType.FORWARD, 1),
 		Operation(1, 0, OperationType.SEND_FORWARD, 1),
@@ -34,6 +35,7 @@ def test_afab():
 		Operation(1, 1, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 1, OperationType.BACKWARD, 1),
 		Operation(1, 1, OperationType.SEND_BACKWARD, 1),
+		Operation(1, None, OperationType.ALL_REDUCE_PARAM_GRADS, 1),
 	]
 
 
@@ -70,6 +72,7 @@ def test_1f1b():
 		Operation(0, 3, OperationType.RECV_BACKWARD, 0),
 		Operation(0, 3, OperationType.BACKWARD, 0),
 		Operation(0, 3, OperationType.SEND_BACKWARD, 0),
+		Operation(0, None, OperationType.ALL_REDUCE_PARAM_GRADS, 0),
 	]
 
 	schedule1 = list(filter(lambda op: op.rank == 1, schedule))
@@ -100,4 +103,5 @@ def test_1f1b():
 		Operation(1, 3, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 3, OperationType.BACKWARD, 1),
 		Operation(1, 3, OperationType.SEND_BACKWARD, 1),
+		Operation(1, None, OperationType.ALL_REDUCE_PARAM_GRADS, 1),
 	]

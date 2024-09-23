@@ -22,7 +22,7 @@ class Pipeline:
 	Model wrapper for pipelining that manages the pipeline setup
 	"""
 
-	def __init__(self, model, sample, placement="auto", partition="metis", schedule="afab"):
+	def __init__(self, model, sample, placement="auto", partition="metis", schedule="afab", dp=1):
 		"""
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
 		:type model: nn.Module
@@ -39,12 +39,18 @@ class Pipeline:
 			logger.warning(
 				"Trying to create a pipeline but no multi-gpu distributed setup has been found."
 			)
+		ws = dist.get_world_size()
 
-		ws = int(os.getenv("WORLD_SIZE"))
 		if placement == "auto":
-			placement = [i for i in range(ws)]
+			placement = [i for i in range(ws // dp)]
 
 		assert max(placement) < ws, "Placement is out of bounds"
+		pp = max(placement) + 1
+
+		assert pp * dp <= ws, f"Requested PP = {pp}, DP = {dp} but only {ws} processes were spawned"
+
+		self.pp = pp
+		self.dp = dp
 
 		if isinstance(partition, str):
 			try:
@@ -70,6 +76,7 @@ class Pipeline:
 		self.placement = placement
 		self.scheduler = self._get_scheduler(schedule)
 		self.blocks = self._create_pipeline(model, inputs, outputs)
+		self._init_process_groups()
 		self.engine = Engine(self.blocks)
 
 		# Used to avoid re-generating schedule every time
@@ -133,7 +140,82 @@ class Pipeline:
 			return None, None
 
 	def parameters(self):
+		"""
+		Returns an iterator over the parameters of all blocks in the pipeline.
+
+		:return: An iterator yielding parameter groups for each block.
+		:rtype: List[Dict[str, Iterator[torch.nn.Parameter]]]
+		"""
 		return [{"params": block.model.parameters()} for block in self.blocks]
+
+	def named_parameters(self):
+		"""
+		Returns an iterator over the named parameters of all blocks in the pipeline.
+
+		:return: An iterator yielding tuples of (name, parameter) for all parameters in the pipeline.
+		:rtype: Iterator[Tuple[str, torch.nn.Parameter]]
+		"""
+		full_params = {}
+		for block in self.blocks:
+			for p_name, p in block.model.named_parameters():
+				full_params[p_name] = p
+		return full_params
+
+	def zero_grad(self, set_to_none=True):
+		"""
+		Sets the gradients of all parameters in the pipeline to zero.
+
+		:param set_to_none: If True, set the gradients to None instead of zero. This can provide memory savings.
+		:type set_to_none: bool
+		"""
+		for block in self.blocks:
+			block.model.zero_grad(set_to_none=set_to_none)
+
+	def clear(self):
+		"""
+		Clear the pipeline's internal state and destroy process groups.
+		"""
+		torch.cuda.synchronize()
+		dist.barrier()
+		for block in self.blocks:
+			if block.dp_group:
+				dist.destroy_process_group(block.dp_group)
+
+		dist.destroy_process_group(self.blocks[0].pp_group)
+
+	def save(self, path, worker=0):
+		"""
+		Save the model's state dictionary to a file.
+
+		.. warning::
+			This method should not be called when the pipeline was initialized with `partition=False`.
+
+		:param path: The file path where the model state will be saved.
+		:type path: str
+		:param worker: The rank of the worker that will save the file. Defaults to 0.
+		:type worker: int, optional
+		"""
+		rank = dist.get_rank()
+		if rank == worker:
+			full_state = {}
+			n_devices = max(self.placement) + 1
+			for d in range(n_devices):
+				if d == worker:
+					param_list = self.named_parameters()
+					for p_name, p in param_list.items():
+						full_state[p_name] = p.cpu().detach()
+				else:
+					param_list = [{}]
+					dist.recv_object_list(param_list, src=d, group=self.blocks[0].pp_group)
+
+					for p_name, p in param_list[0].items():
+						full_state[p_name] = p.cpu().detach()
+
+			torch.save(full_state, path)
+
+		else:
+			if worker in self.placement:
+				dist.send_object_list([self.named_parameters()], dst=worker, group=self.blocks[0].pp_group)
 
 	def _get_mb_sizes(self, split_size, batch):
 		"""
@@ -242,15 +324,50 @@ class Pipeline:
 		:return: list of blocks handled by this process with everything set up for the pipeline to work
 		:rtype: List[PipelineBlock]
 		"""
-		rank = int(os.getenv("RANK")) if "RANK" in os.environ.keys() else "cpu"
+		rank = dist.get_rank()
 
-		ids = [i for i in range(len(self.placement)) if self.placement[i] == rank]
+		offset = (rank // self.pp) * self.pp
+		placement = [p + offset for p in self.placement]
+
+		ids = [i for i in range(len(placement)) if placement[i] == rank]
 		blocks = []
 		for i in range(len(layers)):
-			new_block = PipelineBlock(layers[i], ids[i], self.placement, inputs[i], outputs[i])
+			new_block = PipelineBlock(layers[i], ids[i], placement, inputs[i], outputs[i])
 			blocks.append(new_block)
 			logger.info(f"{new_block} : inputs = {new_block.inputs}, outputs = {new_block.outputs}")
+
 		return blocks
+
+	def _init_process_groups(self):
+		rank = dist.get_rank()
+		world_size = dist.get_world_size()
+
+		offset = (rank // self.pp) * self.pp
+		placement = [p + offset for p in self.placement]
+
+		ids = [i for i in range(len(placement)) if placement[i] == rank]
+		if self.dp > 1:
+			for stage in range(len(placement)):
+				members = [r for r in range(world_size) if (placement[stage] % self.pp) == (r % self.pp)]
+				if rank == members[0]:
+					logger.info(f"Creating DP group with members {members}")
+				dp_group = dist.new_group(members)
+				if stage in ids:
+					self.blocks[ids.index(stage)].dp_group = dp_group
+
+		if self.pp > 1:
+			for dp_rank in range(self.dp):
+				members = [r for r in range(world_size) if r // self.pp == dp_rank]
+				if rank == members[0]:
+					logger.info(f"Creating PP group with members {members}")
+				pp_group = dist.new_group(members)
+				if rank in members:
+					for b in self.blocks:
+						b.pp_group = pp_group
+					# Init communicators to avoid hangs later on
+					buffer = torch.empty(1, device=torch.cuda.current_device())
+					torch.cuda.synchronize()
+					dist.all_reduce(buffer, group=pp_group)
 
 
 def shared_partition(model, placement, sample, mode):
@@ -265,23 +382,25 @@ def shared_partition(model, placement, sample, mode):
 	:type sample: Tensor
 	:param mode: partitioner to use ; available options are :
 
-	    - "naive": simple load balancing algorithm
-	    - "constrained": naive with less communication
-	    - "metis": use METIS
-	    - "dagP": use dagP / rMLGP
-	    For more info, see partition.
+		- "naive": simple load balancing algorithm
+		- "constrained": naive with less communication
+		- "metis": use METIS
+		- "dagP": use dagP / rMLGP
+		For more info, see partition.
 
 	:type mode: str
 
 	:return:
 
-	    - Blocks for this process
-	    - Inputs for each block of this process
-	    - Outputs for each block of this process
+		- Blocks for this process
+		- Inputs for each block of this process
+		- Outputs for each block of this process
 
 	:rtype: List[nn.Module], List[List[str]], List[List[str]]
 	"""
 	rank = dist.get_rank()
+	ws = dist.get_world_size()
+	n_devices = max(placement) + 1
 
 	# Rank 0 profiles & partition the graph, then shares it to everyone
 	# TODO: what if devices are heterogenous ? how to profile correctly ?
@@ -296,9 +415,14 @@ def shared_partition(model, placement, sample, mode):
 
 		blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode=mode)
 		partition = list(zip(blocks, inputs.values(), outputs.values()))
-		input_list = [[] for _ in range(max(placement) + 1)]
+		input_list = [[] for _ in range(n_devices)]
 		for i, p in enumerate(placement):
 			input_list[p].append(partition[i])
+
+		# We share the partition to every block of every pipeline to ensure having the same modules everywhere
+		# TODO: use proper DP rank here
+		input_list = input_list * (ws // n_devices)
+		assert len(input_list) == ws
 
 	output_list = [None]
 	dist.scatter_object_list(output_list, input_list, src=0)
@@ -307,6 +431,11 @@ def shared_partition(model, placement, sample, mode):
 		[i for _, i, _ in output_list[0]],
 		[o for _, _, o in output_list[0]],
 	)
+
+	for m, i, o in zip(model, inputs, outputs):
+		logger.info(f"Rank {rank} - signature = {i} -> {o}")
+		logger.debug(f"Rank {rank} - code = {m.code}")
+
 	return model, inputs, outputs
 
 
@@ -323,9 +452,9 @@ def local_partition(model, placement):
 	:type placement: List[int]
 
 	:return: A tuple containing:
-	    - The partitioned model parts for the current rank
-	    - A list of inputs for each model part
-	    - A list of outputs for each model part
+		- The partitioned model parts for the current rank
+		- A list of inputs for each model part
+		- A list of outputs for each model part
 	:rtype: Tuple[List[nn.Module], List[List[str]], List[List[str]]]
 	"""
 	rank = dist.get_rank()

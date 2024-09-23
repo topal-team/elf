@@ -3,6 +3,7 @@ import sys
 sys.path.append("./")
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 import datasets
 from transformers import AutoTokenizer
 from models.llama3 import Llama, ModelArgs
@@ -33,6 +34,9 @@ def parse_args():
 	parser.add_argument("--epochs", type=int, default=3, help="Number of epochs to train")
 	parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
 	parser.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length")
+	parser.add_argument(
+		"-dp", "--data_parallel", type=int, default=1, help="Number of data parallel processes"
+	)
 	parser.add_argument(
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
 	)
@@ -69,7 +73,11 @@ def main():
 	)
 
 	# Create DataLoader
-	dataloader = DataLoader(tokenized_dataset, batch_size=args.batch_size, shuffle=True)
+	dataloader = DataLoader(
+		tokenized_dataset,
+		batch_size=args.batch_size // args.data_parallel,
+		sampler=DistributedSampler(tokenized_dataset, num_replicas=args.data_parallel, rank=rank // 4),
+	)
 
 	# Initialize model
 	model_args = ModelArgs(
@@ -80,15 +88,14 @@ def main():
 		max_seq_len=args.max_seq_len,
 	)
 
-	sample = torch.randint(0, 10, (args.batch_size // ws, args.max_seq_len))
+	sample = torch.randint(0, 10, (args.batch_size, args.max_seq_len))
 	model = Llama(model_args)
 	if rank == 0:
 		print(
 			"# of trainable parameters : ",
 			pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
 		)
-	placement = list(range(ws)) * 2
-	pipe = Pipeline(model, sample, placement=placement, partition="metis", schedule="1f1b")
+	pipe = Pipeline(model, sample, partition="metis", schedule="1f1b", dp=args.data_parallel)
 
 	# Initialize optimizer
 	optimizer = torch.optim.AdamW(pipe.parameters(), lr=args.lr)
@@ -116,6 +123,8 @@ def main():
 		if rank == ws - 1:
 			avg_loss = total_loss / len(dataloader)
 			print(f"Epoch {epoch + 1}/{args.epochs}, Average Loss: {avg_loss:.4f}")
+
+	pipe.clear()
 
 
 if __name__ == "__main__":

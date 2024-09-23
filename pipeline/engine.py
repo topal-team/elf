@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import time
 from .schedule import OperationType
-from .utils import Timer
+from .utils import Timer, op_to_str
 
 import logging
 
@@ -23,22 +23,6 @@ def _fake_p2p(data):
 	:rtype: dict
 	"""
 	return {key: [None, value.detach()] for key, value in data}
-
-
-def op_to_str(op):
-	"""
-	Pretty print for dist.P2POp
-
-	:param op: communication operation
-	:type op: dist.P2POp
-	:return: string describing the op
-	:rtype: string
-	"""
-	match op.op:
-		case dist.isend:
-			return f"Send to {op.peer}"
-		case dist.irecv:
-			return f"Receive from {op.peer}"
 
 
 class Engine:
@@ -102,11 +86,12 @@ class Engine:
 		- Losses for each micro-batch
 		- Insights about time taken, as a dict containing:
 
-		    - total: total time taken for the execution
-		    - idle: total time not used for computation for this process
-		    - start_idle: time between the start of execution and the first computation
-		    - end_idle: time between the last computation and the end of execution
-		    - bubble: idle time between first and last computation
+
+			- total: total time taken for the execution
+			- idle: total time not used for computation for this process
+			- start_idle: time between the start of execution and the first computation
+			- end_idle: time between the last computation and the end of execution
+			- bubble: idle time between first and last computation
 
 		:rtype: Tensor, Tensor, Dict[float]
 		"""
@@ -116,6 +101,9 @@ class Engine:
 		result = []
 		losses = []
 		current_target = (0, 0)  # micro batch id, position in target tensor
+
+		for b in self.blocks:
+			b.last_bwd_computed = 0
 
 		dist.barrier()  # useful for timing, but it probably slows down the execution a bit
 		pipe_start = time.time()
@@ -154,6 +142,7 @@ class Engine:
 
 					self._run_comms()
 					block.backward(**op.options)
+					block.last_bwd_computed = op.mb_id
 
 				case OperationType.SEND_FORWARD:
 					if op.options.get("dst", block.next) == block.rank:
@@ -189,6 +178,13 @@ class Engine:
 				case OperationType.RECV_BACKWARD:
 					if comm := block.recv_backward(mb_sizes[op.mb_id], **op.options):
 						self.comms.extend(comm)
+
+				case OperationType.ALL_REDUCE_PARAM_GRADS:
+					assert block.last_bwd_computed == len(mb_sizes) - 1, (
+						"Tried to run all reduce of parameters gradients before the backward for the last microbatch was computed. Last computed backward: "
+						+ str(block.last_bwd_computed)
+					)
+					block.all_reduce_param_grads(**op.options)
 
 				case _:
 					raise Exception(f"Unknown operation : {op}")

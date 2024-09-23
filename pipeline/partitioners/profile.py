@@ -100,15 +100,18 @@ def get_memory(x):
 	:return: memory estimation in bytes
 	:rtype: float
 	"""
-	if isinstance(x, torch.nn.Parameter):
-		return DONT_CUT_HERE
 	if isinstance(x, torch.Tensor):
 		return x.numel() * x.element_size()
-	elif isinstance(x, dict):
-		return sum([get_memory(v) for v in x.values()])
-	elif hasattr(x, "__iter__") and not isinstance(x, (str, torch.fx.proxy.Proxy)):
-		return sum([get_memory(v) for v in x])
-	return 0
+	# if isinstance(x, torch.nn.Parameter):
+	# 	return DONT_CUT_HERE
+	# elif isinstance(x, dict):
+	# 	return sum([get_memory(v) for v in x.values()])
+	# elif hasattr(x, "__iter__") and not isinstance(x, (str, torch.fx.proxy.Proxy)):
+	# 	return sum([get_memory(v) for v in x])
+	# return 0
+
+	# We dont want to cut anywhere that is not a tensor
+	return DONT_CUT_HERE
 
 
 def profile_operations(graph_module, input_sample, niter=10):

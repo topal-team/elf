@@ -49,7 +49,10 @@ def generate_afab_schedule(placement, n_micro_batches, **options):
 			for id_ in reversed(ids):
 				_add_backward_pass(schedule, id_, i, rank, options)
 
-	assert len(schedule) == n_micro_batches * n_stages * 2 * 3
+		for id_ in ids:
+			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank, **options))
+
+	assert len(schedule) == n_micro_batches * n_stages * 2 * 3 + n_stages
 	return schedule
 
 
@@ -122,6 +125,11 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 			) % n_micro_batches == 0:
 				b_b = (b_b - 1) % stages_per_device
 
+	for i in range(n_stages):
+		schedule.append(
+			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i], **options)
+		)
+
 	return schedule
 
 
@@ -192,5 +200,10 @@ def generate_hanayo_schedule(placement, n_micro_batches, **options):
 						options,
 					)
 					enod[rank] += 1
+
+	for i in range(n_stages):
+		schedule.append(
+			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i], **options)
+		)
 
 	return schedule

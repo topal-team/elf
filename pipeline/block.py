@@ -53,6 +53,9 @@ class PipelineBlock:
 		self.previous = None if self.id == 0 else placement[self.id - 1]
 		self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
 
+		# Process groups for collective communications
+		self.dp_group = None
+
 		self.metadata = {}
 		self.out_metadata = {}
 
@@ -162,11 +165,11 @@ class PipelineBlock:
 		activations = self.act_to_send.popleft()
 
 		if options.get("batch"):
-			return [dist.P2POp(dist.isend, a, dst) for a in activations.values()]
+			return [dist.P2POp(dist.isend, a, dst, group=self.pp_group) for a in activations.values()]
 		else:
 			logger.debug(f"{self} - Sending activations to layer {self.id + 1} on rank {dst}")
 			for a in activations.values():
-				dist.isend(a, dst)
+				dist.isend(a, dst, group=self.pp_group)
 
 	def send_backward(self, **options):
 		"""
@@ -183,11 +186,11 @@ class PipelineBlock:
 		grads = self.grads_to_send.popleft()
 
 		if options.get("batch"):
-			return [dist.P2POp(dist.isend, g, dst) for g in grads.values()]
+			return [dist.P2POp(dist.isend, g, dst, group=self.pp_group) for g in grads.values()]
 		else:
 			logger.debug(f"{self} - Sending gradients to layer {self.id - 1} on rank {dst}")
 			for g in grads.values():
-				dist.isend(g, dst)
+				dist.isend(g, dst, group=self.pp_group)
 
 	def recv_forward(self, mb_size, **options):
 		"""
@@ -215,7 +218,9 @@ class PipelineBlock:
 			# This communication needs to be batched ;
 			# instead of executing it, we instanciate an object with the right setup and return it
 			self.inputs_to_forward.append(buffers)
-			return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.inputs]
+			return [
+				dist.P2POp(dist.irecv, buffers[key][1], src, group=self.pp_group) for key in self.inputs
+			]
 
 		else:
 			logger.debug(
@@ -224,7 +229,7 @@ class PipelineBlock:
 			stream = torch.cuda.Stream()
 			with torch.cuda.stream(stream):
 				for key in self.inputs:
-					work = dist.irecv(buffers[key][1], src)
+					work = dist.irecv(buffers[key][1], src, group=self.pp_group)
 					buffers[key][0] = work
 
 			torch.cuda.current_stream().wait_stream(stream)  # needed ?
@@ -257,7 +262,9 @@ class PipelineBlock:
 			# This communication needs to be batched ;
 			# instead of executing it, we instanciate an object with the right setup and return it
 			self.grads_to_backward.append(buffers)
-			return [dist.P2POp(dist.irecv, buffers[key][1], src) for key in self.outputs]
+			return [
+				dist.P2POp(dist.irecv, buffers[key][1], src, group=self.pp_group) for key in self.outputs
+			]
 
 		else:
 			logger.debug(
@@ -266,11 +273,18 @@ class PipelineBlock:
 			stream = torch.cuda.Stream()
 			with torch.cuda.stream(stream):
 				for key in self.outputs:
-					work = dist.irecv(buffers[key][1], src)
+					work = dist.irecv(buffers[key][1], src, group=self.pp_group)
 					buffers[key][0] = work
 
 			torch.cuda.current_stream().wait_stream(stream)  # needed ?
 			self.grads_to_backward.append(buffers)
+
+	def all_reduce_param_grads(self, **options):
+		if self.dp_group is None:
+			return
+		for _, p in sorted(self.model.named_parameters()):
+			# TODO: scale by DP degree
+			dist.all_reduce(p.grad.data, group=self.dp_group)
 
 	def register_metadata(self):
 		"""

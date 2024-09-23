@@ -5,6 +5,7 @@ Various useful classes / functions
 import time
 import uuid
 import torch
+import torch.distributed as dist
 
 dtypes = [
 	torch.float16,
@@ -16,6 +17,22 @@ dtypes = [
 	torch.int64,
 	torch.bool,
 ]
+
+
+def op_to_str(op):
+	"""
+	Pretty print for dist.P2POp
+
+	:param op: communication operation
+	:type op: dist.P2POp
+	:return: string describing the op
+	:rtype: string
+	"""
+	match op.op:
+		case dist.isend:
+			return f"Send to {op.peer}"
+		case dist.irecv:
+			return f"Receive from {op.peer}"
 
 
 class TensorMetadata:

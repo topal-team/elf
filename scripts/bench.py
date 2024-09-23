@@ -101,6 +101,8 @@ if __name__ == "__main__":
 					f.write("\n")
 					f.flush()
 
+		pipe.clear()
+
 	torch.cuda.cudart().cudaProfilerStop()
 
 	dist.barrier()

@@ -54,6 +54,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 	To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
 	"""
 	batch = torch.randn((batch_size, 3000), device=rank)
+	target = torch.randn_like(batch, device=rank)
 
 	# Pipelined model will use the batch from its first rank
 	# While full model will use the batch from the last rank of the pipelined model
@@ -64,9 +65,37 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 		elif global_rank == placement[-1]:
 			dist.recv(batch, src=placement[0])
 
-	target = torch.randn_like(
-		batch, device=rank
-	)  # No need to share since only last device will use this anyway
+	pipe = Pipeline(blocks, batch, placement, partition=None, schedule=scheduler)
+	output, _ = pipe(batch, target, F.mse_loss, split_size)
+	blocks = (
+		pipe.blocks
+	)  # we shouldn't access directly the internal modules but it's for the purpose of testing
+	grads = None
+	if global_rank == placement[0]:
+		grads = []
+		for micro_batch_grads in blocks[0].grads_to_send:
+			grads.extend(list(micro_batch_grads.values()))  # add every gradient
+		blocks[0].grads_to_send.clear()
+
+	for b in blocks:
+		assert (
+			len(b.act_to_keep) == 0
+		), f"{b} - There should be no activation left, {len(b.act_to_keep)} still in queue"
+		assert (
+			len(b.inputs_to_forward) == 0
+		), f"{b} - There should be no input left to compute, {len(b.inputs_to_forward)} still in queue"
+		assert (
+			len(b.act_to_send) == 0
+		), f"{b} - There should be no activation left to send, {len(b.act_to_send)} still in queue"
+		assert (
+			len(b.grads_to_backward) == 0
+		), f"{b} - There should be no gradients left, {len(b.grads_to_backward)} still in queue"
+		assert (
+			len(b.inputs_to_keep) == 0
+		), f"{b} - There should be no inputs left to backward, {len(b.inputs_to_keep)} still in queue"
+		assert (
+			len(b.grads_to_send) == 0
+		), f"{b} - There should be no grads left to send, {len(b.grads_to_send)} still in queue"
 
 	pipe = Pipeline(blocks, batch, placement, partition=None, schedule=scheduler)
 	output, _ = pipe(batch, target, F.mse_loss, split_size)
@@ -128,6 +157,9 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 		), f"Pipelined and regular models have different gradients : {grads} and {groundtruth}"
 		logger.info("Gradients are correct :))")
 
+	pipe.clear()
+	del pipe, blocks
+
 
 if __name__ == "__main__":
 	parser = ArgumentParser(description="Demo/Test of pipelined model")
@@ -150,27 +182,37 @@ if __name__ == "__main__":
 	torch.cuda.set_device(rank)
 	dist.init_process_group(backend="nccl")
 
-	placements = [
-		[0, 1, 2, 3, 3, 2, 1, 0],  # Hanayo style 1-Wave
-		[0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0],  # 2-Waves
-		[0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0],  # 3-Waves
-	]
+	# Suppose this is our model partition : a model is a sequence of submodules [0, 1, ..., n], and each submodule i is placed on (global) rank placement[i]
+	# placement = torch.randint(0, world_size, (4,)).cuda()
 
-	schedule = "hanayo"
+	configs = {
+		"afab": [[0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]],
+		"1f1b": [[0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]],
+		"hanayo": [
+			[0, 1, 2, 3, 3, 2, 1, 0],  # Hanayo style 1-Wave
+			[0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0],  # 2-Waves
+			[0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0],  # 3-Waves
+		],
+	}
+
 	batch_sizes = [1, 2, 4, 8, 16, 32]
 
 	# Check that the results and gradients are the same as a single-gpu model
-	for p in placements:
-		layers = load_parts_model(p, global_rank)
-		for b in batch_sizes:
-			split_sizes = [s for s in batch_sizes if s <= b]
-			for s in split_sizes:
-				if global_rank == 0:
-					logger.info(f"Testing placement {p} with batch size {b} and split size {s}")
-				test_pipeline(layers, p, "hanayo", b, s)
-				dist.barrier()
-				if global_rank == 0:
-					logger.info("\n")
+	for schedule, placements in configs.items():
+		for p in placements:
+			for b in batch_sizes:
+				split_sizes = [2**i for i in range(len(batch_sizes)) if 2**i <= b]
+				for s in split_sizes:
+					layers = load_parts_model(p, global_rank)
+					if global_rank == 0:
+						logger.info(
+							f"Testing schedule {schedule} with placement {p}, batch size {b} and split size {s}"
+						)
+					test_pipeline(layers, p, schedule, b, s)
+					if global_rank == 0:
+						logger.info("\n")
+					torch.cuda.synchronize()
+					dist.barrier()
 
 	if dist.is_initialized():
 		dist.destroy_process_group()

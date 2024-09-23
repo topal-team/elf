@@ -9,7 +9,7 @@ class SimpleCNN(nn.Module):
 		self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
 		self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
 		self.maxpool = nn.MaxPool2d(2)
-		self.relu = nn.ReLU(inplace=True)
+		self.relu = nn.ReLU()
 		self.avgpool = nn.AvgPool2d(7)
 		self.fc1 = nn.Linear(128 * 8 * 8, 256)
 		self.fc2 = nn.Linear(256, 10)

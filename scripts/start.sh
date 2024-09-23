@@ -8,7 +8,7 @@
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 
 srun singularity exec --nv --bind \
-    $(pwd):$(pwd),$SCRATCH:/data,$DSDIR/HuggingFace_Models:/models \
+    $(pwd):$(pwd) \
     $SINGULARITY_ALLOWED_DIR/pipe.sif \
     torchrun \
     --nnodes=$SLURM_NNODES \
@@ -16,4 +16,4 @@ srun singularity exec --nv --bind \
     --rdzv-id=$SLURM_JOB_ID \
     --rdzv-backend=c10d \
     --rdzv-endpoint=$MASTER_ADDR:29500 \
-    -- scripts/train_llama.py $*
+    $*

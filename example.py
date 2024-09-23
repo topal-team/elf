@@ -28,5 +28,7 @@ if __name__ == "__main__":
 		_ = model(sample, target, loss_fn)
 		optimizer.step()
 
+	model.clear()
+
 	if dist.is_initialized():
 		dist.destroy_process_group()
