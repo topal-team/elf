@@ -34,6 +34,8 @@ class Pipeline:
 		:type partition: boolean or str
 		:param schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b"), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
 		:type schedule: str or function(List[int], int, **kwargs) -> List[Operation]
+		:param dp: number of data parallel processes to use.
+		:type dp: Optional[int]
 		"""
 		if not dist.is_initialized() or "RANK" not in os.environ.keys():
 			logger.warning(
@@ -339,6 +341,9 @@ class Pipeline:
 		return blocks
 
 	def _init_process_groups(self):
+		"""
+		Initialize process groups for data parallelism (DP) and pipeline parallelism (PP).
+		"""
 		rank = dist.get_rank()
 		world_size = dist.get_world_size()
 

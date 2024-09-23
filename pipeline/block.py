@@ -280,6 +280,11 @@ class PipelineBlock:
 			self.grads_to_backward.append(buffers)
 
 	def all_reduce_param_grads(self, **options):
+		"""
+		All-reduce operation on the gradients of the model parameters across the data parallel group.
+		:param **options: Additional options to modify the all-reduce behaviour.
+		:type **options: dict
+		"""
 		if self.dp_group is None:
 			return
 		for _, p in sorted(self.model.named_parameters()):
