@@ -14,6 +14,21 @@ import logging
 logger = logging.getLogger("partition")
 
 
+def check_partition(graph, parts, inputs, outputs):
+	original_inputs = set(node.target for node in graph.nodes if node.op == "placeholder")
+
+	if original_inputs != inputs[0]:
+		raise Exception(
+			f"Inputs of the first part do not match original inputs: {original_inputs} != {inputs[0]}"
+		)
+
+	for i in range(len(parts) - 1):
+		if outputs[i] != inputs[i + 1]:
+			raise Exception(
+				f"Outputs of part {i} do not match inputs of part {i + 1}: {outputs[i]} != {inputs[i + 1]}"
+			)
+
+
 def create_subgraph(graph_module, nodes, inputs, outputs):
 	"""
 	Creates a module from one block of a partition.
@@ -69,24 +84,29 @@ def get_inputs_outputs(parts):
 	i = len(parts)
 	for part in reversed(parts):
 		i -= 1
+		to_remove = []
 		for node in part:
 			if node.op == "placeholder":
 				inputs[i].add(node.target)
-				part.remove(node)
+				to_remove.append(node)
 				continue
 			elif node.op == "output":
 				for arg in node.args:
 					add_outputs(i, arg)
-				part.remove(node)
+				to_remove.append(node)
 				continue
 			for dep in node.all_input_nodes:
 				if dep not in part and dep.name not in inputs[i]:
 					inputs[i].add(dep.name)
-					if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
-						raise Exception(
-							f"Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}."
-						)
-					outputs[i - 1].add(dep.name)
+					if i != 0:
+						if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
+							raise Exception(
+								f"Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}."
+							)
+						outputs[i - 1].add(dep.name)
+
+		for node in to_remove:
+			part.remove(node)
 
 	# Fix empty parts
 	for i, part in enumerate(parts):
@@ -98,7 +118,10 @@ def get_inputs_outputs(parts):
 				outputs[i].add(output)
 		if i != len(parts) - 1:
 			for inp in inputs[i + 1]:
-				inputs[i].add(inp)
+				# Special case: since input is a reserved python name,
+				# it is replaced in code by input_1. So the dependency will be on input_1 but is fullfilled by input.
+				if "input" not in inp and "input" not in inputs[i]:
+					inputs[i].add(inp)
 				outputs[i].add(inp)
 
 	return inputs, outputs
@@ -129,14 +152,19 @@ def get_inputs_outputs_single(part):
 			for value in arg.values():
 				add_outputs(value)
 
+	to_remove = []
 	for node in part:
 		if node.op == "placeholder":
 			inputs.add(node.target)
-			part.remove(node)
+			to_remove.append(node)
 		if node.op == "output":
 			for arg in node.args:
 				add_outputs(arg)
-			part.remove(node)
+			to_remove.append(node)
+
+	for node in to_remove:
+		part.remove(node)
+
 	return part, inputs, outputs
 
 
@@ -222,6 +250,8 @@ def partition_graph(model, n, sample, mode="naive"):
 
 	:type mode: str
 
+	:raise Exception: if the partition is invalid
+
 	:return:
 
 	        - ``n`` new modules corresponding to the partition
@@ -230,7 +260,6 @@ def partition_graph(model, n, sample, mode="naive"):
 
 	:rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
 	"""
-	device = "cuda" if torch.cuda.is_available() else "cpu"
 	try:
 		graph = extract_graph(model, sample, "fx")
 
@@ -247,7 +276,6 @@ def partition_graph(model, n, sample, mode="naive"):
 
 	logger.info(f"Extracted graph has {len(graph.graph.nodes)} nodes")
 
-	sample = sample.to(device)
 	times, memories = profile_operations(graph, sample)
 
 	if mode == "naive":
@@ -272,12 +300,13 @@ def partition_graph(model, n, sample, mode="naive"):
 		parts.append([])
 
 	inputs, outputs = get_inputs_outputs(parts)
+	check_partition(graph.graph, parts, inputs, outputs)
 
 	blocks = []
 	for i, p in enumerate(parts):
-		graph = create_subgraph(graph, p, inputs[i], outputs[i])
-		remove_inplace_leaves(graph)
-		blocks.append(graph)
+		subgraph = create_subgraph(graph, p, inputs[i], outputs[i])
+		remove_inplace_leaves(subgraph)
+		blocks.append(subgraph)
 
 	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
 	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]

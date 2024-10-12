@@ -132,11 +132,20 @@ def profile_operations(graph_module, input_sample, niter=10):
 	original_buffers = {}
 	for name, buffer in graph_module.named_buffers():
 		original_buffers[name] = buffer.clone().detach()
-		
+
 	graph_module.train()
 	profiler = Profiler(niter, graph_module)
+
+	if isinstance(input_sample, torch.Tensor):
+		input_sample = [input_sample]
+	elif isinstance(input_sample, tuple):
+		input_sample = list(input_sample)
+	elif isinstance(input_sample, dict):
+		# Values should be in the same order as the placeholders
+		input_sample = list(input_sample.values())
+
 	with torch.no_grad():
-		profiler.boxed_run([input_sample])
+		profiler.boxed_run(input_sample)
 
 	# Restore original buffers
 	for name, buffer in graph_module.named_buffers():
