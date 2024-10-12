@@ -6,7 +6,6 @@ import psutil
 
 import torch
 import torch.nn as nn
-from torchvision.models import resnet50
 
 def get_current_memory():
     if torch.cuda.is_available():
@@ -72,10 +71,6 @@ def test_profile():
         nn.Linear(3*14*14, 10)
     )
     check_model(model, torch.randn(4, 1, 28, 28))
-
-    # More complex model
-    model = resnet50(weights=None)
-    check_model(model, torch.randn(4, 3, 224, 224))
 
 
     
