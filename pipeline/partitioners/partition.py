@@ -8,7 +8,7 @@ from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
 from .dagP import split_graph_dagP
-from .utils import RemoveInplaceTransformer
+from .utils import remove_inplace_leaves
 import logging
 
 logger = logging.getLogger("partition")
@@ -140,7 +140,7 @@ def get_inputs_outputs_single(part):
 	return part, inputs, outputs
 
 
-def duplicate_symsizes(graph, times, memories):
+def duplicate_symsizes(graph):
 	"""
 	Duplicates symbolic size nodes in the graph to avoid sharing between different parts of the model. Having a unique ``sym_size`` node creates dependencies from the entire graph, making it impossible to partition it without long-range connections.
 
@@ -150,6 +150,9 @@ def duplicate_symsizes(graph, times, memories):
 	:type times: Dict[str, float]
 	:param memories: A dictionary mapping node names to their memory usage
 	:type memories: Dict[str, int]
+
+	.. warning::
+		This function is not safe to use and can break the module if the batch dimension is modified during the computation.
 
 	:return: None. The function modifies the graph in-place.
 	"""
@@ -167,12 +170,37 @@ def duplicate_symsizes(graph, times, memories):
 
 			for user, new_sym_size in to_replace.items():
 				user.replace_input_with(node, new_sym_size)
-				times[new_sym_size.name] = times[node.name]
-				memories[new_sym_size.name] = memories[node.name]
 
 			graph.erase_node(node)
 			i -= 1
 	logger.info(f"Symsize duplication created {i} nodes.")
+
+
+def extract_graph_fx(model):
+	return torch.fx.symbolic_trace(model)
+
+
+def extract_graph_export(model, sample, use_dynamic_batch_size=False):
+	# Should not be used for now, until duplicate_symsizes is fixed (see notes)
+	if use_dynamic_batch_size:
+		dim = torch.export.Dim("batch")
+		dynamic_shapes = ({0: dim},)
+		exported = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes)
+		module = exported.module()
+		duplicate_symsizes(module.graph)
+		return module
+	else:
+		exported = torch.export.export(model, args=(sample,))
+		return exported.module()
+
+
+def extract_graph(model, sample, mode="fx"):
+	if mode == "export":
+		return extract_graph_export(model, sample)
+	elif mode == "fx":
+		return extract_graph_fx(model)
+	else:
+		raise ValueError(f"Unknown graph extraction mode: {mode}")
 
 
 def partition_graph(model, n, sample, mode="naive"):
@@ -204,38 +232,32 @@ def partition_graph(model, n, sample, mode="naive"):
 	"""
 	device = "cuda" if torch.cuda.is_available() else "cpu"
 	try:
-		trace = torch.fx.symbolic_trace(model)
+		graph = extract_graph(model, sample, "fx")
 
 	except Exception as err_fx:
-		logger.info("Graph extraction failed with torch.fx. Cannot partition the model.")
 		logger.debug(str(err_fx))
+		logger.info("Graph extraction failed with torch.fx. Trying with torch.export.")
 
 		try:
-			dim = torch.export.Dim("batch")
-			dynamic_shapes = ({0: dim},)
-			trace = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes).module()
+			graph = extract_graph(model, sample, "export")
 		except Exception as err_export:
-			logger.info("Graph extraction using torch.export failed; falling back to torch.fx.")
 			logger.debug(str(err_export))
+			logger.info("Graph extraction using torch.export failed; cannot partition the model.")
 			exit(1)
 
-	logger.info(f"Traced module has {len(trace.graph.nodes)} nodes")
+	logger.info(f"Extracted graph has {len(graph.graph.nodes)} nodes")
 
-	trace = RemoveInplaceTransformer(trace).transform()
 	sample = sample.to(device)
-	times, memories = profile_operations(trace, sample)
-
-	duplicate_symsizes(trace.graph, times, memories)
-	trace.recompile()
+	times, memories = profile_operations(graph, sample)
 
 	if mode == "naive":
-		parts = split_graph(trace, times, memories, n)
+		parts = split_graph(graph, times, memories, n)
 	elif mode == "constrained":
-		parts = split_graph_constrained(trace, times, memories, n)
+		parts = split_graph_constrained(graph, times, memories, n)
 	elif mode == "metis":
-		parts = split_graph_metis(trace, times, memories, n)
+		parts = split_graph_metis(graph, times, memories, n)
 	elif mode == "dagP":
-		parts = split_graph_dagP(trace, times, memories, n)
+		parts = split_graph_dagP(graph, times, memories, n)
 	else:
 		raise Exception(
 			"Unknown graph partitioning mode : {mode}.\n\
@@ -253,7 +275,8 @@ def partition_graph(model, n, sample, mode="naive"):
 
 	blocks = []
 	for i, p in enumerate(parts):
-		graph = create_subgraph(trace, p, inputs[i], outputs[i])
+		graph = create_subgraph(graph, p, inputs[i], outputs[i])
+		remove_inplace_leaves(graph)
 		blocks.append(graph)
 
 	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]

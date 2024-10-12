@@ -164,7 +164,7 @@ class PipelineBlock:
 
 		activations = self.act_to_send.popleft()
 
-		if options.get("batch"):
+		if options.get("batched_comm"):
 			return [dist.P2POp(dist.isend, a, dst, group=self.pp_group) for a in activations.values()]
 		else:
 			logger.debug(f"{self} - Sending activations to layer {self.id + 1} on rank {dst}")
@@ -185,7 +185,7 @@ class PipelineBlock:
 
 		grads = self.grads_to_send.popleft()
 
-		if options.get("batch"):
+		if options.get("batched_comm"):
 			return [dist.P2POp(dist.isend, g, dst, group=self.pp_group) for g in grads.values()]
 		else:
 			logger.debug(f"{self} - Sending gradients to layer {self.id - 1} on rank {dst}")
@@ -214,7 +214,7 @@ class PipelineBlock:
 		for key in self.inputs:
 			buffers[key] = [None, self.metadata[key].get_buffer(mb_size)]
 
-		if options.get("batch"):
+		if options.get("batched_comm"):
 			# This communication needs to be batched ;
 			# instead of executing it, we instanciate an object with the right setup and return it
 			self.inputs_to_forward.append(buffers)
@@ -258,7 +258,7 @@ class PipelineBlock:
 		for key in self.outputs:
 			buffers[key] = [None, self.out_metadata[key].get_buffer(mb_size)]
 
-		if options.get("batch"):
+		if options.get("batched_comm"):
 			# This communication needs to be batched ;
 			# instead of executing it, we instanciate an object with the right setup and return it
 			self.grads_to_backward.append(buffers)

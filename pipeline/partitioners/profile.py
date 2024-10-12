@@ -58,7 +58,7 @@ class Profiler(torch.fx.Interpreter):
 		"""
 		for i in range(len(node.args)):
 			node.update_arg(i, self.to_device(node.args[i], device))
-		for key, kwarg in node.kwargs.items():
+		for key in node.kwargs.keys():
 			node.update_kwarg(key, self.to_device(node.kwargs[key], device))
 
 		# Special case: modules are not in args/kwargs but in target.
@@ -128,16 +128,26 @@ def profile_operations(graph_module, input_sample, niter=10):
 	:return: 2 dicts, one for time and one for memory used, respectively. Each one has the format {node_name: value}
 	:rtype: fx.GraphModule, Dict[str, List[float]], Dict[str, List[float]]
 	"""
+	# Save original buffers
+	original_buffers = {}
+	for name, buffer in graph_module.named_buffers():
+		original_buffers[name] = buffer.clone().detach()
+		
+	graph_module.train()
 	profiler = Profiler(niter, graph_module)
 	with torch.no_grad():
 		profiler.boxed_run([input_sample])
 
+	# Restore original buffers
+	for name, buffer in graph_module.named_buffers():
+		buffer.data.copy_(original_buffers[name])
+
 	# With boxed runs placeholders bypass the profiler, we need to manually add them afterwards
 	for node in graph_module.graph.nodes:
-		if node.op != "placeholder":
-			continue
-		if node.name not in profiler.times:
-			profiler.times[node.name] = 0
+		if node.op == "placeholder":
 			profiler.memories[node.name] = get_memory(input_sample)  # TODO: handle multiple inputs
+			profiler.times[node.name] = 0
+		if node.op == "output":
+			profiler.times[node.name] = 0
 
 	return profiler.times, profiler.memories

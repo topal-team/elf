@@ -207,7 +207,7 @@ def fix_cycle(cycle):
 	"""
 	for op in cycle:
 		if op.op not in [OperationType.FORWARD, OperationType.BACKWARD]:
-			op.options["batch"] = True
+			op.options["batched_comm"] = True
 
 
 def find_cycles(graph):

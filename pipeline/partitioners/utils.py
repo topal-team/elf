@@ -1,85 +1,28 @@
 import torch
-import torch.nn as nn
-import torch.fx as fx
 
-__all__ = ["RemoveInplaceTransformer"]
-
-inplace_modules = (
-	nn.ReLU,
-	nn.LeakyReLU,
-	nn.ELU,
-	nn.GELU,
-	nn.CELU,
-	nn.SELU,
-	nn.PReLU,
-	nn.RReLU,
-	nn.Hardswish,
-	nn.Hardshrink,
-	nn.Hardsigmoid,
-	nn.Hardtanh,
-	nn.Softsign,
-	nn.Softplus,
-	nn.Mish,
-	nn.SiLU,
-	nn.Tanhshrink,
-	nn.Threshold,
-)
-
-inplace_functions = (
-	torch.abs_,
-	torch.neg_,
-	torch.exp_,
-	torch.log_,
-	torch.log10_,
-	torch.log2_,
-	torch.sqrt_,
-	torch.rsqrt_,
-	torch.ceil_,
-	torch.floor_,
-	torch.round_,
-	torch.trunc_,
-	torch.frac_,
-	torch.sin_,
-	torch.cos_,
-	torch.tan_,
-	torch.asin_,
-	torch.acos_,
-	torch.atan_,
-	torch.sinh_,
-	torch.cosh_,
-	torch.tanh_,
-	torch.asinh_,
-	torch.acosh_,
-	torch.atanh_,
-	torch.sigmoid_,
-	torch.zero_,
-	torch.clamp_,
-	torch.fill_,
-	torch.erf_,
-	torch.erfc_,
-	torch.expm1_,
-	torch.log1p_,
-	torch.reciprocal_,
-	torch.rsqrt_,
-)
+__all__ = ["remove_inplace_leaves"]
 
 
-class RemoveInplaceTransformer(fx.Transformer):
+def remove_inplace_leaves(module):
 	"""
-	A transformer that removes in-place operations from a PyTorch model.
+	Remove in-place operations from leaf nodes in the module's graph.
+
+	:param module: The module to modify
+	:type module: torch.fx.GraphModule
 	"""
+	for node in module.graph.nodes:
+		if node.op in ["placeholder", "output"]:
+			continue
+		deps = [d for d in node.all_input_nodes if d.op != "placeholder"]
+		if len(deps) == 0:
+			# Hacky: we assume that all inplace functions end with "_"
+			# and have an out-of-place equivalent without the "_"
+			if node.op == "call_function" and node.target.__name__[-1] == "_":
+				out_of_place_func = getattr(torch, node.target.__name__[:-1])
+				node.target = out_of_place_func
+			elif node.op == "call_module":
+				submodule = module.graph.owning_module.get_submodule(node.target)
+				if submodule is not None and getattr(submodule, "inplace", False):
+					setattr(submodule, "inplace", False)
 
-	def __init__(self, module):
-		super().__init__(module)
-
-	def call_function(self, target, args, kwargs):
-		if target.__name__ in inplace_functions:
-			out_of_place_func = getattr(torch, target.__name__[:-1])
-			return out_of_place_func(*args, **kwargs)
-		return super().call_function(target, args, kwargs)
-
-	def call_module(self, target, args, kwargs):
-		module = self.fetch_attr(target)
-		if isinstance(module, (inplace_modules)):
-			module.inplace = False
-		return super().call_module(target, args, kwargs)
+	module.recompile()
