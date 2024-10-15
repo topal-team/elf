@@ -128,7 +128,6 @@ class PipelineBlock:
 			self.compute_time += timer.time()
 		elif options.get("offload"):
 			act = self.act_to_keep.popleft().cuda()
-			# x = x.cuda()
 		else:
 			act = self.act_to_keep.popleft()
 
@@ -142,7 +141,7 @@ class PipelineBlock:
 
 		with Timer() as timer:
 			for key in self.outputs:
-				# Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
+			# Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
 				act[key].backward(grads[key], retain_graph=(key != self.outputs[-1]))
 		self.compute_time += timer.time()
 
@@ -288,8 +287,17 @@ class PipelineBlock:
 		if self.dp_group is None:
 			return
 		for _, p in sorted(self.model.named_parameters()):
-			# TODO: scale by DP degree
 			dist.all_reduce(p.grad.data, group=self.dp_group)
+
+	def scale_grads(self, batch_size):
+		"""
+		Scale the gradients of the model parameters by the batch size
+
+		:param batch_size: size of the full batch
+		:type batch_size: int
+		"""
+		for p in self.model.parameters():
+			p.grad.data /= batch_size
 
 	def register_metadata(self):
 		"""

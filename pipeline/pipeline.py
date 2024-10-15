@@ -42,6 +42,8 @@ class Pipeline:
 				"Trying to create a pipeline but no multi-gpu distributed setup has been found."
 			)
 		ws = dist.get_world_size()
+		local_rank = int(os.getenv("LOCAL_RANK"))
+		torch.cuda.set_device(local_rank)
 
 		if placement == "auto":
 			placement = [i for i in range(ws // dp)]

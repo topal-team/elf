@@ -4,7 +4,10 @@ Execution manager
 
 import torch
 import torch.distributed as dist
+
+from collections import deque
 import time
+
 from .schedule import OperationType
 from .utils import Timer, op_to_str
 
@@ -102,6 +105,7 @@ class Engine:
 		losses = []
 		current_target = (0, 0)  # micro batch id, position in target tensor
 
+		grad_fns = deque()
 		for b in self.blocks:
 			b.last_bwd_computed = 0
 
@@ -124,23 +128,16 @@ class Engine:
 				torch.cuda.synchronize()
 				warmup_start = time.time()
 
+			if not op.options.get("batched_comm", False):
+				self._run_comms()
+
 			match op.op:
 				case OperationType.FORWARD:
-					self._run_comms()
 					y = block.forward(**op.options)
 					if y is not None:
 						result.append(*y.values())
 
 				case OperationType.BACKWARD:
-					if block.next is None:
-						i, start = current_target
-						end = start + mb_sizes[i]
-						loss = compute_loss(block, result[i], target[start:end], loss_fn)
-						losses.append(loss)
-						logger.debug(f"{block} - Computed loss = {loss}")
-						current_target = (i + 1, end)
-
-					self._run_comms()
 					block.backward(**op.options)
 					block.last_bwd_computed = op.mb_id
 
@@ -179,11 +176,39 @@ class Engine:
 					if comm := block.recv_backward(mb_sizes[op.mb_id], **op.options):
 						self.comms.extend(comm)
 
+				case OperationType.LOSS_FORWARD:
+					if block.next is None:
+						i, start = current_target
+						end = start + mb_sizes[i]
+						loss, grad_fn = compute_loss(block, target[start:end], loss_fn)
+						losses.append(loss)
+						grad_fns.append(grad_fn)
+						logger.debug(f"{block} - Computed loss = {loss.item()}")
+						current_target = (i + 1, end)
+					else:
+						logger.warning(f"Tried to compute loss on a non-last block {block}")
+						continue
+
+				case OperationType.LOSS_BACKWARD:
+					if block.next is None:
+						assert op.mb_id < len(
+							losses
+						), f"Loss backward for mb {op.mb_id} but only {len(losses)} losses computed"
+						grad_fn = grad_fns.popleft()
+						with Timer() as timer:
+							grads = grad_fn()
+						block.compute_time += timer.time()
+						block.grads_to_backward.append(_fake_p2p(grads.items()))
+					else:
+						logger.warning(f"Tried to compute loss backward on a non-last block {block}")
+						continue
+
 				case OperationType.ALL_REDUCE_PARAM_GRADS:
 					assert block.last_bwd_computed == len(mb_sizes) - 1, (
 						"Tried to run all reduce of parameters gradients before the backward for the last microbatch was computed. Last computed backward: "
 						+ str(block.last_bwd_computed)
 					)
+					block.scale_grads(sum(mb_sizes)) # we also average the gradients out here
 					block.all_reduce_param_grads(**op.options)
 
 				case _:
@@ -215,7 +240,7 @@ class Engine:
 		return result, losses, times
 
 
-def compute_loss(block, output, target, loss_fn):
+def compute_loss(block, target, loss_fn):
 	"""
 	Computes the loss and correctly prepares the gradients for the pipelined backward pass
 
@@ -231,22 +256,20 @@ def compute_loss(block, output, target, loss_fn):
 	:return: loss value
 	:rtype: Tensor
 	"""
+	output = block.act_to_send.popleft().detach()
 	if len(block.outputs) != 1:
 		raise RuntimeError("Multiple outputs not supported yet for loss computation")
-
-	output = output.detach()
-	output.requires_grad = True
 
 	with Timer() as timer:
 		try:
 			loss = loss_fn(output, target, reduction="sum")
 		except TypeError:
 			loss = loss_fn(output, target)
-		loss.backward()
+
 	block.compute_time += timer.time()
 
-	# TODO: multiple outputs
-	key = list(block.outputs)[0]
-	block.grads_to_backward.append(_fake_p2p([(key, output.grad.data)]))
+	def grad_fn():
+		loss.backward()
+		return { block.outputs[0]: output.grad.data }
 
-	return loss
+	return loss, grad_fn

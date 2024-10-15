@@ -16,4 +16,4 @@ srun singularity exec --nv --bind \
     --rdzv-id=$SLURM_JOB_ID \
     --rdzv-backend=c10d \
     --rdzv-endpoint=$MASTER_ADDR:29500 \
-    -- scripts/train_rcn.py $*
+    -- scripts/train_vision.py $*

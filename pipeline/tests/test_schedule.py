@@ -26,12 +26,16 @@ def test_afab():
 		Operation(1, 0, OperationType.RECV_FORWARD, 1),
 		Operation(1, 0, OperationType.FORWARD, 1),
 		Operation(1, 0, OperationType.SEND_FORWARD, 1),
+		Operation(1, 0, OperationType.LOSS_FORWARD, 1),
 		Operation(1, 1, OperationType.RECV_FORWARD, 1),
 		Operation(1, 1, OperationType.FORWARD, 1),
 		Operation(1, 1, OperationType.SEND_FORWARD, 1),
+		Operation(1, 1, OperationType.LOSS_FORWARD, 1),
+		Operation(1, 0, OperationType.LOSS_BACKWARD, 1),
 		Operation(1, 0, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 0, OperationType.BACKWARD, 1),
 		Operation(1, 0, OperationType.SEND_BACKWARD, 1),
+		Operation(1, 1, OperationType.LOSS_BACKWARD, 1),
 		Operation(1, 1, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 1, OperationType.BACKWARD, 1),
 		Operation(1, 1, OperationType.SEND_BACKWARD, 1),
@@ -82,24 +86,32 @@ def test_1f1b():
 		Operation(1, 0, OperationType.RECV_FORWARD, 1),
 		Operation(1, 0, OperationType.FORWARD, 1),
 		Operation(1, 0, OperationType.SEND_FORWARD, 1),
+		Operation(1, 0, OperationType.LOSS_FORWARD, 1),
+		Operation(1, 0, OperationType.LOSS_BACKWARD, 1),
 		Operation(1, 0, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 0, OperationType.BACKWARD, 1),
 		Operation(1, 0, OperationType.SEND_BACKWARD, 1),
 		Operation(1, 1, OperationType.RECV_FORWARD, 1),
 		Operation(1, 1, OperationType.FORWARD, 1),
 		Operation(1, 1, OperationType.SEND_FORWARD, 1),
+		Operation(1, 1, OperationType.LOSS_FORWARD, 1),
+		Operation(1, 1, OperationType.LOSS_BACKWARD, 1),
 		Operation(1, 1, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 1, OperationType.BACKWARD, 1),
 		Operation(1, 1, OperationType.SEND_BACKWARD, 1),
 		Operation(1, 2, OperationType.RECV_FORWARD, 1),
 		Operation(1, 2, OperationType.FORWARD, 1),
 		Operation(1, 2, OperationType.SEND_FORWARD, 1),
+		Operation(1, 2, OperationType.LOSS_FORWARD, 1),
+		Operation(1, 2, OperationType.LOSS_BACKWARD, 1),
 		Operation(1, 2, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 2, OperationType.BACKWARD, 1),
 		Operation(1, 2, OperationType.SEND_BACKWARD, 1),
 		Operation(1, 3, OperationType.RECV_FORWARD, 1),
 		Operation(1, 3, OperationType.FORWARD, 1),
 		Operation(1, 3, OperationType.SEND_FORWARD, 1),
+		Operation(1, 3, OperationType.LOSS_FORWARD, 1),
+		Operation(1, 3, OperationType.LOSS_BACKWARD, 1),
 		Operation(1, 3, OperationType.RECV_BACKWARD, 1),
 		Operation(1, 3, OperationType.BACKWARD, 1),
 		Operation(1, 3, OperationType.SEND_BACKWARD, 1),
@@ -116,8 +128,11 @@ def check_validity(schedule, placement, n_micro_batches):
 	send_bwds = [op for op in schedule if op.op == OperationType.SEND_BACKWARD]
 	recv_fwds = [op for op in schedule if op.op == OperationType.RECV_FORWARD]
 	recv_bwds = [op for op in schedule if op.op == OperationType.RECV_BACKWARD]
-
 	assert len(fwds) == len(bwds) == len(send_fwds) == len(send_bwds) == len(recv_fwds) == len(recv_bwds) == (n_stages * n_micro_batches)
+
+	loss_fwds = [op for op in schedule if op.op == OperationType.LOSS_FORWARD]
+	loss_bwds = [op for op in schedule if op.op == OperationType.LOSS_BACKWARD]
+	assert len(loss_fwds) == len(loss_bwds) == n_micro_batches
 
 	# All stages have the same number of forward and backward ops
 	for i in range(n_stages):
@@ -133,8 +148,11 @@ def check_validity(schedule, placement, n_micro_batches):
 
 		assert len(fwds_stage) == len(bwds_stage) == n_stages
 
-	def check_order(block_id, mb_id):
-		ops = [OperationType.RECV_FORWARD, OperationType.FORWARD, OperationType.SEND_FORWARD, OperationType.RECV_BACKWARD, OperationType.BACKWARD, OperationType.SEND_BACKWARD]
+	def check_order(block_id, mb_id, is_last = False):
+		ops = [OperationType.RECV_FORWARD, OperationType.FORWARD, OperationType.SEND_FORWARD]
+		if is_last:
+			ops.extend([OperationType.LOSS_FORWARD, OperationType.LOSS_BACKWARD])
+		ops.extend([OperationType.RECV_BACKWARD, OperationType.BACKWARD, OperationType.SEND_BACKWARD])
 		for op in schedule:
 			if op.block_id != block_id or op.mb_id != mb_id:
 				continue
@@ -143,7 +161,7 @@ def check_validity(schedule, placement, n_micro_batches):
 	# Check that the order is always recv/forward/send/recv/backward/send
 	for mb_id in range(n_micro_batches):
 		for block_id in range(n_stages):
-			check_order(block_id, mb_id)
+			check_order(block_id, mb_id, is_last = block_id == n_stages - 1)
 
 	# All reduce param grads should be after all backward ops
 	for block_id in range(n_stages):

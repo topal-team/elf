@@ -97,7 +97,10 @@ def get_inputs_outputs(parts):
 				continue
 			for dep in node.all_input_nodes:
 				if dep not in part and dep.name not in inputs[i]:
-					inputs[i].add(dep.name)
+					if dep.op == "placeholder":
+						inputs[i].add(dep.target)
+					else:
+						inputs[i].add(dep.name)
 					if i != 0:
 						if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
 							raise Exception(
@@ -260,6 +263,7 @@ def partition_graph(model, n, sample, mode="naive"):
 
 	:rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
 	"""
+	model.train()
 	try:
 		graph = extract_graph(model, sample, "fx")
 
