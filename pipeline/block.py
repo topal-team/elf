@@ -141,7 +141,7 @@ class PipelineBlock:
 
 		with Timer() as timer:
 			for key in self.outputs:
-			# Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
+				# Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
 				act[key].backward(grads[key], retain_graph=(key != self.outputs[-1]))
 		self.compute_time += timer.time()
 
@@ -158,17 +158,20 @@ class PipelineBlock:
 		:rtype: List[dist.P2POp] or None
 		"""
 		dst = options.get("dst") or self.next
+		if not self.out_metadata:
+			self._send_metadata(dst)
+
 		if dst is None or dst == self.rank:
 			return
 
 		activations = self.act_to_send.popleft()
 
 		if options.get("batched_comm"):
-			return [dist.P2POp(dist.isend, a, dst, group=self.pp_group) for a in activations.values()]
+			return [dist.P2POp(dist.isend, activations[out], dst, group=self.pp_group) for out in self.outputs]
 		else:
 			logger.debug(f"{self} - Sending activations to layer {self.id + 1} on rank {dst}")
-			for a in activations.values():
-				dist.isend(a, dst, group=self.pp_group)
+			for out in self.outputs:
+				dist.isend(activations[out], dst, group=self.pp_group)
 
 	def send_backward(self, **options):
 		"""
@@ -185,11 +188,11 @@ class PipelineBlock:
 		grads = self.grads_to_send.popleft()
 
 		if options.get("batched_comm"):
-			return [dist.P2POp(dist.isend, g, dst, group=self.pp_group) for g in grads.values()]
+			return [dist.P2POp(dist.isend, grads[inp], dst, group=self.pp_group) for inp in self.inputs]
 		else:
 			logger.debug(f"{self} - Sending gradients to layer {self.id - 1} on rank {dst}")
-			for g in grads.values():
-				dist.isend(g, dst, group=self.pp_group)
+			for inp in self.inputs:
+				dist.isend(grads[inp], dst, group=self.pp_group)
 
 	def recv_forward(self, mb_size, **options):
 		"""
@@ -202,6 +205,9 @@ class PipelineBlock:
 		:rtype: List[dist.P2POp] or None
 		"""
 		src = options.get("src") or self.previous
+
+		if not self.metadata:
+			self._receive_metadata(src)
 
 		if options.get("offload") and len(self.act_to_keep) > 0:
 			# Free memory just before allocating the next buffer
@@ -300,39 +306,30 @@ class PipelineBlock:
 		for p in self.model.parameters():
 			p.grad.data /= batch_size
 
-	def register_metadata(self):
-		"""
-		Performs a pseudo forward pass to register the input and output shapes
-
-		.. warning::
-		    We assume that every micro batch has the same shape, except for the micro batch size
-		"""
-		# Receive metadata of inputs
-		if self.previous is not None and self.previous != self.rank:
-			for key in self.inputs:
+	def _receive_metadata(self, src):
+		for key in self.inputs:
+			if src is None or src == self.rank:
+				return
+				# assert len(self.inputs_to_forward) != 0, "Can't register metadata without inputs"
+				# inputs = self.inputs_to_forward[0]  # First mb
+				# _, x = inputs[key]  # Correct variable, discard fake work
+				# self.metadata[key] = TensorMetadata(x[0])  # Don't register batch size
+			else:
 				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=self.previous)
+				dist.recv(metadata, src=src)
 				self.metadata[key] = TensorMetadata.from_tensor(metadata)
+			logger.debug(f"{self} - Registered metadata {self.metadata}")
+	
+	def _send_metadata(self, dst):
+		if dst is None or dst == self.rank:
+			return
+		assert len(self.act_to_send) != 0, "Can't send metadata without activations"
+		y = self.act_to_send[0]
 
-		# We perform a forward pass with dummy data to get the output shapes (except for batch size) of all blocks
-		dummy = {key: self.metadata[key].get_buffer(1) for key in self.inputs}
-		for buffer in dummy.values():
-			if buffer.dtype == torch.int64:
-				buffer[:] = 1  # avoid problems with embeddings that can go out of vocab size :)
-		y = self.model(**dummy)
-
-		for key in self.outputs:
-			if not isinstance(y[key], torch.Tensor):
-				raise RuntimeError(
-					f"Non-tensor output from block {self} : key {key} has type {type(y[key])}."
-				)
-
-			# save shapes except batch size
-			self.out_metadata[key] = TensorMetadata(y[key].squeeze(0))
-
-		logger.debug(f"{self} - Registered metadata {self.metadata} => {self.out_metadata}")
-
-		# Send metadata to next block
-		if self.next is not None and self.next != self.rank:
-			for key in self.outputs:
-				dist.send(self.out_metadata[key].to_tensor(), dst=self.next)
+		for k in self.outputs:
+			if not isinstance(y[k], torch.Tensor):
+				raise RuntimeError(f"Non-tensor output from block {self} : key {k} has type {type(y[k])}.")
+			self.out_metadata[k] = TensorMetadata(y[k][0])
+			logger.debug(f"{self} - Registered out-metadata {self.out_metadata}")
+			if dst is not None and dst != self.rank:
+				dist.send(self.out_metadata[k].to_tensor(), dst=dst)

@@ -9,7 +9,7 @@ from collections import deque
 import time
 
 from .schedule import OperationType
-from .utils import Timer, op_to_str
+from .utils import Timer, op_to_str, NameMapping
 
 import logging
 
@@ -169,6 +169,13 @@ class Engine:
 						inputs = zip(block.inputs, microbatch)
 						block.inputs_to_forward.append(_fake_p2p(inputs))
 
+					if not block.metadata and op.options.get("src", block.previous) == block.rank:
+						prev_block = self.id_to_block.get(op.block_id - 1)
+						mapping = NameMapping(block.inputs, prev_block.outputs)
+						block.name_mapping_in = mapping
+						prev_block.name_mapping_out = mapping
+						logger.debug(f"Synced metadata of {block} and {prev_block} : {mapping}")
+
 					if comm := block.recv_forward(mb_sizes[op.mb_id], **op.options):
 						self.comms.extend(comm)
 
@@ -180,7 +187,7 @@ class Engine:
 					if block.next is None:
 						i, start = current_target
 						end = start + mb_sizes[i]
-						loss, grad_fn = compute_loss(block, target[start:end], loss_fn)
+						loss, grad_fn = compute_loss(block, result[op.mb_id], target[start:end], loss_fn)
 						losses.append(loss)
 						grad_fns.append(grad_fn)
 						logger.debug(f"{block} - Computed loss = {loss.item()}")
@@ -240,7 +247,7 @@ class Engine:
 		return result, losses, times
 
 
-def compute_loss(block, target, loss_fn):
+def compute_loss(block, output, target, loss_fn):
 	"""
 	Computes the loss value and prepares a function to compute the gradients with respect to the block's outputs.
 
@@ -256,7 +263,7 @@ def compute_loss(block, target, loss_fn):
 	:return: loss value, gradient function
 	:rtype: Tensor, Callable[[], Dict[str, Tensor]]
 	"""
-	output = block.act_to_send.popleft().detach()
+	output = output.detach().requires_grad_()
 	if len(block.outputs) != 1:
 		raise RuntimeError("Multiple outputs not supported yet for loss computation")
 

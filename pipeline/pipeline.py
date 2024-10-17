@@ -8,7 +8,6 @@ import torch.distributed as dist
 from .block import PipelineBlock
 from .schedule import *
 from .engine import Engine
-from .utils import TensorMetadata, NameMapping
 from .task_graph import graph_from_schedule, find_cycles, fix_cycle
 from .partitioners import partition_graph, get_inputs_outputs_single, create_subgraph
 
@@ -22,7 +21,7 @@ class Pipeline:
 	Model wrapper for pipelining that manages the pipeline setup
 	"""
 
-	def __init__(self, model, sample, placement="auto", partition="metis", schedule="afab", dp=1):
+	def __init__(self, model, sample, placement="auto", partition="naive", schedule="afab", dp=1):
 		"""
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
 		:type model: nn.Module
@@ -119,8 +118,6 @@ class Pipeline:
 
 			self.last_options = options
 			self.last_nmb = n_micro_batches
-
-		self._register_metadata(batch)
 
 		# Execute the schedule
 		result, losses, times = self.engine.train_step(
@@ -284,35 +281,6 @@ class Pipeline:
 			map(lambda b: b.id, self.blocks)
 		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
-
-	def _register_metadata(self, batch):
-		"""
-		Register metadata for input tensors.
-
-		This method is called before the first forward pass to register the metadata
-		(shape and dtype) of input tensors. This information is used to allocate
-		tensors for communication later in the pipeline.
-
-		:param batch: Input batch of tensors
-		:type batch: List[torch.Tensor]
-		"""
-		# Full forward pass to register metadata used to allocate tensors later
-		if self.blocks[0].previous is None:
-			# Take all
-			for k, v in zip(self.blocks[0].inputs, batch):
-				self.blocks[0].metadata[k] = TensorMetadata(v[0])  # Don't register batch size
-
-		for i in range(len(self.blocks)):
-			b = self.blocks[i]
-			# Sync metadata of fused blocks
-			if i > 0 and self.blocks[i - 1].id == b.id - 1:
-				mapping = NameMapping(b.inputs, self.blocks[i - 1].outputs)
-				b.name_mapping_in = mapping
-				self.blocks[i - 1].name_mapping_out = mapping
-				b.metadata = {mapping.to_input(k): v for k, v in self.blocks[i - 1].out_metadata.items()}
-				logger.debug(f"Synced metadata of {b} and {self.blocks[i - 1]} : {mapping}")
-
-			b.register_metadata()
 
 	def _create_pipeline(self, layers, inputs, outputs):
 		"""
