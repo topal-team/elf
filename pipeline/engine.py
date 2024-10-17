@@ -74,7 +74,7 @@ class Engine:
 		:type batch: Tensor
 		:param target: groundtruth, only used on the last block of the pipeline
 		:type target: Tensor
-		:param loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own make sure that summing the loss of every micro-batch independently is equivalent to the loss on the entire batch (e.g. no average across batches).
+		:param loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own make sure that summing the loss of every micro-batch independently is equivalent to the loss on the entire batch (e.g. no average across batches). The loss is averaged across the entire batch at the end.
 		:type loss_fn: function (Tensor, Tensor) -> Tensor
 		:param schedule: list of operations. For more info, see schedule.
 		:type schedule: list[Operation]
@@ -242,7 +242,7 @@ class Engine:
 
 def compute_loss(block, target, loss_fn):
 	"""
-	Computes the loss and correctly prepares the gradients for the pipelined backward pass
+	Computes the loss value and prepares a function to compute the gradients with respect to the block's outputs.
 
 	:param block: last block of the pipeline
 	:type block: PipelineBlock
@@ -253,8 +253,8 @@ def compute_loss(block, target, loss_fn):
 	:param loss_fn: loss function to compute
 	:type loss_fn: function (Tensor, Tensor, reduction = 'sum') -> Tensor
 
-	:return: loss value
-	:rtype: Tensor
+	:return: loss value, gradient function
+	:rtype: Tensor, Callable[[], Dict[str, Tensor]]
 	"""
 	output = block.act_to_send.popleft().detach()
 	if len(block.outputs) != 1:

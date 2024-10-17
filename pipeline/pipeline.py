@@ -138,7 +138,7 @@ class Pipeline:
 		if len(result) != 0:
 			result = torch.cat(result, dim=0)
 			losses = torch.tensor(losses, device=torch.cuda.current_device())
-			losses = losses.sum(dim=0, keepdim=True)
+			losses = losses.sum(dim=0, keepdim=True) / sum(mb_sizes)
 			return result, losses
 		else:
 			return None, None

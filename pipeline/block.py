@@ -202,6 +202,7 @@ class PipelineBlock:
 		:rtype: List[dist.P2POp] or None
 		"""
 		src = options.get("src") or self.previous
+
 		if options.get("offload") and len(self.act_to_keep) > 0:
 			# Free memory just before allocating the next buffer
 			activations_offloading().wait_for_offloading()

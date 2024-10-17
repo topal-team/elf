@@ -4,7 +4,7 @@
 #SBATCH --exclusive
 #SBATCH --out out.slurm
 
-# Get the number of nodes and GPUs per node from SLURM# Get the master node's hostname
+# Get the master node's hostname
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 
 srun singularity exec --nv --bind \
