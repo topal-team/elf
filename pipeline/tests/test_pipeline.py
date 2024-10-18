@@ -3,6 +3,7 @@ import torch.nn as nn
 
 import torch.distributed as dist
 from ..pipeline import *
+from ..utils import TensorMetadata
 from ..utils import dtypes
 import pytest
 

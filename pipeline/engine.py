@@ -215,7 +215,7 @@ class Engine:
 						"Tried to run all reduce of parameters gradients before the backward for the last microbatch was computed. Last computed backward: "
 						+ str(block.last_bwd_computed)
 					)
-					block.scale_grads(sum(mb_sizes)) # we also average the gradients out here
+					block.scale_grads(sum(mb_sizes))  # we also average the gradients out here
 					block.all_reduce_param_grads(**op.options)
 
 				case _:
@@ -277,6 +277,6 @@ def compute_loss(block, output, target, loss_fn):
 
 	def grad_fn():
 		loss.backward()
-		return { block.outputs[0]: output.grad.data }
+		return {block.outputs[0]: output.grad.data}
 
 	return loss, grad_fn
