@@ -92,7 +92,7 @@ if rank == 0:
 
 sample = torch.randn((batch_size, 3, 224, 224))
 placement = list(range(args.pp)) * 2
-pipe = Pipeline(model, sample, placement, schedule="1f1b", partition="metis", dp=args.dp)
+pipe = Pipeline(model, sample, placement, schedule="afab", partition="metis", dp=args.dp)
 
 # Define loss function and optimizer
 optimizer = optim.Adam(pipe.parameters(), lr=learning_rate)
@@ -117,11 +117,11 @@ for epoch in range(num_epochs):
 				print(f"Max memory allocated : {torch.cuda.max_memory_allocated() / (1024 ** 2):.3f}MB")
 				torch.cuda.reset_peak_memory_stats()
 
-pipe.save("vision.pt", worker=0)
+# pipe.save("vision.pt", worker=0)
 if rank == 0:
 	print("Finished Training")
 	print("Model saved to vision.pt")
 
-pipe.clear()
-if dist.is_initialized():
-	dist.destroy_process_group()
+# pipe.clear()
+# if dist.is_initialized():
+# 	dist.destroy_process_group()
