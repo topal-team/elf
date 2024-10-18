@@ -35,6 +35,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-dp", type=int, default=1, help="Number of data parallel processes")
 parser.add_argument("-pp", type=int, default=4, help="Number of processes in a pipeline")
 parser.add_argument("-bs", type=int, default=32, help="Batch size")
+parser.add_argument("--dataset", "-d", type=str, default="/data", help="Path to the dataset")
 parser.add_argument(
 	"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
 )
@@ -58,9 +59,9 @@ torch.cuda.set_device(local_rank)
 dist.init_process_group(backend="nccl")
 
 # Define hyperparameters
-num_epochs = 3
+num_epochs = 1
 batch_size = args.bs
-learning_rate = 0.001
+learning_rate = 0.0005
 
 # Define data transforms
 transform = transforms.Compose(
@@ -71,8 +72,8 @@ transform = transforms.Compose(
 	]
 )
 
-# Load CIFAR-100 dataset
-train_dataset = datasets.CIFAR10(root="/data", train=True, download=False, transform=transform)
+# Load CIFAR-10 dataset
+train_dataset = datasets.CIFAR10(root=args.dataset, train=True, download=True, transform=transform)
 train_loader = DataLoader(
 	train_dataset,
 	batch_size=batch_size,
@@ -80,7 +81,8 @@ train_loader = DataLoader(
 		train_dataset, num_replicas=args.dp, rank=rank // args.pp, shuffle=True
 	),
 )
-model = timm.create_model("convnextv2_base", pretrained=False)
+
+model = timm.create_model("convnextv2_huge", pretrained=False)
 model.train()
 if rank == 0:
 	print(
@@ -90,7 +92,7 @@ if rank == 0:
 
 sample = torch.randn((batch_size, 3, 224, 224))
 placement = list(range(args.pp)) * 2
-pipe = Pipeline(model, sample, schedule="1f1b", partition="metis", dp=args.dp)
+pipe = Pipeline(model, sample, placement, schedule="1f1b", partition="metis", dp=args.dp)
 
 # Define loss function and optimizer
 optimizer = optim.Adam(pipe.parameters(), lr=learning_rate)

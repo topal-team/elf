@@ -65,39 +65,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 		elif global_rank == placement[-1]:
 			dist.recv(batch, src=placement[0])
 
-	pipe = Pipeline(blocks, batch, placement, partition=None, schedule=scheduler)
-	output, _ = pipe(batch, target, F.mse_loss, split_size)
-	blocks = (
-		pipe.blocks
-	)  # we shouldn't access directly the internal modules but it's for the purpose of testing
-	grads = None
-	if global_rank == placement[0]:
-		grads = []
-		for micro_batch_grads in blocks[0].grads_to_send:
-			grads.extend(list(micro_batch_grads.values()))  # add every gradient
-		blocks[0].grads_to_send.clear()
-
-	for b in blocks:
-		assert (
-			len(b.act_to_keep) == 0
-		), f"{b} - There should be no activation left, {len(b.act_to_keep)} still in queue"
-		assert (
-			len(b.inputs_to_forward) == 0
-		), f"{b} - There should be no input left to compute, {len(b.inputs_to_forward)} still in queue"
-		assert (
-			len(b.act_to_send) == 0
-		), f"{b} - There should be no activation left to send, {len(b.act_to_send)} still in queue"
-		assert (
-			len(b.grads_to_backward) == 0
-		), f"{b} - There should be no gradients left, {len(b.grads_to_backward)} still in queue"
-		assert (
-			len(b.inputs_to_keep) == 0
-		), f"{b} - There should be no inputs left to backward, {len(b.inputs_to_keep)} still in queue"
-		assert (
-			len(b.grads_to_send) == 0
-		), f"{b} - There should be no grads left to send, {len(b.grads_to_send)} still in queue"
-
-	pipe = Pipeline(blocks, batch, placement, partition=None, schedule=scheduler)
+	pipe = Pipeline(blocks, batch, placement, partition=False, schedule=scheduler)
 	output, _ = pipe(batch, target, F.mse_loss, split_size)
 	# we shouldn't access directly the internal modules but it's for the purpose of testing
 	blocks = pipe.blocks
