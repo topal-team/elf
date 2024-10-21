@@ -1,0 +1,43 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel
+
+%post
+    # Update and install essential packages
+    apt-get update && apt-get install -y \
+        git \
+        wget \
+        curl \
+        build-essential \
+        cmake \
+        gcc
+
+    # Install additional Python packages
+    pip install --no-cache-dir \
+     numpy matplotlib pandas wandb tensorboardX datasets transformers tensorboard timm pytest pyyaml tqdm networkx huggingface-hub ruff
+
+
+    # METIS
+    git clone https://github.com/KarypisLab/GKlib.git
+    cd GKlib
+    make && make install
+    cd ..
+    git clone https://github.com/KarypisLab/METIS.git
+    cd METIS
+    make config shared=1 cc=gcc prefix=~/local
+    make install
+
+    # Nsight Systems
+
+    # Get the debian package
+    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2024_1/nsight-systems-2024.1.1_2024.1.1.59-1_amd64.deb ;
+    # Extract
+    ar x nsight-systems-2024.1.1_2024.1.1.59-1_amd64.deb ;
+    # Extract the important files
+    tar xvzf data.tar.gz ;
+    # Remove package metadata
+    rm debian-binary control.tar.gz nsight-systems-2024.1.1_2024.1.1.59-1_amd64.deb ;
+    # Add binary to path. Replace ${pwd} by the correct path if you add it in .bashrc
+    export PATH="$(pwd)/opt/nvidia/nsight-systems/2024.1.1/bin":$PATH ;
+    # Check installation
+    nsys --version
+

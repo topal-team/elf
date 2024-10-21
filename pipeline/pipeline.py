@@ -339,6 +339,7 @@ class Pipeline:
 				if rank in members:
 					for b in self.blocks:
 						b.pp_group = pp_group
+
 					# Init communicators to avoid hangs later on
 					buffer = torch.empty(1, device=torch.cuda.current_device())
 					torch.cuda.synchronize()

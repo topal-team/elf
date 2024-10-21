@@ -182,6 +182,7 @@ def test_partition():
 
 		check_partition(ModelMultipleOutputs(), 2, torch.randn(4, 32), mode)
 
+
 @pytest.mark.single
 def test_get_inputs_outputs_single():
 	class Model(nn.Module):
@@ -189,12 +190,9 @@ def test_get_inputs_outputs_single():
 			x = x + x
 			y = x * x
 			return y
-	
+
 	trace = torch.fx.symbolic_trace(Model())
 	nodes = list(trace.graph.nodes)
 
 	_, inputs, outputs = get_inputs_outputs_single(nodes)
 	assert inputs == set(["x"])
-
-		
-	

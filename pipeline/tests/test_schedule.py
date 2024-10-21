@@ -118,6 +118,7 @@ def test_1f1b():
 		Operation(1, None, OperationType.ALL_REDUCE_PARAM_GRADS, 1),
 	]
 
+
 def check_validity(schedule, placement, n_micro_batches):
 	n_stages = len(placement)
 
@@ -128,7 +129,15 @@ def check_validity(schedule, placement, n_micro_batches):
 	send_bwds = [op for op in schedule if op.op == OperationType.SEND_BACKWARD]
 	recv_fwds = [op for op in schedule if op.op == OperationType.RECV_FORWARD]
 	recv_bwds = [op for op in schedule if op.op == OperationType.RECV_BACKWARD]
-	assert len(fwds) == len(bwds) == len(send_fwds) == len(send_bwds) == len(recv_fwds) == len(recv_bwds) == (n_stages * n_micro_batches)
+	assert (
+		len(fwds)
+		== len(bwds)
+		== len(send_fwds)
+		== len(send_bwds)
+		== len(recv_fwds)
+		== len(recv_bwds)
+		== (n_stages * n_micro_batches)
+	)
 
 	loss_fwds = [op for op in schedule if op.op == OperationType.LOSS_FORWARD]
 	loss_bwds = [op for op in schedule if op.op == OperationType.LOSS_BACKWARD]
@@ -148,7 +157,7 @@ def check_validity(schedule, placement, n_micro_batches):
 
 		assert len(fwds_stage) == len(bwds_stage) == n_stages
 
-	def check_order(block_id, mb_id, is_last = False):
+	def check_order(block_id, mb_id, is_last=False):
 		ops = [OperationType.RECV_FORWARD, OperationType.FORWARD, OperationType.SEND_FORWARD]
 		if is_last:
 			ops.extend([OperationType.LOSS_FORWARD, OperationType.LOSS_BACKWARD])
@@ -157,11 +166,11 @@ def check_validity(schedule, placement, n_micro_batches):
 			if op.block_id != block_id or op.mb_id != mb_id:
 				continue
 			assert op.op == ops.pop(0)
-	
+
 	# Check that the order is always recv/forward/send/recv/backward/send
 	for mb_id in range(n_micro_batches):
 		for block_id in range(n_stages):
-			check_order(block_id, mb_id, is_last = block_id == n_stages - 1)
+			check_order(block_id, mb_id, is_last=block_id == n_stages - 1)
 
 	# All reduce param grads should be after all backward ops
 	for block_id in range(n_stages):
@@ -174,27 +183,22 @@ def check_validity(schedule, placement, n_micro_batches):
 				assert n_bwds == n_micro_batches
 
 	# Number of all reduce param grads should be equal to the number of stages
-	n_all_reduce_param_grads = len([op for op in schedule if op.op == OperationType.ALL_REDUCE_PARAM_GRADS])
+	n_all_reduce_param_grads = len(
+		[op for op in schedule if op.op == OperationType.ALL_REDUCE_PARAM_GRADS]
+	)
 	assert n_all_reduce_param_grads == n_stages
+
 
 @pytest.mark.single
 def test_schedule():
 	scheduler = generate_afab_schedule
-	for placement in [
-		[0, 1],
-		[0, 1, 2, 3],
-		[0, 1, 2, 3, 0, 1, 2, 3]
-	]:
+	for placement in [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]]:
 		for n_micro_batches in [2, 4, 8]:
 			schedule = scheduler(placement, n_micro_batches)
 			check_validity(schedule, placement, n_micro_batches)
 
 	scheduler = generate_1f1b_schedule
-	for placement in [
-		[0, 1],
-		[0, 1, 2, 3],
-		[0, 1, 2, 3, 0, 1, 2, 3]
-	]:
+	for placement in [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]]:
 		for n_micro_batches in [2, 4, 8]:
 			schedule = scheduler(placement, n_micro_batches)
 			check_validity(schedule, placement, n_micro_batches)

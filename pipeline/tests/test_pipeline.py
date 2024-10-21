@@ -3,13 +3,14 @@ import torch.nn as nn
 
 import torch.distributed as dist
 from ..pipeline import *
+from ..utils import TensorMetadata
 from ..utils import dtypes
 import pytest
 
 
 @pytest.fixture
 def init_dist():
-	assert "RANK" in os.environ, "Cannot run multi-process tests without torchrun !"
+	assert "RANK" in os.environ, "Cannot run multi-process tests without torchrun"
 
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
@@ -367,3 +368,21 @@ def test_pipe_correctness_multi(init_dist):
 
 		for grad, layer in zip(all_grads, model_full.children()):
 			assert torch.allclose(grad.data, layer.weight.grad.data)
+
+@pytest.mark.single
+def test_get_mb_sizes():
+	pipe = Pipeline.__new__(Pipeline)
+
+	batch = [torch.empty(32, 1)]
+	split_size = 8
+	mb_sizes = pipe._get_mb_sizes(split_size, batch)
+	assert mb_sizes == [8, 8, 8, 8]
+
+	batch = [torch.empty(33, 1)]
+	mb_sizes = pipe._get_mb_sizes(split_size, batch)
+	assert mb_sizes == [8, 8, 8, 8, 1]
+
+	batch = [torch.empty(32, 1)]
+	split_size = [5, 9, 11, 7]
+	mb_sizes = pipe._get_mb_sizes(split_size, batch)
+	assert mb_sizes == [5, 9, 11, 7]

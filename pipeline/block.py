@@ -167,7 +167,9 @@ class PipelineBlock:
 		activations = self.act_to_send.popleft()
 
 		if options.get("batched_comm"):
-			return [dist.P2POp(dist.isend, activations[out], dst, group=self.pp_group) for out in self.outputs]
+			return [
+				dist.P2POp(dist.isend, activations[out], dst, group=self.pp_group) for out in self.outputs
+			]
 		else:
 			logger.debug(f"{self} - Sending activations to layer {self.id + 1} on rank {dst}")
 			for out in self.outputs:
@@ -319,7 +321,7 @@ class PipelineBlock:
 				dist.recv(metadata, src=src)
 				self.metadata[key] = TensorMetadata.from_tensor(metadata)
 			logger.debug(f"{self} - Registered metadata {self.metadata}")
-	
+
 	def _send_metadata(self, dst):
 		if dst is None or dst == self.rank:
 			return

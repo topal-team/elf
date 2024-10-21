@@ -180,7 +180,7 @@ def train(pipe, model, data, pp, dp):
 	for e in range(10):
 		memory_before = torch.cuda.memory_allocated()
 		epoch_loss = torch.tensor([0.0], device=torch.cuda.current_device())
-		
+
 		for d in loader_distributed:
 			optimizer_distributed.zero_grad()
 			y, loss_distributed = pipe(d, torch.empty_like(d), loss_fn=lambda x, _: x.sum() / 1e5)

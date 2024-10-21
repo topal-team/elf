@@ -13,7 +13,7 @@ logger = logging.getLogger("schedule")
 def _add_forward_pass(schedule, placement, block_id, mb_id, rank, options):
 	for op_type in [OperationType.RECV_FORWARD, OperationType.FORWARD, OperationType.SEND_FORWARD]:
 		schedule.append(Operation(block_id, mb_id, op_type, rank, **options))
-	
+
 	if block_id == len(placement) - 1:
 		schedule.append(Operation(block_id, mb_id, OperationType.LOSS_FORWARD, rank, **options))
 
@@ -24,7 +24,6 @@ def _add_backward_pass(schedule, placement, block_id, mb_id, rank, options):
 
 	for op_type in [OperationType.RECV_BACKWARD, OperationType.BACKWARD, OperationType.SEND_BACKWARD]:
 		schedule.append(Operation(block_id, mb_id, op_type, rank, **options))
-
 
 
 def generate_afab_schedule(placement, n_micro_batches, **options):
@@ -41,7 +40,6 @@ def generate_afab_schedule(placement, n_micro_batches, **options):
 	:rtype: List[Operation]
 	"""
 	schedule = []
-	n_stages = len(placement)
 	n_devices = max(placement) + 1
 
 	# All forward
