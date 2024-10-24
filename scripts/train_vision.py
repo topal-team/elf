@@ -59,7 +59,7 @@ torch.cuda.set_device(local_rank)
 dist.init_process_group(backend="nccl")
 
 # Define hyperparameters
-num_epochs = 1
+num_epochs = 10
 batch_size = args.bs
 learning_rate = 0.0005
 
@@ -73,7 +73,7 @@ transform = transforms.Compose(
 )
 
 # Load CIFAR-10 dataset
-train_dataset = datasets.CIFAR10(root=args.dataset, train=True, download=True, transform=transform)
+train_dataset = datasets.CIFAR100(root=args.dataset, train=True, download=True, transform=transform)
 train_loader = DataLoader(
 	train_dataset,
 	batch_size=batch_size,
@@ -82,7 +82,7 @@ train_loader = DataLoader(
 	),
 )
 
-model = timm.create_model("convnextv2_huge", pretrained=False)
+model = timm.create_model("convnextv2_huge", pretrained=False, num_classes=100)
 model.train()
 if rank == 0:
 	print(
@@ -90,16 +90,18 @@ if rank == 0:
 		pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
 	)
 
-sample = torch.randn((batch_size, 3, 224, 224))
 placement = list(range(args.pp)) * 2
+sample = torch.randn((batch_size // len(placement), 3, 224, 224))
 pipe = Pipeline(model, sample, placement, schedule="afab", partition="metis", dp=args.dp)
 
 # Define loss function and optimizer
 optimizer = optim.Adam(pipe.parameters(), lr=learning_rate)
 # Training loop
+running_loss = 0.0
+step = 0
 for epoch in range(num_epochs):
-	running_loss = 0.0
 	for i, (inputs, labels) in enumerate(train_loader):
+		step += 1
 		inputs, labels = inputs.cuda(), labels.cuda()
 
 		optimizer.zero_grad()
@@ -109,15 +111,18 @@ for epoch in range(num_epochs):
 		optimizer.step()
 
 		if rank == placement[-1]:
-			running_loss += loss.detach().item()
-			if i % 20 == 19:  # print every 20 mini-batches
-				print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / (20 * batch_size):.3f}")
-				running_loss = 0.0
+			# Moving average
+			running_loss += loss.item() / inputs.size(0)
+			if step == 10:  # print every 20 mini-batches
+				running_loss /= 10
+				print(f"[Epoch {epoch}, Batch {i // len(train_loader)}] loss: {running_loss:.3f}")
 				print(f"Last pipe time recorded : {pipe.times['total']:.3f}s")
 				print(f"Max memory allocated : {torch.cuda.max_memory_allocated() / (1024 ** 2):.3f}MB")
 				torch.cuda.reset_peak_memory_stats()
+				running_loss = 0.0
+				step = 0
 
-# pipe.save("vision.pt", worker=0)
+pipe.save("vision.pt", worker=0)
 if rank == 0:
 	print("Finished Training")
 	print("Model saved to vision.pt")

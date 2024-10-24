@@ -1,12 +1,12 @@
 import os
 import torch
 import torch.distributed as dist
-
+from datetime import timedelta
 
 def init_dist():
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	rank = int(os.getenv("RANK"))
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", timeout = timedelta(seconds=30))
 	torch.cuda.set_device(local_rank)
 	ws = dist.get_world_size()
 	return local_rank, rank, ws
@@ -23,6 +23,7 @@ def run_p2p(local_rank, rank, ws):
 
 	print(f"Rank {rank} - done")
 
+	dist.barrier()
 	dist.destroy_process_group()
 
 
@@ -66,10 +67,33 @@ def run_p2p_object(local_rank, rank, ws):
 
 	dist.destroy_process_group()
 
+def run_multinode_test(local_rank, rank, ws):
+	print(f"Global rank {rank} - local rank {local_rank}, world size {ws}")
+
+	members = list(range(ws))
+	if rank == 0:
+		print(f"Members: {members}")
+	group = dist.new_group(ranks = members)
+
+	x = torch.full((2, 3), rank, device=local_rank)
+	if rank != 0:
+		dist.recv(x, src = rank - 1, group = group)
+	if rank != ws - 1:
+		dist.send(x, dst = rank + 1, group = group)
+
+	print(f"Rank {rank} - {x}")
+	torch.cuda.synchronize()
+	dist.barrier(group=group)
+
+	if rank in members:
+		dist.destroy_process_group(group)
+
+	dist.destroy_process_group()
 
 if __name__ == "__main__":
 	local_rank, rank, ws = init_dist()
-	run_p2p(local_rank, rank, ws)
+	# run_p2p(local_rank, rank, ws)
 	# run_collective(local_rank, rank, ws)
 	# run_gather_object(local_rank, rank, ws)
 	# run_p2p_object(local_rank, rank, ws)
+	run_multinode_test(local_rank, rank, ws)

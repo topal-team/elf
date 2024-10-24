@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel
+From: nvcr.io/nvidia/pytorch:24.09-py3
 
 %post
     # Update and install essential packages
@@ -11,6 +11,9 @@ From: pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel
         cmake \
         gcc
 
+    pip install --force-reinstall --no-cache-dir --index https://download.pytorch.org/whl/cu124\
+        torch==2.4.0 \
+        torchvision
     # Install additional Python packages
     pip install --no-cache-dir \
      numpy matplotlib pandas wandb tensorboardX datasets transformers tensorboard timm pytest pyyaml tqdm networkx huggingface-hub ruff
@@ -19,25 +22,26 @@ From: pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel
     # METIS
     git clone https://github.com/KarypisLab/GKlib.git
     cd GKlib
+    make config prefix=/usr/local
     make && make install
     cd ..
     git clone https://github.com/KarypisLab/METIS.git
     cd METIS
-    make config shared=1 cc=gcc prefix=~/local
+    make config prefix=/usr/local
     make install
 
     # Nsight Systems
 
     # Get the debian package
-    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2024_1/nsight-systems-2024.1.1_2024.1.1.59-1_amd64.deb ;
+    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2024_6/nsight-systems-2024.6.1_2024.6.1.90-1_arm64.deb ;
     # Extract
-    ar x nsight-systems-2024.1.1_2024.1.1.59-1_amd64.deb ;
+    ar x nsight-systems-2024.6.1_2024.6.1.90-1_arm64.deb ;
     # Extract the important files
     tar xvzf data.tar.gz ;
     # Remove package metadata
-    rm debian-binary control.tar.gz nsight-systems-2024.1.1_2024.1.1.59-1_amd64.deb ;
+    rm debian-binary control.tar.gz nsight-systems-2024.6.1_2024.6.1.90-1_arm64.deb ;
     # Add binary to path. Replace ${pwd} by the correct path if you add it in .bashrc
-    export PATH="$(pwd)/opt/nvidia/nsight-systems/2024.1.1/bin":$PATH ;
+    export PATH="$(pwd)/opt/nvidia/nsight-systems/2024.6.1/bin":$PATH ;
     # Check installation
     nsys --version
 

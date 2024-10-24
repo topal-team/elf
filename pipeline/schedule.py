@@ -42,9 +42,9 @@ def generate_afab_schedule(placement, n_micro_batches, **options):
 	schedule = []
 	n_devices = max(placement) + 1
 
-	# All forward
 	for rank in range(n_devices):
 		ids = [i for i in range(len(placement)) if placement[i] == rank]
+		# All forward
 		for i in range(n_micro_batches):
 			for id_ in ids:
 				_add_forward_pass(schedule, placement, id_, i, rank, options)

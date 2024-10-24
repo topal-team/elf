@@ -142,6 +142,7 @@ class PipelineBlock:
 		with Timer() as timer:
 			for key in self.outputs:
 				# Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
+				assert act[key].shape == grads[key].shape
 				act[key].backward(grads[key], retain_graph=(key != self.outputs[-1]))
 		self.compute_time += timer.time()
 
@@ -309,17 +310,12 @@ class PipelineBlock:
 			p.grad.data /= batch_size
 
 	def _receive_metadata(self, src):
+		if src is None or src == self.rank:
+			return
 		for key in self.inputs:
-			if src is None or src == self.rank:
-				return
-				# assert len(self.inputs_to_forward) != 0, "Can't register metadata without inputs"
-				# inputs = self.inputs_to_forward[0]  # First mb
-				# _, x = inputs[key]  # Correct variable, discard fake work
-				# self.metadata[key] = TensorMetadata(x[0])  # Don't register batch size
-			else:
-				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=src)
-				self.metadata[key] = TensorMetadata.from_tensor(metadata)
+			metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
+			dist.recv(metadata, src=src, group=self.pp_group)
+			self.metadata[key] = TensorMetadata.from_tensor(metadata)
 			logger.debug(f"{self} - Registered metadata {self.metadata}")
 
 	def _send_metadata(self, dst):
@@ -334,4 +330,4 @@ class PipelineBlock:
 			self.out_metadata[k] = TensorMetadata(y[k][0])
 			logger.debug(f"{self} - Registered out-metadata {self.out_metadata}")
 			if dst is not None and dst != self.rank:
-				dist.send(self.out_metadata[k].to_tensor(), dst=dst)
+				dist.send(self.out_metadata[k].to_tensor(), dst=dst, group=self.pp_group)
