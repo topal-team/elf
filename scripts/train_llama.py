@@ -1,7 +1,10 @@
+import os
 import sys
 
 sys.path.append("./")
 import torch
+import torch.nn as nn
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import datasets
@@ -9,8 +12,8 @@ from transformers import AutoTokenizer
 from models.llama3 import Llama, ModelArgs
 import argparse
 
-import os
-import torch.distributed as dist
+# from models.llama3 import Llama, ModelArgs
+from models.GPT import GPT, GPT13BConfig, GPTLargeConfig
 from pipeline import Pipeline
 
 import logging
@@ -79,26 +82,37 @@ def main():
 		sampler=DistributedSampler(tokenized_dataset, num_replicas=args.data_parallel, rank=rank // 4),
 	)
 
-	# Initialize model
-	model_args = ModelArgs(
-		dim=128,
-		n_layers=64,
-		n_heads=4,
-		vocab_size=tokenizer.vocab_size + 2,
-		max_seq_len=args.max_seq_len,
-	)
+	# # Initialize model
+	# model_args = ModelArgs(
+	# 	dim=128,
+	# 	n_layers=64,
+	# 	n_heads=4,
+	# 	vocab_size=tokenizer.vocab_size + 2,
+	# 	max_seq_len=args.max_seq_len,
+	# )
 
-	sample = torch.randint(0, 10, (args.batch_size, args.max_seq_len))
-	model = Llama(model_args)
+	sample = torch.randint(0, 10, (args.batch_size // args.pp, args.max_seq_len))
+	model = GPT(GPTLargeConfig(tokenizer.vocab_size + 2, args.max_seq_len))
+	# model = Llama(model_args)
 	if rank == 0:
 		print(
 			"# of trainable parameters : ",
 			pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
 		)
-	pipe = Pipeline(model, sample, partition="metis", schedule="1f1b", dp=args.data_parallel)
+	placement = list(range(args.pp)) * 2
+	pipe = Pipeline(
+		model, sample, placement, partition="metis", schedule="afab", dp=args.dp, worker=1
+	)
 
 	# Initialize optimizer
 	optimizer = torch.optim.AdamW(pipe.parameters(), lr=args.lr)
+
+	torch.cuda.cudart().cudaProfilerStart()
+
+	def loss_fn(logits, targets):
+		logits = logits.view(-1, logits.size(-1))
+		targets = targets.view(-1)
+		return nn.functional.cross_entropy(logits, targets)
 
 	# Training loop
 	model.train()
@@ -111,7 +125,9 @@ def main():
 
 			optimizer.zero_grad()
 
-			_, loss = pipe(input_ids, input_ids, model.loss, split_size=args.batch_size // ws)
+			_, loss = pipe(
+				input_ids, input_ids, loss_fn, split_size=args.batch_size // args.pp, profile=True
+			)
 
 			optimizer.step()
 
@@ -124,6 +140,7 @@ def main():
 			avg_loss = total_loss / len(dataloader)
 			print(f"Epoch {epoch + 1}/{args.epochs}, Average Loss: {avg_loss:.4f}")
 
+	torch.cuda.cudart().cudaProfilerStop()
 	pipe.clear()
 
 

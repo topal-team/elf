@@ -134,8 +134,8 @@ class Pipeline:
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:
 			result = torch.cat(result, dim=0)
-			losses = torch.tensor(losses, device=torch.cuda.current_device())
-			losses = losses.sum(dim=0, keepdim=True) / sum(mb_sizes)
+			losses = torch.tensor(losses, device=result.device)
+			losses = losses.mean()
 			return result, losses
 		else:
 			return None, None
@@ -180,8 +180,14 @@ class Pipeline:
 		dist.barrier()
 		for block in self.blocks:
 			if block.dp_group:
+				logger.debug(
+					f"Destroying DP group with members {dist.get_process_group_ranks(block.dp_group)}"
+				)
 				dist.destroy_process_group(block.dp_group)
 
+		logger.debug(
+			f"Destroying PP group with members {dist.get_process_group_ranks(self.blocks[0].pp_group)}"
+		)
 		dist.destroy_process_group(self.blocks[0].pp_group)
 
 	def save(self, path, worker=0):
@@ -197,6 +203,7 @@ class Pipeline:
 		:type worker: int, optional
 		"""
 		rank = dist.get_rank()
+		pp_group = self.blocks[0].pp_group
 		if rank == worker:
 			full_state = {}
 			n_devices = max(self.placement) + 1
@@ -207,7 +214,7 @@ class Pipeline:
 						full_state[p_name] = p.cpu().detach()
 				else:
 					param_list = [{}]
-					dist.recv_object_list(param_list, src=d, group=self.blocks[0].pp_group)
+					dist.recv_object_list(param_list, src=d, group=pp_group)
 
 					for p_name, p in param_list[0].items():
 						full_state[p_name] = p.cpu().detach()
@@ -215,8 +222,8 @@ class Pipeline:
 			torch.save(full_state, path)
 
 		else:
-			if worker in self.placement:
-				dist.send_object_list([self.named_parameters()], dst=worker, group=self.blocks[0].pp_group)
+			if worker in dist.get_process_group_ranks(pp_group):
+				dist.send_object_list([self.named_parameters()], dst=worker, group=pp_group)
 
 	def _get_mb_sizes(self, split_size, batch):
 		"""
@@ -342,8 +349,8 @@ class Pipeline:
 
 					# Init communicators to avoid hangs later on
 					buffer = torch.empty(1, device=torch.cuda.current_device())
-					torch.cuda.synchronize()
 					dist.all_reduce(buffer, group=pp_group)
+					torch.cuda.synchronize()
 
 
 def shared_partition(model, placement, sample, mode):
