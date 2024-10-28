@@ -101,7 +101,7 @@ def main():
 		)
 	placement = list(range(args.pp)) * 2
 	pipe = Pipeline(
-		model, sample, placement, partition="metis", schedule="afab", dp=args.dp, worker=1
+		model, sample, placement, partition="metis", schedule="afab", dp=args.dp
 	)
 
 	# Initialize optimizer
