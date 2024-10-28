@@ -14,6 +14,8 @@ if __name__ == "__main__":
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
 	dist.init_process_group(backend="nccl")
+	print('RANKS:\t', dist.get_rank(), rank, local_rank)
+
 
 	model = resnet50()
 	sample = torch.randn((32, 3, 224, 224)).cuda()
@@ -25,7 +27,7 @@ if __name__ == "__main__":
 			print(f"Epoch {e}")
 		sample = torch.randn((32, 3, 224, 224)).cuda()
 		target = torch.randn((32, 1000)).cuda()
-		_ = model(sample, target, loss_fn)
+		_ = model(sample, target, loss_fn, profile=True)
 		optimizer.step()
 
 	model.clear()
