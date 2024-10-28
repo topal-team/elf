@@ -2,20 +2,21 @@ import os
 import sys
 
 sys.path.append("./")
+
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+
 import datasets
 from transformers import AutoTokenizer
-from models.llama3 import Llama, ModelArgs
-import argparse
 
 # from models.llama3 import Llama, ModelArgs
 from models.GPT import GPT, GPT13BConfig, GPTLargeConfig
 from pipeline import Pipeline
 
+import argparse
 import logging
 
 logger = logging.getLogger("train_llama")
@@ -33,12 +34,24 @@ def pretty_print_params(n):
 
 def parse_args():
 	parser = argparse.ArgumentParser(description="Train Llama3 model")
-	parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
-	parser.add_argument("--epochs", type=int, default=3, help="Number of epochs to train")
-	parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-	parser.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length")
 	parser.add_argument(
-		"-dp", "--data_parallel", type=int, default=1, help="Number of data parallel processes"
+		"--batch_size", "-bs", type=int, default=32, required=False, help="Batch size for training"
+	)
+	parser.add_argument(
+		"--epochs", "-e", type=int, default=3, required=False, help="Number of epochs to train"
+	)
+	parser.add_argument("--lr", type=float, default=1e-4, required=False, help="Learning rate")
+	parser.add_argument(
+		"--max_seq_len", type=int, default=512, required=False, help="Maximum sequence length"
+	)
+	parser.add_argument(
+		"--dataset_path", "-d", type=str, default="/data", required=False, help="Path to dataset"
+	)
+	parser.add_argument(
+		"-dp", type=int, default=1, required=False, help="Number of data parallel processes"
+	)
+	parser.add_argument(
+		"-pp", type=int, default=4, required=False, help="Number of pipeline parallel processes"
 	)
 	parser.add_argument(
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
@@ -54,35 +67,33 @@ def parse_args():
 	return args
 
 
-def tokenize_function(examples, tokenizer, max_length):
-	return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=max_length)
-
-
 def main():
 	args = parse_args()
 
 	# Load dataset
-	dataset = datasets.load_from_disk("/data/wikitext-2-v1/train")
-
+	# dataset = datasets.load_from_disk("/data/wikitext-2-v1/train")
 	# Initialize tokenizer
-	tokenizer = AutoTokenizer.from_pretrained("/models/meta-llama/Meta-Llama-3.1-8B")
+	tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
 	tokenizer.pad_token = tokenizer.eos_token
 
-	# Tokenize dataset
-	tokenized_dataset = dataset.map(
-		lambda examples: tokenize_function(examples, tokenizer, args.max_seq_len),
-		batched=True,
-		remove_columns=dataset.column_names,
-	)
+	if os.path.exists(args.dataset_path + "/tokenized/train"):
+		tokenized_dataset = datasets.load_from_disk(args.dataset_path + "/tokenized/train")
+	else:
+		print(f"No tokenized dataset found at {args.dataset_path}/tokenized/train.")
+		exit(1)
+
+	if rank == 0:
+		print(f"Loaded {pretty_print_params(len(tokenized_dataset))} samples")
+		print(f"Vocab size: {tokenizer.vocab_size}")
 
 	# Create DataLoader
 	dataloader = DataLoader(
 		tokenized_dataset,
-		batch_size=args.batch_size // args.data_parallel,
-		sampler=DistributedSampler(tokenized_dataset, num_replicas=args.data_parallel, rank=rank // 4),
+		batch_size=args.batch_size // args.dp,
+		sampler=DistributedSampler(tokenized_dataset, num_replicas=args.dp, rank=rank // args.pp),
 	)
 
-	# # Initialize model
+	# Initialize model
 	# model_args = ModelArgs(
 	# 	dim=128,
 	# 	n_layers=64,
@@ -101,7 +112,7 @@ def main():
 		)
 	placement = list(range(args.pp)) * 2
 	pipe = Pipeline(
-		model, sample, placement, partition="metis", schedule="afab", dp=args.dp, worker=1
+		model, sample, placement, partition="metis", schedule="afab", dp=args.dp
 	)
 
 	# Initialize optimizer
