@@ -16,6 +16,20 @@ import logging
 
 logger = logging.getLogger("pipeline")
 
+def to_cpu(nested_dict):
+    """
+    Recursively moves all tensors in a nested dictionary to the CPU.
+    """
+    if isinstance(nested_dict, dict):
+        return {key: to_cpu(value) for key, value in nested_dict.items()}
+    elif isinstance(nested_dict, list):
+        return [to_cpu(item) for item in nested_dict]
+    elif isinstance(nested_dict, tuple):
+        return tuple(to_cpu(item) for item in nested_dict)
+    elif isinstance(nested_dict, torch.Tensor):
+        return nested_dict.cpu()
+    else:
+        return nested_dict
 
 class Pipeline:
 	"""
@@ -210,11 +224,12 @@ class Pipeline:
 			rank_state_dict[f'state_dict_{block_id}'] = {
 				k:v.data.to('cpu') for k,v in block.model.state_dict().items()
 				}
-		rank_state_dict[f'optimizer'] = self.optimizer.state_dict()
+		rank_state_dict[f'optimizer'] = to_cpu(self.optimizer.state_dict())
 		
-		filepath = f'{checkpoints_dir}/rank{rank}_dp{self.dp}_pp{self.pp}.pt'
+		filepath = f'{checkpoints_dir}/rank{rank}_dp{self.dp}_pp{self.pp}_epoch{epoch}.pt'
 		torch.save(rank_state_dict, filepath)
-		# print(rank_state_dict)
+		# print(filepath)
+		# print(rank_state_dict.keys())
 
 		
 	def save(self, path, worker=0):

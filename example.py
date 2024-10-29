@@ -8,7 +8,8 @@ import os
 """
 Start this file with torchrun
 """
-GROUPS_STORAGE='/net/home/project/tutorial/tutorial050/topal-internship/helios/'
+CHECKPOINT_DIR='./checkpoints/'
+
 if __name__ == "__main__":
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
@@ -34,7 +35,7 @@ if __name__ == "__main__":
 		# optimizer.step()
 		_ = pipe(sample, target, loss_fn, profile=False)
 		pipe.optimizer.step()
-		pipe.save_state_dict(e, f'${GROUPS_STORAGE}/checkpoints')
+		pipe.save_state_dict(e, f'{CHECKPOINT_DIR}')
 	pipe.clear()
 
 	if dist.is_initialized():
