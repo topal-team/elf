@@ -10,6 +10,7 @@ from .schedule import *
 from .engine import Engine
 from .task_graph import graph_from_schedule, find_cycles, fix_cycle
 from .partitioners import partition_graph, get_inputs_outputs_single, create_subgraph
+from collections import OrderedDict
 
 import logging
 
@@ -156,11 +157,10 @@ class Pipeline:
 		:return: An iterator yielding tuples of (name, parameter) for all parameters in the pipeline.
 		:rtype: Iterator[Tuple[str, torch.nn.Parameter]]
 		"""
-		full_params = {}
+		rank_named_parameters = OrderedDict()
 		for block in self.blocks:
-			for p_name, p in block.model.named_parameters():
-				full_params[p_name] = p
-		return full_params
+			rank_named_parameters.update(block.model.named_parameters())
+		return rank_named_parameters
 
 	def zero_grad(self, set_to_none=True):
 		"""
@@ -190,6 +190,33 @@ class Pipeline:
 		)
 		dist.destroy_process_group(self.blocks[0].pp_group)
 
+	def init_optimizer(self):
+		self.optimizer = torch.optim.Adam(self.parameters())
+	
+	
+	def save_state_dict(self, epoch, checkpoints_dir):
+		'''
+		Save state dict (model state and optimizer state) to CPU
+		'''
+		rank = dist.get_rank()
+		rank_state_dict = {
+			'rank' : rank,
+			'pp': self.pp,
+			'dp': self.dp,
+			'epoch': epoch,
+		}
+
+		for block_id, block in enumerate(self.blocks):
+			rank_state_dict[f'state_dict_{block_id}'] = {
+				k:v.data.to('cpu') for k,v in block.model.state_dict().items()
+				}
+		rank_state_dict[f'optimizer'] = self.optimizer.state_dict()
+		
+		filepath = f'{checkpoints_dir}/rank{rank}_dp{self.dp}_pp{self.pp}.pt'
+		torch.save(rank_state_dict, filepath)
+		# print(rank_state_dict)
+
+		
 	def save(self, path, worker=0):
 		"""
 		Save the model's state dictionary to a file.
