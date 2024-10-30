@@ -1,18 +1,22 @@
 #!/bin/bash -l
 #SBATCH -p gpu
-#SBATCH --time=00:20:00
+#SBATCH --nodes=2
+##SBATCH --ntasks-per-node=1
+#SBATCH --time=00:60:00
 #SBATCH --output=out_files/out.out
 #SBATCH --error=out_files/err.err
+#SBATCH --gres=gpu:4
 #SBATCH --account=tutorial
 
-# run as `sbatch --nodes 2 --gres=gpu:4 example.sh` 
 # IMPORTANT: load the modules for machine learning tasks and libraries
 module load ML-bundle/24.06a
 module load NVHPC/24.5-CUDA-12.4.0
 
 VENV_PATH=${SCRATCH}/venvs/venv
 CODE_PATH=$HOME/topal-internship/
-PYSCRIPT_PATH=$HOME/topal-internship/example.py
+PYSCRIPT_PATH=$HOME/topal-internship/scripts/train_llama.py
+DATA_PATH=${GROUPS_STORAGE}/elf/data/c4-realnewslike
+TOKENIZER_PATH=${GROUPS_STORAGE}/elf/tokenizer/
 
 if [ -d "${VENV_PATH}" ]; then
     echo "The environment ${VENV_PATH} exists."
@@ -35,36 +39,25 @@ echo "Activated the environment ${VENV_PATH}."
 echo "python3 --version"
 python3 -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available())"
 
-cd $CODE_PATH/helios
+# Set environment variables for PyTorch distributed
+# export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1)  # Use the first node as the master
+# export MASTER_PORT=$(( ( RANDOM % 55536 ) + 10000 ))                      # Generate a random port in the range [10000, 65535]
+
+# Print selected MASTER_ADDR and MASTER_PORT for debugging
+# echo "MASTER_ADDR: $MASTER_ADDR"
+# echo "MASTER_PORT: $MASTER_PORT"
+
+cd  ${CODE_PATH}
 
 if [ "$SLURM_NNODES" -gt 1 ]; then
     echo "This job is running on more than 1 node."
-
-    # Set environment variables for PyTorch distributed
-    # Use the first node as the master
-    # Generate a random port in the range [10000, 65535]
-    export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1)  
-    export MASTER_PORT=$(( ( RANDOM % 55536 ) + 10000 ))                      
-
-    # Print selected MASTER_ADDR and MASTER_PORT for debugging
-    echo "MASTER_ADDR: $MASTER_ADDR"
-    echo "MASTER_PORT: $MASTER_PORT"
-
+    nodes=($(scontrol show hostnames $SLURM_JOB_NODELIST))
     srun torchrun --nnodes $SLURM_NNODES \
             --nproc_per_node $SLURM_GPUS_ON_NODE\
             --rdzv_backend=c10d \
-            --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT ${PYSCRIPT_PATH}
+            --rdzv_endpoint ${nodes[0]} \
+            ${PYSCRIPT_PATH} --dataset_path ${DATASET_PAT} --tokenizer_path ${TOKENIZER_PATH} -dp 2 -pp 4
 else
     echo "This job is running on a single node."
-    echo ${SLURM_NNODES} ${SLURM_GPUS_ON_NODE}
-    torchrun --nnodes 1 --nproc_per_node  ${SLURM_GPUS_ON_NODE} ${PYSCRIPT_PATH} 
+    torchrun --nnodes 1 --nproc_per_node  $SLURM_GPUS_ON_NODE ${PYSCRIPT_PATH} --dataset_path ${DATA_PATH} --tokenizer_path $GROUPS_STORAGE/elf/tokenizer/ -dp 2 -pp 4
 fi
-
-# torchrun --nnodes=2 --nproc_per_node=4 $HOME/topal-internship/example.py
-
-# Run torchrun with the appropriate arguments
-# srun torchrun --nnodes=2 \
-#          --nproc_per_node=4\
-#          --rdzv_backend=c10d \
-#          --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-#          $HOME/topal-internship/example.py

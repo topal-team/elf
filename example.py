@@ -13,15 +13,18 @@ CHECKPOINT_DIR='./checkpoints/'
 if __name__ == "__main__":
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
+	world_size = int(os.getenv("WORLD_SIZE"))
 	torch.cuda.set_device(local_rank)
 	dist.init_process_group(backend="nccl")
 	print('RANKS:\t', dist.get_rank(), rank, local_rank)
 
-	model = resnet18()
+	model = resnet50()
 	if rank==0:
 		print(dict(model.named_parameters()).keys())
+	pp, dp = 4, 2
+	placement = list(range(pp))*dp
 	sample = torch.randn((32, 3, 224, 224)).cuda()
-	pipe = Pipeline(model, sample)
+	pipe = Pipeline(model, sample, placement=placement, dp=dp)
 	if rank==0:
 		print('PIPE PARAMS:\n', pipe.named_parameters().keys())
 	pipe.init_optimizer()

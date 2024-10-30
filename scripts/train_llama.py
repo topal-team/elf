@@ -48,6 +48,9 @@ def parse_args():
 		"--dataset_path", "-d", type=str, default="/data", required=False, help="Path to dataset"
 	)
 	parser.add_argument(
+		"--tokenizer_path", "-tk", type=str, default="/data", required=False, help="Path to tokenizer"
+	)
+	parser.add_argument(
 		"-dp", type=int, default=1, required=False, help="Number of data parallel processes"
 	)
 	parser.add_argument(
@@ -56,7 +59,7 @@ def parse_args():
 	parser.add_argument(
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
 	)
-	args = parser.parse_args()
+	args = parser.parse_arg()
 	match args.log:
 		case "debug":
 			logging.getLogger().setLevel(logging.DEBUG)
@@ -73,7 +76,9 @@ def main():
 	# Load dataset
 	# dataset = datasets.load_from_disk("/data/wikitext-2-v1/train")
 	# Initialize tokenizer
-	tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+	# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+	tokenizer = AutoTokenizer.from_pretrained(f"{args.tokenizer_path}")
+
 	tokenizer.pad_token = tokenizer.eos_token
 
 	if os.path.exists(args.dataset_path + "/tokenized/train"):
