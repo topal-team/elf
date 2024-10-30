@@ -1,5 +1,6 @@
 default: &DEFAULT
   phase: 'train'
+  save_dir: './'
   log: 'info'
   train:
     learning_rate: 1e-2

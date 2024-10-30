@@ -10,6 +10,7 @@ sheds=('1f1b' 'afab' 'megatron')
 
 SCRATCH="/net/home/project/tutorial/tutorial050/"
 SBATCHSCRIPT_PATH=$SCRATCH/topal-internship/train_llama.sbatch
+GROUPS_STORAGE="/net/storage/pr3/project/tutorial/elf/models"
 
 generate_placement() {
   local pp=$1
@@ -43,8 +44,9 @@ for arch in "${archs[@]}"; do
             if [ "$sched" == "megatron" ]; then
                 sched="1f1b"
             fi
+            savedir="${GROUPS_STORAGE}/elf/models/$"
             # Create a single argument string
-            PYARGS="--model gpt --phase prepare_data --gpt.arch $arch --pipeline.dp $dp --pipeline.pp $pp --pipeline.pipeline_sched $sched --pipeline.pp_placement $placement --train.batch_size $bs"
+            PYARGS="--model gpt --phase train --save_dir $savedir --gpt.arch $arch --pipeline.dp $dp --pipeline.pp $pp --pipeline.pipeline_sched $sched --pipeline.pp_placement $placement --train.batch_size $bs"
             echo $PYARGS
             # Submit the job with sbatch, passing the argument string as one variable
             sbatch --nodes $node --gres=gpu:4 --export=PYARGS="${PYARGS}" ${SBATCHSCRIPT_PATH}

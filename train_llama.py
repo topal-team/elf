@@ -23,12 +23,12 @@ logger = logging.getLogger("train_llama")
 logging.basicConfig(level=logging.INFO)
 
 
-
 def parse_args():
     parser = argparse.ArgumentParser()
     # Phase
     parser.add_argument('--phase', type=str, help='Pipeline phase', 
                     choices=['prepare_data', "prepare_model", 'train'])
+    parser.add_argument('--save_dir', type=str)
 
     # Data 
     parser.add_argument('--data.load_dataset', action=argparse.BooleanOptionalAction, help='Dateset loading')
@@ -206,7 +206,7 @@ if __name__=="__main__":
     model_config = YamlConfig(f'./{args.model}_config.yaml', config_name='default', config_folder='./config')
     config_pipe = ConfigPipeline([dataset_config,  model_config, train_test_config, pipeline_config, ArgparseConfig(),])
     args = config_pipe.read_conf()
-    
+
     if rank==0:
         print(f'ConfigPipeline.read_conf() output:\n {args}')
 
