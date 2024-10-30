@@ -1,0 +1,8 @@
+default: &DEFAULT
+  model: 'resnet'
+  resnet:
+    arch: 'resnet18' 
+  verbose: True
+
+  train:
+    batch_size: 16
