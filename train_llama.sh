@@ -6,8 +6,8 @@ GROUPS_STORAGE='/net/storage/pr3/project/tutorial'
 
 # Define arrays of hyperparameters
 nodes=(4)
-dps=(4)
-archs=(GPTSmall)
+dps=(2)
+archs=(GPTLarge)
 batch_sizes=(32)
 sheds=('afab')
 

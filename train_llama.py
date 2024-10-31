@@ -24,6 +24,22 @@ logging.basicConfig(level=logging.INFO)
 
 import json
 
+
+class DummyGPT(nn.Module):
+    def __init__(self, n_layers = 16):
+        super().__init__()
+        self.n_layers = n_layers
+        setattr(self, f'layer{1}', nn.Linear(3072, 512))
+        for i in range(n_layers - 1):
+            setattr(self, f'layer{i}', nn.Linear(512, 512))
+
+    def forward(self, x):
+        for i in range(self.n_layers):
+            x = self.__getattr__(f'layer{i}')(x)
+        return x
+
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     # Phase
@@ -97,12 +113,12 @@ def prepare_tokenizer(args):
             print("Tokenized dataset is loaded")
 
 def pretty_print_params(n):
-	if n > 1e9:
-		return f"{n/1e9:.1f}B"
-	elif n > 1e6:
-		return f"{n/1e6:.1f}M"
-	else:
-		return f"{int(n)}"
+    if n > 1e9:
+        return f"{n/1e9:.1f}B"
+    elif n > 1e6:
+        return f"{n/1e6:.1f}M"
+    else:
+        return f"{int(n)}"
 
 def get_gpt_config(args, vocab_size):
         match args.gpt.arch:
@@ -150,7 +166,8 @@ def main(args):
     )
 
     sample = torch.randint(0, 10, (args.train.batch_size // args.pipeline.pp, args.train.max_seq_len))
-    model = GPT(get_gpt_config(args, tokenizer.vocab_size))
+    model = DummyGPT(32)
+    # model = GPT(get_gpt_config(args, tokenizer.vocab_size))
     # model = Llama(model_args)
     if rank == 0:
         print(
@@ -160,12 +177,13 @@ def main(args):
 
     placement = list(map(int, args.pipeline.pp_placement.strip().split(',')))
     # placement = list(range(args.pipeline.pp)) * 2
+    # args.pipeline.partition = False
     pipe = Pipeline(
         model, sample, 
         placement, 
         partition=args.pipeline.partition, 
         schedule=args.pipeline.schedule_type, 
-        dp=args.pipeline.dp
+        dp=args.pipeline.dp,
     )
 
     # Initialize optimizer
@@ -233,7 +251,7 @@ if __name__=="__main__":
     local_rank = int(os.getenv("LOCAL_RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
 
-    dist.init_process_group(backend="nccl", rank=local_rank)
+    dist.init_process_group(backend="nccl", rank=rank)
     torch.cuda.set_device(local_rank)
 
     args = merge_args()

@@ -15,7 +15,7 @@ from collections import OrderedDict
 import logging
 
 logger = logging.getLogger("pipeline")
-
+	
 def to_cpu(nested_dict):
     """
     Recursively moves all tensors in a nested dictionary to the CPU.
@@ -419,8 +419,75 @@ class Pipeline:
 					dist.all_reduce(buffer, group=pp_group)
 					torch.cuda.synchronize()
 
+def shared_partition(model, placement, sample, mode, worker = 0):
+    """
+    Partitions a model according to a placement & mode, then shares it to every process to be consistent
+    :param model: model to partition
+    :type model: nn.Module
+    :param placement: list of device ranks
+    :type placement: List[int]
+    :param sample: example of input data that will be processed by the model
+    :type sample: Tensor
+    :param mode: partitioner to use ; available options are :
+        - "naive": simple load balancing algorithm
+        - "constrained": naive with less communication
+        - "metis": use METIS
+        - "dagP": use dagP / rMLGP
+        For more info, see partition.
+    :type mode: str
+    :return:
+        - Blocks for this process
+        - Inputs for each block of this process
+        - Outputs for each block of this process
+    :rtype: List[nn.Module], List[List[str]], List[List[str]]
+    """
+    rank = dist.get_rank()
+    ws = dist.get_world_size()
+    n_devices = max(placement) + 1
+    # Rank 0 profiles & partition the graph, then shares it to everyone
+    # TODO: what if devices are heterogenous ? how to profile correctly ?
+    if rank == worker:
+        assert mode in [
+            "naive",
+            "constrained",
+            "dagP",
+            "metis",
+        ], "Partition strategies available are : [naive, constrained, dagP, metis]"
+        blocks, all_inputs, all_outputs = partition_graph(model, len(placement), sample, mode=mode)
+        for d in range(n_devices):
+            blocks_on_d = [blocks[i] for i in range(len(blocks)) if placement[i] == d]
+            inputs_on_d = [all_inputs[i] for i in all_inputs.keys() if placement[i] == d]
+            outputs_on_d = [all_outputs[i] for i in all_outputs.keys() if placement[i] == d]
+            if d == worker:
+                models, inputs, outputs = blocks_on_d, inputs_on_d, outputs_on_d
+            else:
+                dist.send_object_list([blocks_on_d, inputs_on_d, outputs_on_d], dst=d)
+                # torch.cuda.synchronize()
+        for dp in range(1, ws // n_devices):
+            dst = rank + dp * n_devices
+            dist.send_object_list([models, inputs, outputs], dst=dst)
+            # torch.cuda.synchronize()
+    elif rank < n_devices:
+        blocks = [None for _ in range(3)]
+        
+        dist.recv_object_list(blocks, src = worker)
+        torch.cuda.synchronize()
+        models, inputs, outputs = blocks
+        for dp in range(1, ws // n_devices):
+            dst = rank + dp * n_devices
+            dist.send_object_list(blocks, dst=dst)
+            # torch.cuda.synchronize()
+    else:
+        blocks = [None for _ in range(3)]
+        dist.recv_object_list(blocks, src = rank % n_devices)
+        torch.cuda.synchronize()
+        models, inputs, outputs = blocks
+    for m, i, o in zip(models, inputs, outputs):
+        logger.info(f"Rank {rank} - signature = {i} -> {o}")
+        logger.debug(f"Rank {rank} - code = {m.code}")
+    return models, inputs, outputs
 
-def shared_partition(model, placement, sample, mode):
+def shared_partition_old(model, placement, sample, mode):
 	"""
 	Partitions a model according to a placement & mode, then shares it to every process to be consistent
 
