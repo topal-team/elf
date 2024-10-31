@@ -5,14 +5,13 @@
 #SBATCH --error=/net/scratch/hscra/project/tutorial/tutorial050/slurm_logs/%J.err
 #SBATCH --account=tutorial
 
-# IMPORTANT: load the modules for machine learning tasks and libraries
+
 module load ML-bundle/24.06a
 module load NVHPC/24.5-CUDA-12.4.0
-HOME="/net/home/project/tutorial/tutorial050/"
-SCRATCH="/net/scratch/hscra/project/tutorial/tutorial050/"
-VENV_PATH=$SCRATCH/venvs/venv
-CODE_PATH=$HOME/topal-internship/topal-internship/
-PYSCRIPT_PATH=$HOME/topal-internship/train_llama.py
+
+VENV_PATH="$SCRATCH/venvs/venv"
+PYARGS=("$@")
+PYARGS+=" --slurm_jobid $SLURM_JOBID"
 
 if [ -d "${VENV_PATH}" ]; then
     echo "The environment ${VENV_PATH} exists."
@@ -29,23 +28,25 @@ else
 fi
 
 # Activate the virtual environment
+echo "VENV_PATH ${VENV_PATH}"
 source ${VENV_PATH}/bin/activate
-echo "Activated the environment ${VENV_PATH}."
+echo "Activated the environment ${VENV_PATH}"
+which torchrun
 
-echo "python3 --version"
-python3 -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available())"
-
-cd  ${CODE_PATH}
-echo "HOHO"
+echo "SLURM_JOB_NODELIST: $SLURM_JOB_NODELIST"
+srun hostname
+srun echo $PYARGS
 if [ "$SLURM_NNODES" -gt 1 ]; then
+    ranks=($(scontrol show hostnames ${SLURM_JOB_NODELIST}))
     echo "This job is running on more than 1 node."
-    nodes=($(scontrol show hostnames $SLURM_JOB_NODELIST))
-    srun torchrun --nnodes $SLURM_NNODES \
-            --nproc_per_node $SLURM_GPUS_ON_NODE\
-            --rdzv_backend=c10d \
-            --rdzv_endpoint ${nodes[0]} \
-            ${PYSCRIPT_PATH} ${PYARGS}
+    srun echo  ${ranks[0]}
+    srun ${VENV_PATH}/bin/torchrun --nnodes $SLURM_NNODES \
+        --nproc-per-node $SLURM_GPUS_ON_NODE \
+        --rdzv-id $SLURM_JOBID \
+        --rdzv-backend c10d \
+         --rdzv-endpoint ${ranks[0]} \
+         ${PYARGS[*]}
 else
     echo "This job is running on a single node."
-    torchrun --nnodes 1 --nproc_per_node  $SLURM_GPUS_ON_NODE ${PYSCRIPT_PATH} ${PYARGS}
+    torchrun --nnodes 1 --nproc-per-node  ${SLURM_GPUS_ON_NODE} ${PYSCRIPT_PATH} ${PYARGS}
 fi

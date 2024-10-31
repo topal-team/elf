@@ -2,7 +2,7 @@ default: &DEFAULT
   tokenizer_dir: "/net/storage/pr3/project/tutorial/elf/tokenizer/"
   model: 'gpt'
   gpt:
-    arch: 'GPTLarge' 
+    arch: 'GPTSmall' 
   verbose: True
   
   train:

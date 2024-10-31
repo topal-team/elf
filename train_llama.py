@@ -15,13 +15,14 @@ from torch.utils.data.distributed import DistributedSampler
 import datasets
 from transformers import AutoTokenizer
 
-from models.GPT import GPT, GPTSmallConfig, GPTLargeConfig, GPT13BConfig, GPT175BConfig
+from models.GPT import GPT, MyGPTConfig, GPTSmallConfig, GPTLargeConfig, GPT13BConfig, GPT175BConfig, GPTXXLConfig
 from pipeline import Pipeline
 
 import logging
 logger = logging.getLogger("train_llama")
 logging.basicConfig(level=logging.INFO)
 
+import json
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -39,7 +40,7 @@ def parse_args():
     # Model
     parser.add_argument('--model', type=str, choices=['resnet', 'gpt'], default='gpt')
     parser.add_argument('--resnet.arch', type=str, choices=['resnet18', 'resnet50'])
-    parser.add_argument('--gpt.arch', type=str, choices=['GPTSmall',  'GPTLarge', 'GPT13B', 'GPT175B'])
+    parser.add_argument('--gpt.arch', type=str, choices=['GPTSmall',  'GPTLarge', 'GPTXXL', 'GPT13B', 'GPT175B'])
 
     # Training hyperparameters
     parser.add_argument('--train.learning_rate', type=float, default=1e-2, help='Training: learning rate')
@@ -59,18 +60,31 @@ def parse_args():
     parser.add_argument('--pipeline.pp_placement', type=str, default="0,1,2,3", help='Pipeline: pp_placement="0,1,2,3" for afab/1f1b, =[0,1,2,3,0,1,2,3] for interleaved 1f1b')
     parser.add_argument('--pipeline.partition', type=str, default="metis", help='Pipeline: partition', choices=['metis', 'naive'])
 
-	parser.add_argument(
-		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
-	)
+    parser.add_argument("--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level")
+    parser.add_argument('--slurm_jobid', type=int, default=0)
+
     return parser.parse_args()
+
+
+def merge_args():
+
+    dataset_config = YamlConfig('./dataset_config.yaml', config_name='default', config_folder='./config')
+    train_test_config = YamlConfig('./train_test_config.yaml', config_name='default', config_folder='./config')
+    pipeline_config = YamlConfig('./pipeline_config.yaml', config_name='default', config_folder='./config')
+    args = parse_args()
+    model_config = YamlConfig(f'./{args.model}_config.yaml', config_name='default', config_folder='./config')
+
+    config_pipe = ConfigPipeline([dataset_config,  model_config, train_test_config, pipeline_config, ArgparseConfig(),])
+    args = config_pipe.read_conf()
+    return args
 
 def prepare_data(args):
     print(args.data)
-
     if not os.path.exists(args.data.__getattr__(f'{args.data.dataset_name}').dataset_dir):
         raise Exception("Dataset is not loaded")
     else:
         print("Dataset is loaded")
+
 
 def prepare_tokenizer(args):
     if not os.path.exists(f'{args.tokenizer_dir}'):
@@ -81,7 +95,6 @@ def prepare_tokenizer(args):
             raise Exception("Tokenized dataset is not found")
         else:
             print("Tokenized dataset is loaded")
-
 
 def pretty_print_params(n):
 	if n > 1e9:
@@ -94,9 +107,15 @@ def pretty_print_params(n):
 def get_gpt_config(args, vocab_size):
         match args.gpt.arch:
             case 'GPTSmall':
-                return GPTSmallConfig(vocab_size + 2, args.train.max_seq_len)
+                return MyGPTConfig(vocab_size + 2, args.train.max_seq_len, 
+                                n_layer = 12,
+                                n_head = 12,
+                                n_embd = 768)
+                # return GPTSmallConfig(vocab_size + 2, args.train.max_seq_len)
             case 'GPTLarge':
                 return GPTSmallConfig(vocab_size + 2, args.train.max_seq_len)
+            case 'GPTXXL':
+                return GPTXXLConfig(vocab_size + 2, args.train.max_seq_len)
             case 'GPT13B':
                 return GPT13BConfig(vocab_size + 2, args.train.max_seq_len)
             case 'GPT175B':
@@ -109,6 +128,7 @@ def main(args):
     # config_values = [config_dict[c] for c in config_columns]
     # print(config_columns)
 
+    rank = dist.get_rank()
     # print(args.tokenizer_dir, args.gpt.arch)
     tokenizer = AutoTokenizer.from_pretrained(f"{args.tokenizer_dir}")
     tokenizer.pad_token = tokenizer.eos_token
@@ -138,7 +158,7 @@ def main(args):
             pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
         )
 
-    placement = [int(s) for s in args.pipeline.pp_placement.strip().split(',')]
+    placement = list(map(int, args.pipeline.pp_placement.strip().split(',')))
     # placement = list(range(args.pipeline.pp)) * 2
     pipe = Pipeline(
         model, sample, 
@@ -149,7 +169,7 @@ def main(args):
     )
 
     # Initialize optimizer
-    optimizer = torch.optim.AdamW(
+    pipe.optimizer = torch.optim.AdamW(
         pipe.parameters(), 
         lr=args.train.learning_rate,
         weight_decay=args.train.weight_decay)
@@ -162,22 +182,27 @@ def main(args):
 
     torch.cuda.cudart().cudaProfilerStart()
 
+    # save model before training
+    pipe.save_model(checkpoints_dir=f'{args.save_dir}/{args.slurm_jobid}')
+
     # Training loop
     model.train()
-    for epoch in range(args.epochs):
+    for epoch in range(args.train.epochs):
         total_loss = 0
         i = 0
         for i, batch in enumerate(dataloader):
+            if i > 200:
+                break
             # Transform batch["input_ids"] into a single tensor
             input_ids = torch.stack(batch["input_ids"], -1).cuda()
 
-            optimizer.zero_grad()
+            pipe.optimizer.zero_grad()
 
             _, loss = pipe(
-                input_ids, input_ids, loss_fn, split_size=args.train.batch_size // args.pp, profile=True
+                input_ids, input_ids, loss_fn, split_size=args.train.batch_size // args.pipeline.pp, profile=True
             )
 
-            optimizer.step()
+            pipe.optimizer.step()
 
             if rank == world_size - 1:
                 total_loss += loss.item()
@@ -186,35 +211,50 @@ def main(args):
 
         if rank == world_size - 1:
             avg_loss = total_loss / len(dataloader)
-            print(f"Epoch {epoch + 1}/{args.epochs}, Average Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch + 1}/{args.train.epochs}, Average Loss: {avg_loss:.7f}")
+            
+        pipe.save_state_dict(epoch + 1, f'{args.save_dir}/{args.slurm_jobid}')
 
     torch.cuda.cudart().cudaProfilerStop()
     pipe.clear()
 
+
+def init_process(local_rank, fn, backend='nccl'):
+    """ Initialize the distributed environment. """
+    dist.init_process_group(backend, rank=local_rank, init_method='env://')
+    size = dist.get_world_size()
+    if torch.cuda.is_available() and backend=='nccl':
+        torch.cuda.set_device(local_rank)
+    fn(local_rank, size)
+
+
 if __name__=="__main__":
     rank = int(os.getenv("RANK"))
-	local_rank = int(os.getenv("LOCAL_RANK"))
-	world_size = int(os.getenv("WORLD_SIZE"))
-	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+    local_rank = int(os.getenv("LOCAL_RANK"))
+    world_size = int(os.getenv("WORLD_SIZE"))
 
+    dist.init_process_group(backend="nccl", rank=local_rank)
+    torch.cuda.set_device(local_rank)
 
-    dataset_config = YamlConfig('./dataset_config.yaml', config_name='default', config_folder='./config')
-    train_test_config = YamlConfig('./train_test_config.yaml', config_name='default', config_folder='./config')
-    pipeline_config = YamlConfig('./pipeline_config.yaml', config_name='default', config_folder='./config')
-    args = parse_args()
-    model_config = YamlConfig(f'./{args.model}_config.yaml', config_name='default', config_folder='./config')
-    config_pipe = ConfigPipeline([dataset_config,  model_config, train_test_config, pipeline_config, ArgparseConfig(),])
-    args = config_pipe.read_conf()
+    args = merge_args()
 
     if rank==0:
         print(f'ConfigPipeline.read_conf() output:\n {args}')
+        savedir= f'{args.save_dir}/{args.slurm_jobid}'
+        os.makedirs(savedir, exist_ok=True)
 
-    if args.phase == 'prepare_data':
-        if rank == 0:
+        with open(f'{savedir}/args_launch.json', 'w') as f: 
+            json.dump(args, f)
+
+        if args.phase == 'prepare_data':
             prepare_data(args)
-    elif args.phase == 'prepare_model':
-        if rank == 0:
+        elif args.phase == 'prepare_model':
             prepare_tokenizer(args)
-    else:
-        main(args)
+        else:
+            pass
+    
+    main(args)
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
+

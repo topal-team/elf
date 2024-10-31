@@ -102,6 +102,8 @@ class Pipeline:
 		self.last_options = {}
 		self.last_nmb = 0
 
+		self.optimizer=None
+
 	def __call__(self, batch, target, loss_fn, split_size=1, profile=False, **options):
 		"""
 		Execute the schedule on a batch of data
@@ -206,7 +208,7 @@ class Pipeline:
 
 	def init_optimizer(self):
 		self.optimizer = torch.optim.Adam(self.parameters())
-	
+
 	
 	def save_state_dict(self, epoch, checkpoints_dir):
 		'''
@@ -227,6 +229,29 @@ class Pipeline:
 		rank_state_dict[f'optimizer'] = to_cpu(self.optimizer.state_dict())
 		
 		filepath = f'{checkpoints_dir}/rank{rank}_dp{self.dp}_pp{self.pp}_epoch{epoch}.pt'
+		torch.save(rank_state_dict, filepath)
+		# print(filepath)
+		# print(rank_state_dict.keys())
+	
+	def save_model(self, epoch='init', checkpoints_dir='./'):
+		'''
+		Save state dict (model state and optimizer state) to CPU
+		'''
+		rank = dist.get_rank()
+		rank_state_dict = {
+			'rank' : rank,
+			'pp': self.pp,
+			'dp': self.dp,
+			'epoch': epoch,
+		}
+
+		for block_id, block in enumerate(self.blocks):
+			rank_state_dict[f'state_dict_{block_id}'] = {
+				k:v.data.to('cpu') for k,v in block.model.state_dict().items()
+				}
+		rank_state_dict[f'optimizer'] = to_cpu(self.optimizer.state_dict())
+		
+		filepath = f"{checkpoints_dir}/rank{rank}_dp{self.dp}_pp{self.pp}_{epoch}.pt"
 		torch.save(rank_state_dict, filepath)
 		# print(filepath)
 		# print(rank_state_dict.keys())
