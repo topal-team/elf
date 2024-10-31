@@ -69,10 +69,10 @@ if [ "$SLURM_NNODES" -gt 1 ]; then
     #      --rdzv-endpoint ${ranks[0]} \
     #      ${PYARGS[*]}
     nodeid=$(srun hostname)
-    nsyssavedir="${GROUPS_STORAGE}/elf/nsys-reports/train_llama/${SLURM_JOBID}/${nodeid}/"
+    nsyssavedir=${GROUPS_STORAGE}/elf/runs/${SLURM_JOBID}/nsys-reports/${nodeid}
     mkdir -p $nsyssavedir
-    nsyscommand="nsys profile -t cuda,nvtx,osrt,cublas,cudnn --stats=true --output="${nsyssavedir}/report" --force-overwrite true --cuda-memory-usage=true --cudabacktrace=all  --gpu-metrics-device=all --nic-metrics=true --capture-range=cudaProfilerApi --capture-range-end=stop"
-    srun ${nsyscommand} ${VENV_PATH}/bin/torchrun --nnodes $SLURM_NNODES \
+    nsyscommand="nsys profile -t cuda,nvtx,osrt,cublas,cudnn --stats=true --output=${nsyssavedir}/report --force-overwrite true --cuda-memory-usage=true --cudabacktrace=all  --gpu-metrics-device=all --nic-metrics=true --capture-range=cudaProfilerApi --capture-range-end=stop"
+    srun nsys profile ${VENV_PATH}/bin/torchrun --nnodes $SLURM_NNODES \
         --nproc-per-node $SLURM_GPUS_ON_NODE \
         --rdzv-id $SLURM_JOBID \
         --rdzv-backend c10d \
