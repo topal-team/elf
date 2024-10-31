@@ -59,7 +59,7 @@ class PipelineBlock:
 		self.metadata = {}
 		self.out_metadata = {}
 
-		self.compute_time = 0  # used to measure idle time
+		self.compute_time = []  # used to measure idle time
 
 		self.inputs = sorted(inputs)  # name of input variables
 		self.outputs = sorted(outputs)  # name of output variables
@@ -103,7 +103,7 @@ class PipelineBlock:
 				y = self.model(**x)
 				self.act_to_keep.append(y)
 
-		self.compute_time += timer.time()
+		self.compute_time.append(timer.time)
 
 		self.act_to_send.append(y)
 		self.inputs_to_keep.append(x)
@@ -128,7 +128,6 @@ class PipelineBlock:
 			self.compute_time += timer.time()
 		elif options.get("offload"):
 			act = self.act_to_keep.popleft().cuda()
-			# x = x.cuda()
 		else:
 			act = self.act_to_keep.popleft()
 
@@ -143,8 +142,10 @@ class PipelineBlock:
 		with Timer() as timer:
 			for key in self.outputs:
 				# Perform a backward pass for each output tensor; once the last one is done, the graph can be freed
+				assert act[key].shape == grads[key].shape
 				act[key].backward(grads[key], retain_graph=(key != self.outputs[-1]))
-		self.compute_time += timer.time()
+
+		self.compute_time.append(timer.time)
 
 		self.grads_to_send.append(
 			{key: value.grad.data for key, value in x.items() if value.requires_grad}
@@ -159,17 +160,23 @@ class PipelineBlock:
 		:rtype: List[dist.P2POp] or None
 		"""
 		dst = options.get("dst") or self.next
+		if not self.out_metadata:
+			self._send_metadata(dst)
+
 		if dst is None or dst == self.rank:
 			return
 
 		activations = self.act_to_send.popleft()
 
 		if options.get("batched_comm"):
-			return [dist.P2POp(dist.isend, a, dst, group=self.pp_group) for a in activations.values()]
+			return [
+				dist.P2POp(dist.isend, activations[out].contiguous(), dst, group=self.pp_group)
+				for out in self.outputs
+			]
 		else:
 			logger.debug(f"{self} - Sending activations to layer {self.id + 1} on rank {dst}")
-			for a in activations.values():
-				dist.isend(a, dst, group=self.pp_group)
+			for out in self.outputs:
+				dist.isend(activations[out].contiguous(), dst, group=self.pp_group)
 
 	def send_backward(self, **options):
 		"""
@@ -186,11 +193,14 @@ class PipelineBlock:
 		grads = self.grads_to_send.popleft()
 
 		if options.get("batched_comm"):
-			return [dist.P2POp(dist.isend, g, dst, group=self.pp_group) for g in grads.values()]
+			return [
+				dist.P2POp(dist.isend, grads[inp].contiguous(), dst, group=self.pp_group)
+				for inp in self.inputs
+			]
 		else:
 			logger.debug(f"{self} - Sending gradients to layer {self.id - 1} on rank {dst}")
-			for g in grads.values():
-				dist.isend(g, dst, group=self.pp_group)
+			for inp in self.inputs:
+				dist.isend(grads[inp].contiguous(), dst, group=self.pp_group)
 
 	def recv_forward(self, mb_size, **options):
 		"""
@@ -203,6 +213,10 @@ class PipelineBlock:
 		:rtype: List[dist.P2POp] or None
 		"""
 		src = options.get("src") or self.previous
+
+		if not self.metadata:
+			self._receive_metadata(src)
+
 		if options.get("offload") and len(self.act_to_keep) > 0:
 			# Free memory just before allocating the next buffer
 			activations_offloading().wait_for_offloading()
@@ -288,42 +302,37 @@ class PipelineBlock:
 		if self.dp_group is None:
 			return
 		for _, p in sorted(self.model.named_parameters()):
-			# TODO: scale by DP degree
 			dist.all_reduce(p.grad.data, group=self.dp_group)
 
-	def register_metadata(self):
+	def scale_grads(self, batch_size):
 		"""
-		Performs a pseudo forward pass to register the input and output shapes
+		Scale the gradients of the model parameters by the batch size
 
-		.. warning::
-		    We assume that every micro batch has the same shape, except for the micro batch size
+		:param batch_size: size of the full batch
+		:type batch_size: int
 		"""
-		# Receive metadata of inputs
-		if self.previous is not None and self.previous != self.rank:
-			for key in self.inputs:
-				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=self.previous)
-				self.metadata[key] = TensorMetadata.from_tensor(metadata)
+		for p in self.model.parameters():
+			p.grad.data /= batch_size
 
-		# We perform a forward pass with dummy data to get the output shapes (except for batch size) of all blocks
-		dummy = {key: self.metadata[key].get_buffer(1) for key in self.inputs}
-		for buffer in dummy.values():
-			if buffer.dtype == torch.int64:
-				buffer[:] = 1  # avoid problems with embeddings that can go out of vocab size :)
-		y = self.model(**dummy)
+	def _receive_metadata(self, src):
+		if src is None or src == self.rank:
+			return
+		for key in self.inputs:
+			metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
+			dist.recv(metadata, src=src, group=self.pp_group)
+			self.metadata[key] = TensorMetadata.from_tensor(metadata)
+			logger.debug(f"{self} - Registered metadata {self.metadata}")
 
-		for key in self.outputs:
-			if not isinstance(y[key], torch.Tensor):
-				raise RuntimeError(
-					f"Non-tensor output from block {self} : key {key} has type {type(y[key])}."
-				)
+	def _send_metadata(self, dst):
+		if dst is None or dst == self.rank:
+			return
+		assert len(self.act_to_send) != 0, "Can't send metadata without activations"
+		y = self.act_to_send[0]
 
-			# save shapes except batch size
-			self.out_metadata[key] = TensorMetadata(y[key].squeeze(0))
-
-		logger.debug(f"{self} - Registered metadata {self.metadata} => {self.out_metadata}")
-
-		# Send metadata to next block
-		if self.next is not None and self.next != self.rank:
-			for key in self.outputs:
-				dist.send(self.out_metadata[key].to_tensor(), dst=self.next)
+		for k in self.outputs:
+			if not isinstance(y[k], torch.Tensor):
+				raise RuntimeError(f"Non-tensor output from block {self} : key {k} has type {type(y[k])}.")
+			self.out_metadata[k] = TensorMetadata(y[k][0])
+			logger.debug(f"{self} - Registered out-metadata {self.out_metadata}")
+			if dst is not None and dst != self.rank:
+				dist.send(self.out_metadata[k].to_tensor(), dst=dst, group=self.pp_group)

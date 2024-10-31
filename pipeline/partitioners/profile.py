@@ -133,7 +133,6 @@ def profile_operations(graph_module, input_sample, niter=10):
 	for name, buffer in graph_module.named_buffers():
 		original_buffers[name] = buffer.clone().detach()
 
-	graph_module.train()
 	profiler = Profiler(niter, graph_module)
 
 	if isinstance(input_sample, torch.Tensor):

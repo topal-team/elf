@@ -17,7 +17,9 @@ class OperationType(Enum):
 	RECV_BACKWARD = 3
 	BACKWARD = 4
 	SEND_BACKWARD = 5
-	ALL_REDUCE_PARAM_GRADS = 6
+	LOSS_FORWARD = 6
+	LOSS_BACKWARD = 7
+	ALL_REDUCE_PARAM_GRADS = 8
 
 	def __repr__(self) -> str:
 		return self.name.lower()
@@ -206,7 +208,12 @@ def fix_cycle(cycle):
 	:type cycle: List[Operation]
 	"""
 	for op in cycle:
-		if op.op not in [OperationType.FORWARD, OperationType.BACKWARD]:
+		if op.op in [
+			OperationType.RECV_FORWARD,
+			OperationType.RECV_BACKWARD,
+			OperationType.SEND_FORWARD,
+			OperationType.SEND_BACKWARD,
+		]:
 			op.options["batched_comm"] = True
 
 

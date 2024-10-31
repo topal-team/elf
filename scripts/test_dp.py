@@ -178,13 +178,18 @@ def train(pipe, model, data, pp, dp):
 			losses.append(epoch_loss)
 
 	for e in range(10):
+		memory_before = torch.cuda.memory_allocated()
 		epoch_loss = torch.tensor([0.0], device=torch.cuda.current_device())
+
 		for d in loader_distributed:
 			optimizer_distributed.zero_grad()
 			y, loss_distributed = pipe(d, torch.empty_like(d), loss_fn=lambda x, _: x.sum() / 1e5)
 			if loss_distributed:
 				epoch_loss += loss_distributed.detach()
 			optimizer_distributed.step()
+
+		memory_after = torch.cuda.memory_allocated()
+		assert memory_after - memory_before < 1e6, f"Memory leakage: {memory_after - memory_before}"
 
 		dist.all_reduce(epoch_loss, op=dist.ReduceOp.SUM)
 

@@ -8,7 +8,6 @@ import torch.distributed as dist
 from .block import PipelineBlock
 from .schedule import *
 from .engine import Engine
-from .utils import TensorMetadata, NameMapping
 from .task_graph import graph_from_schedule, find_cycles, fix_cycle
 from .partitioners import partition_graph, get_inputs_outputs_single, create_subgraph
 
@@ -22,7 +21,9 @@ class Pipeline:
 	Model wrapper for pipelining that manages the pipeline setup
 	"""
 
-	def __init__(self, model, sample, placement="auto", partition="metis", schedule="afab", dp=1):
+	def __init__(
+		self, model, sample, placement="auto", partition="naive", schedule="afab", dp=1, worker=0
+	):
 		"""
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
 		:type model: nn.Module
@@ -42,9 +43,11 @@ class Pipeline:
 				"Trying to create a pipeline but no multi-gpu distributed setup has been found."
 			)
 		ws = dist.get_world_size()
+		local_rank = int(os.getenv("LOCAL_RANK"))
+		torch.cuda.set_device(local_rank)
 
 		if placement == "auto":
-			placement = [i for i in range(ws // dp)]
+			placement = self._get_default_placement(schedule, pp)
 
 		assert max(placement) < ws, "Placement is out of bounds"
 		pp = max(placement) + 1
@@ -56,7 +59,9 @@ class Pipeline:
 
 		if isinstance(partition, str):
 			try:
-				model, inputs, outputs = shared_partition(model, placement, sample, partition)
+				model, inputs, outputs = shared_partition(
+					model, placement, sample, partition, worker=worker
+				)
 			except Exception as e:
 				logger.error(
 					"Error partitioning the model. This probably means that your model uses features either not supported by torch.fx/torch.export, or by this library (such as skip connections). If the error persists, consider using a pre-partitioned model"
@@ -118,8 +123,6 @@ class Pipeline:
 			self.last_options = options
 			self.last_nmb = n_micro_batches
 
-		self._register_metadata(batch)
-
 		# Execute the schedule
 		result, losses, times = self.engine.train_step(
 			batch, target, loss_fn, self.schedule, mb_sizes, profile
@@ -135,8 +138,8 @@ class Pipeline:
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:
 			result = torch.cat(result, dim=0)
-			losses = torch.tensor(losses, device=torch.cuda.current_device())
-			losses = losses.sum(dim=0, keepdim=True)
+			losses = torch.tensor(losses, device=result.device)
+			losses = losses.mean()
 			return result, losses
 		else:
 			return None, None
@@ -181,8 +184,14 @@ class Pipeline:
 		dist.barrier()
 		for block in self.blocks:
 			if block.dp_group:
+				logger.debug(
+					f"Destroying DP group with members {dist.get_process_group_ranks(block.dp_group)}"
+				)
 				dist.destroy_process_group(block.dp_group)
 
+		logger.debug(
+			f"Destroying PP group with members {dist.get_process_group_ranks(self.blocks[0].pp_group)}"
+		)
 		dist.destroy_process_group(self.blocks[0].pp_group)
 
 	def save(self, path, worker=0):
@@ -198,6 +207,7 @@ class Pipeline:
 		:type worker: int, optional
 		"""
 		rank = dist.get_rank()
+		pp_group = self.blocks[0].pp_group
 		if rank == worker:
 			full_state = {}
 			n_devices = max(self.placement) + 1
@@ -208,7 +218,7 @@ class Pipeline:
 						full_state[p_name] = p.cpu().detach()
 				else:
 					param_list = [{}]
-					dist.recv_object_list(param_list, src=d, group=self.blocks[0].pp_group)
+					dist.recv_object_list(param_list, src=d, group=pp_group)
 
 					for p_name, p in param_list[0].items():
 						full_state[p_name] = p.cpu().detach()
@@ -216,8 +226,14 @@ class Pipeline:
 			torch.save(full_state, path)
 
 		else:
-			if worker in self.placement:
-				dist.send_object_list([self.named_parameters()], dst=worker, group=self.blocks[0].pp_group)
+			if worker in dist.get_process_group_ranks(pp_group):
+				dist.send_object_list([self.named_parameters()], dst=worker, group=pp_group)
+
+	def _get_default_placement(self, schedule, pp):
+		if schedule == "hanayo":
+			return [i for i in range(pp)] + reversed([i for i in range(pp)])
+		else:
+			return [i for i in range(pp)]
 
 	def _get_mb_sizes(self, split_size, batch):
 		"""
@@ -283,35 +299,6 @@ class Pipeline:
 		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
 
-	def _register_metadata(self, batch):
-		"""
-		Register metadata for input tensors.
-
-		This method is called before the first forward pass to register the metadata
-		(shape and dtype) of input tensors. This information is used to allocate
-		tensors for communication later in the pipeline.
-
-		:param batch: Input batch of tensors
-		:type batch: List[torch.Tensor]
-		"""
-		# Full forward pass to register metadata used to allocate tensors later
-		if self.blocks[0].previous is None:
-			# Take all
-			for k, v in zip(self.blocks[0].inputs, batch):
-				self.blocks[0].metadata[k] = TensorMetadata(v[0])  # Don't register batch size
-
-		for i in range(len(self.blocks)):
-			b = self.blocks[i]
-			# Sync metadata of fused blocks
-			if i > 0 and self.blocks[i - 1].id == b.id - 1:
-				mapping = NameMapping(b.inputs, self.blocks[i - 1].outputs)
-				b.name_mapping_in = mapping
-				self.blocks[i - 1].name_mapping_out = mapping
-				b.metadata = {mapping.to_input(k): v for k, v in self.blocks[i - 1].out_metadata.items()}
-				logger.debug(f"Synced metadata of {b} and {self.blocks[i - 1]} : {mapping}")
-
-			b.register_metadata()
-
 	def _create_pipeline(self, layers, inputs, outputs):
 		"""
 		Transforms a list of layers placed on different devices to a working pipeline
@@ -369,13 +356,14 @@ class Pipeline:
 				if rank in members:
 					for b in self.blocks:
 						b.pp_group = pp_group
+
 					# Init communicators to avoid hangs later on
 					buffer = torch.empty(1, device=torch.cuda.current_device())
-					torch.cuda.synchronize()
 					dist.all_reduce(buffer, group=pp_group)
+					torch.cuda.synchronize()
 
 
-def shared_partition(model, placement, sample, mode):
+def shared_partition(model, placement, sample, mode, worker=0):
 	"""
 	Partitions a model according to a placement & mode, then shares it to every process to be consistent
 
@@ -409,8 +397,7 @@ def shared_partition(model, placement, sample, mode):
 
 	# Rank 0 profiles & partition the graph, then shares it to everyone
 	# TODO: what if devices are heterogenous ? how to profile correctly ?
-	input_list = None
-	if rank == 0:
+	if rank == worker:
 		assert mode in [
 			"naive",
 			"constrained",
@@ -418,30 +405,43 @@ def shared_partition(model, placement, sample, mode):
 			"metis",
 		], "Partition strategies available are : [naive, constrained, dagP, metis]"
 
-		blocks, inputs, outputs = partition_graph(model, len(placement), sample, mode=mode)
-		partition = list(zip(blocks, inputs.values(), outputs.values()))
-		input_list = [[] for _ in range(n_devices)]
-		for i, p in enumerate(placement):
-			input_list[p].append(partition[i])
+		blocks, all_inputs, all_outputs = partition_graph(model, len(placement), sample, mode=mode)
+		for d in range(n_devices):
+			blocks_on_d = [blocks[i] for i in range(len(blocks)) if placement[i] == d]
+			inputs_on_d = [all_inputs[i] for i in all_inputs.keys() if placement[i] == d]
+			outputs_on_d = [all_outputs[i] for i in all_outputs.keys() if placement[i] == d]
+			if d == worker:
+				models, inputs, outputs = blocks_on_d, inputs_on_d, outputs_on_d
+			else:
+				dist.send_object_list([blocks_on_d, inputs_on_d, outputs_on_d], dst=d)
+				# torch.cuda.synchronize()
 
-		# We share the partition to every block of every pipeline to ensure having the same modules everywhere
-		# TODO: use proper DP rank here
-		input_list = input_list * (ws // n_devices)
-		assert len(input_list) == ws
+		for dp in range(1, ws // n_devices):
+			dst = rank + dp * n_devices
+			dist.send_object_list([models, inputs, outputs], dst=dst)
+			# torch.cuda.synchronize()
 
-	output_list = [None]
-	dist.scatter_object_list(output_list, input_list, src=0)
-	model, inputs, outputs = (
-		[m.cuda() for m, _, _ in output_list[0]],
-		[i for _, i, _ in output_list[0]],
-		[o for _, _, o in output_list[0]],
-	)
+	elif rank < n_devices:
+		blocks = [None for _ in range(3)]
 
-	for m, i, o in zip(model, inputs, outputs):
+		dist.recv_object_list(blocks, src=worker)
+		torch.cuda.synchronize()
+		models, inputs, outputs = blocks
+		for dp in range(1, ws // n_devices):
+			dst = rank + dp * n_devices
+			dist.send_object_list(blocks, dst=dst)
+			# torch.cuda.synchronize()
+	else:
+		blocks = [None for _ in range(3)]
+		dist.recv_object_list(blocks, src=rank % n_devices)
+		torch.cuda.synchronize()
+		models, inputs, outputs = blocks
+
+	for m, i, o in zip(models, inputs, outputs):
 		logger.info(f"Rank {rank} - signature = {i} -> {o}")
 		logger.debug(f"Rank {rank} - code = {m.code}")
 
-	return model, inputs, outputs
+	return models, inputs, outputs
 
 
 def local_partition(model, placement):

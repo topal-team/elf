@@ -1,14 +1,3 @@
-## Start on Jean-Zay
-
-Use the script ``multinode.sh``. You can provide the number of GPUs and nodes to use. If your job is long, don't forget to add the ``--time hh:mm:ss`` option.
-
-Example:
-```bash
-sbatch --gpus 16 --nodes 4 --time 01:00:00 multinode.sh script.py
-```
-
-You can provide additional directory bindings in the script if needed (for instance a data folder).
-
 ## How it works
 
 ### Create the pipeline
@@ -54,3 +43,24 @@ The different partition modes are:
 ### Data parallelism
 
 You can run multiple pipelines at once with different data by specifying the argument ``dp`` of the ``Pipeline`` object. Each pipeline will be replicated ``dp`` times. Note that the user needs to handle the data loading and distribute it among the pipelines, for instance with ``torch.utils.data.distributed.DistributedSampler``.
+
+## Running tests and benchmarks
+
+Environment setup on some clusters is described in `config`.
+- [Helios](config/helios.md)
+
+### Tests
+
+Run all tests:
+```bash
+./scripts/test.sh
+```
+Some of them require at least 2 GPUs.
+
+### Benchmarks
+
+Run all benchmarks:
+```bash
+./benchmarks/run_all.sh
+```
+

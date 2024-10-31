@@ -43,6 +43,12 @@ class GPTConfig:
 			setattr(self, k, v)
 
 
+class GPTTinyConfig(GPTConfig):
+	n_layer = 12
+	n_head = 2
+	n_embd = 128
+
+
 class GPTSmallConfig(GPTConfig):
 	"""GPT3-small like network roughly 125M params"""
 
@@ -231,47 +237,6 @@ class Attention(nn.Module):
 		return out
 
 
-# class GPT2_input(nn.Module):
-#     def __init__(self, n_ctx=1024, d_model=768, vcb_sz=50257, dropout=0.1):
-#         super(GPT2_input, self).__init__()
-#         block = TransformerBlock(d_model=d_model, n_head=12, dropout=dropout)
-#         # self.h = _get_clones(block, nlayers)
-#         self.wte = nn.Embedding(vcb_sz, d_model)
-#         self.wpe = nn.Embedding(n_ctx, d_model)
-#         self.drop = nn.Dropout(dropout)
-#         # self.drop = nn.Identity()
-#         self.ln_f = LayerNorm(d_model)
-#         self.out = nn.Linear(d_model, vcb_sz, bias=False)
-#         self.loss_fn = nn.CrossEntropyLoss()
-#         self.init_weights()
-
-#     def init_weights(self):
-#         self.out.weight = self.wte.weight
-#         self.apply(self._init_weights)
-
-#     def _init_weights(self, module):
-#         if isinstance(module, (nn.Linear, nn.Embedding, Conv1D)):
-#             module.weight.data.normal_(mean=0.0, std=0.02)
-#             if (
-#                 isinstance(module, (nn.Linear, Conv1D))
-#                 and module.bias is not None
-#             ):
-#                 module.bias.data.zero_()
-#         elif isinstance(module, nn.LayerNorm):
-#             module.bias.data.zero_()
-#             module.weight.data.fill_(1.0)
-
-#     def forward(
-#         self, src, labels=None, pos_ids=None, return_inp=False, dropout=0.1
-#     ):
-#         if pos_ids is None:
-#             pos_ids = torch.arange(
-#                 0, src.size(-1), dtype=torch.long, device=self.wpe.weight.device
-#             ).unsqueeze(0)
-#         inp = self.drop((self.wte(src) + self.wpe(pos_ids)))
-#         return inp
-
-
 class EmbeddingStem(nn.Module):
 	def __init__(self, config, device="cpu", dtype=torch.float32):
 		super(EmbeddingStem, self).__init__()
@@ -359,8 +324,6 @@ class GPT(nn.Module):
 		# decoder head
 		self.ln_f = nn.LayerNorm(config.n_embd, device=device, dtype=dtype)
 		self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False, device=device, dtype=dtype)
-
-		logger.info("number of parameters: %e", sum(p.numel() for p in self.parameters()))
 
 	def forward(self, idx):
 		x = self.emb_stem(idx)
