@@ -1,6 +1,7 @@
 default: &DEFAULT
   verbose: True
   data:
+    dataset_size: 6000
     dataset_name: 'c4realnewslike'
     cifar10:
       dataset_dir: "/net/storage/pr3/project/tutorial/elf/data/cifar10"

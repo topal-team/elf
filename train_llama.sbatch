@@ -1,8 +1,8 @@
 #!/bin/bash -l
 #SBATCH -p gpu
 #SBATCH --time=00:60:00
-#SBATCH --output=/net/scratch/hscra/project/tutorial/tutorial050/slurm_logs/%J.out
-#SBATCH --error=/net/scratch/hscra/project/tutorial/tutorial050/slurm_logs/%J.err
+##SBATCH --output=/net/scratch/hscra/project/tutorial/tutorial050/slurm_logs/%J.out
+##SBATCH --error=/net/scratch/hscra/project/tutorial/tutorial050/slurm_logs/%J.err
 #SBATCH --account=tutorial
 
 export NCCL_SOCKET_IFNAME=hsn
@@ -25,7 +25,8 @@ export NCCL_CUMEM_ENABLE=0
 module load ML-bundle/24.06a GCCcore/13.2.0 Python/3.11.5 CUDA/12.4.0
 
 # VENV_PATH="$SCRATCH/venvs/venv"
-VENV_PATH="$GROUPS_STORAGE/elf/adrien-venv"
+# VENV_PATH="$GROUPS_STORAGE/elf/adrien-venv"
+VENV_PATH="/net/scratch/hscra/project/tutorial/tutorial051/venv"
 PYARGS=("$@")
 PYARGS+=" --slurm_jobid $SLURM_JOBID"
 

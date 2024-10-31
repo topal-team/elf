@@ -52,6 +52,7 @@ def parse_args():
     parser.add_argument('--data.dataset_dir', type=str, help='Data: path to the folder with the dataset')
     parser.add_argument('--data.dataset_name', type=str, help='Data: dataset name', choices=['c4realnewslike'])
     parser.add_argument('--data.c4realnewslike.dataset_dir', type=str)
+    parser.add_argument('--data.dataset_size', type=str, help='Data: path to the folder with the dataset')
 
     # Model
     parser.add_argument('--model', type=str, choices=['resnet', 'gpt'], default='gpt')
@@ -149,7 +150,7 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(f"{args.tokenizer_dir}")
     tokenizer.pad_token = tokenizer.eos_token
     tokenized_dataset = datasets.load_from_disk(args.data.__getattr__(f'{args.data.dataset_name}').dataset_dir + "/tokenized/train")
-
+    tokenized_dataset = tokenized_dataset.select(range(args.data.dataset_size))
     if rank == 0:
         print(f"Loaded {pretty_print_params(len(tokenized_dataset))} samples")
         print(f"Vocab size: {tokenizer.vocab_size}")
