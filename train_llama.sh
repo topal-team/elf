@@ -28,10 +28,10 @@ generate_placement() {
   echo "${placement%,}"
 }
 
+savedir=${GROUPS_STORAGE}/elf/runs
 
 # Loop over each parameter combination
 for arch in "${archs[@]}"; do
-  savedir=${GROUPS_STORAGE}/elf/models/$arch/
   for node in "${nodes[@]}"; do
     for dp in "${dps[@]}"; do
       if (( node % dp == 0 )); then

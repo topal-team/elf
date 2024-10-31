@@ -167,8 +167,8 @@ def main(args):
     )
 
     sample = torch.randint(0, 10, (args.train.batch_size // args.pipeline.pp, args.train.max_seq_len))
-    model = DummyGPT(32)
-    # model = GPT(get_gpt_config(args, tokenizer.vocab_size))
+    # model = DummyGPT(32)
+    model = GPT(get_gpt_config(args, tokenizer.vocab_size))
     # model = Llama(model_args)
     if rank == 0:
         print(
@@ -202,7 +202,7 @@ def main(args):
     torch.cuda.cudart().cudaProfilerStart()
 
     # save model before training
-    pipe.save_model(checkpoints_dir=f'{args.save_dir}/{args.slurm_jobid}')
+    pipe.save_model('init', checkpoints_dir=f'{args.save_dir}/{args.slurm_jobid}')
 
     # Training loop
     model.train()

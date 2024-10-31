@@ -1,8 +1,10 @@
 #!/bin/bash -l
 #SBATCH -p gpu
 #SBATCH --time=00:60:00
-##SBATCH --output=/net/scratch/hscra/project/tutorial/tutorial050/slurm_logs/%J.out
-##SBATCH --error=/net/scratch/hscra/project/tutorial/tutorial050/slurm_logs/%J.err
+##SBATCH --output=./slurm_logs/%J.out
+##SBATCH --error=./slurm_logs/%J.err
+#SBATCH --output=/net/storage/pr3/project/tutorial/runs/slurm_logs/%J.out
+#SBATCH --error=/net/storage/pr3/project/tutorial/runs/slurm_logs/%J.err
 #SBATCH --account=tutorial
 
 export NCCL_SOCKET_IFNAME=hsn
@@ -19,10 +21,10 @@ export NCCL_CROSS_NIC=1
 export NCCL_NET_GDR_LEVEL="PHY"
 export NCCL_CUMEM_ENABLE=0
 
-# module load ML-bundle/24.06a
-# module load NVHPC/24.5-CUDA-12.4.0
+module load ML-bundle/24.06a
+module load NVHPC/24.5-CUDA-12.4.0
 
-module load ML-bundle/24.06a GCCcore/13.2.0 Python/3.11.5 CUDA/12.4.0
+# module load ML-bundle/24.06a GCCcore/13.2.0 Python/3.11.5 CUDA/12.4.0
 
 # VENV_PATH="$SCRATCH/venvs/venv"
 # VENV_PATH="$GROUPS_STORAGE/elf/adrien-venv"
@@ -60,7 +62,17 @@ if [ "$SLURM_NNODES" -gt 1 ]; then
     ranks=($(scontrol show hostnames ${SLURM_JOB_NODELIST}))
     echo "This job is running on more than 1 node."
     srun echo  ${ranks[0]}
-    srun ${VENV_PATH}/bin/torchrun --nnodes $SLURM_NNODES \
+    # srun ${VENV_PATH}/bin/torchrun --nnodes $SLURM_NNODES \
+    #     --nproc-per-node $SLURM_GPUS_ON_NODE \
+    #     --rdzv-id $SLURM_JOBID \
+    #     --rdzv-backend c10d \
+    #      --rdzv-endpoint ${ranks[0]} \
+    #      ${PYARGS[*]}
+    nodeid=$(srun hostname)
+    nsyssavedir="${GROUPS_STORAGE}/elf/nsys-reports/train_llama/${SLURM_JOBID}/${nodeid}/"
+    mkdir -p $nsyssavedir
+    nsyscommand="nsys profile -t cuda,nvtx,osrt,cublas,cudnn --stats=true --output="${nsyssavedir}/report" --force-overwrite true --cuda-memory-usage=true --cudabacktrace=all  --gpu-metrics-device=all --nic-metrics=true --capture-range=cudaProfilerApi --capture-range-end=stop"
+    srun ${nsyscommand} ${VENV_PATH}/bin/torchrun --nnodes $SLURM_NNODES \
         --nproc-per-node $SLURM_GPUS_ON_NODE \
         --rdzv-id $SLURM_JOBID \
         --rdzv-backend c10d \
