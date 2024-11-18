@@ -1,17 +1,93 @@
 import torch
 import torch.nn as nn
 
+class SimpleResNet(nn.Module):
+	def __init__(self, nblocks = 12, channels=64, num_classes=10):
+		super(SimpleResNet, self).__init__()
+		self.channels = channels
+		
+		# Initial convolution
+		self.conv1 = nn.Conv2d(3, channels, kernel_size=7, stride=2, padding=3)
+		self.relu = nn.ReLU(inplace=True)
+		self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+		# Residual blocks
+		self.blocks = []
+		for i in range(nblocks):
+			block = self._make_layer(channels, channels)
+			self.add_module(f"block_{i}", block)
+			self.blocks.append(block)
+		
+		# Final layers
+		self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+		self.fc = nn.Linear(channels, num_classes)
+
+	def _make_layer(self, in_channels, out_channels, stride=1):
+		layers = []
+		
+		# First block handles dimension changes
+		layers.append(ResBlock(in_channels, out_channels, stride))
+		
+		# Remaining blocks
+		for _ in range(1, 4):
+			layers.append(ResBlock(out_channels, out_channels))
+			
+		return nn.Sequential(*layers)
+
+	def forward(self, x):
+		x = self.conv1(x)
+		x = self.relu(x)
+		x = self.maxpool(x)
+
+		for block in self.blocks:
+			x = block(x)
+
+		x = self.avgpool(x)
+		x = torch.flatten(x, 1)
+		x = self.fc(x)
+		
+		return x
+
+	def get_sample(self, batch_size):
+		return torch.randn(batch_size, 3, 224, 224)
+	
+	def get_target(self, batch_size):
+		return torch.randint(0, self.fc.out_features, (batch_size,))
+	
+	def loss_fn(self, pred, target, *args, **kwargs):
+		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
+
+
+class ResBlock(nn.Module):
+	def __init__(self, in_channels, out_channels, stride=1):
+		super(ResBlock, self).__init__()
+		self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
+		self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+		self.relu = nn.ReLU(inplace=True)
+
+	def forward(self, x):
+		identity = x
+		
+		out = self.conv1(x)
+		out = self.relu(out)
+		
+		out = self.conv2(out)
+		
+		out = out + identity
+		out = self.relu(out)
+		
+		return out
 
 class SimpleCNN(nn.Module):
-	def __init__(self):
+	def __init__(self, channels = 64):
 		super(SimpleCNN, self).__init__()
-		self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, stride=1, padding=1)
-		self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
-		self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
+		self.conv1 = nn.Conv2d(in_channels=3, out_channels=channels, kernel_size=3, stride=1, padding=1)
+		self.conv2 = nn.Conv2d(in_channels=channels, out_channels=channels * 2, kernel_size=3, stride=1, padding=1)
+		self.conv3 = nn.Conv2d(in_channels=channels * 2, out_channels=channels * 4, kernel_size=3, stride=1, padding=1)
 		self.maxpool = nn.MaxPool2d(2)
 		self.relu = nn.ReLU()
 		self.avgpool = nn.AvgPool2d(7)
-		self.fc1 = nn.Linear(128 * 8 * 8, 256)
+		self.fc1 = nn.Linear(channels * 4 * 8 * 8, 256)
 		self.fc2 = nn.Linear(256, 10)
 
 	def forward(self, x):
@@ -28,6 +104,12 @@ class SimpleCNN(nn.Module):
 
 	def get_sample(self, batch_size):
 		return torch.randn(batch_size, 3, 224, 224)
+	
+	def get_target(self, batch_size):
+		return torch.randint(0, 10, (batch_size,))
+	
+	def loss_fn(self, pred, target, *args, **kwargs):
+		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
 
 
 class SimpleAttention(nn.Module):
@@ -61,6 +143,12 @@ class SimpleAttention(nn.Module):
 
 	def get_sample(self, batch_size):
 		return torch.randn(batch_size, 64, self.hidden_dim)
+	
+	def get_target(self, batch_size):
+		return self.get_sample(batch_size) # same
+	
+	def loss_fn(self, pred, target, *args, **kwargs):
+		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
 
 
 class SimpleTransformer(nn.Module):
@@ -86,8 +174,17 @@ class SimpleTransformer(nn.Module):
 
 		for b in self.blocks:
 			x = b(x)
+
 		x = self.head(x)
-		return x.view(-1, x.size(-1))
+		return x
 
 	def get_sample(self, batch_size):
-		return torch.randint(0, self.input_dim, (batch_size, 64, self.hidden_dim))
+		return torch.randint(0, self.input_dim, (batch_size, 64))
+
+	def get_target(self, batch_size):
+		return self.get_sample(batch_size)
+	
+	def loss_fn(self, pred, target, *args, **kwargs):
+		pred = pred.view(-1, self.input_dim) # flatten seq dim
+		target = target.view(-1)
+		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)

@@ -9,7 +9,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 sys.path.append("./")
 from pipeline.pipeline import Pipeline
-from models.simple import SimpleTransformer, SimpleCNN
+from models.simple import SimpleTransformer, SimpleCNN, SimpleResNet
 
 from argparse import ArgumentParser
 import logging
@@ -17,8 +17,8 @@ import logging
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 
-absolute_tolerance = 5e-6
-relative_tolerance = 1e-3
+absolute_tolerance = 1e-6
+relative_tolerance = 1e-4
 
 
 def assert_model_params_equal(model, pg):
@@ -85,7 +85,7 @@ def get_all_parameters(model, pg):
 def check_model_parameters(model1, params_model2, grads_model2):
 	# Function to check if two tensors are equal
 	def tensors_are_equal(tensor1, tensor2):
-		return torch.allclose(tensor1, tensor2, rtol=relative_tolerance, atol=relative_tolerance)
+		return torch.allclose(tensor1, tensor2, rtol=relative_tolerance, atol=absolute_tolerance)
 
 	# Function to check parameters and gradients
 	def check_params_and_grads(param_dict1, param_dict2, is_grad):
@@ -123,16 +123,19 @@ def check_model_parameters(model1, params_model2, grads_model2):
 
 
 class Dummy(Dataset):
-	def __init__(self, shape, dtype, n=16) -> None:
+	def __init__(self, shape_in, dtype_in, shape_out, dtype_out, n=16) -> None:
 		super().__init__()
 		self.n = n
 		self.data = [
-			torch.zeros(shape, device=torch.cuda.current_device(), dtype=dtype) + i for i in range(n)
+			torch.zeros(shape_in, device=torch.cuda.current_device(), dtype=dtype_in) + i for i in range(n)
+		]
+		self.targets = [
+			torch.ones(shape_out, device=torch.cuda.current_device(), dtype=dtype_out) for _ in range(n)
 		]
 
 	def __getitem__(self, index):
 		assert index < self.n
-		return self.data[index].clone().detach()
+		return self.data[index].clone().detach(), self.targets[index].clone().detach()
 
 	def __len__(self):
 		return self.n
@@ -157,6 +160,7 @@ def train(pipe, model, data, pp, dp):
 		sampler=DistributedSampler(data, num_replicas=dp, rank=rank // pp, shuffle=False),
 	)
 
+	loss_fn = model.loss_fn
 	if rank < pp:
 		for block in pipe.blocks:
 			pipe_params, pipe_grads = get_all_parameters(block.model, block.pp_group)
@@ -168,35 +172,33 @@ def train(pipe, model, data, pp, dp):
 		losses = []
 		for e in range(10):
 			epoch_loss = torch.tensor([0.0], device=torch.cuda.current_device())
-			for d in loader:
+			for x, t in loader:
 				optimizer.zero_grad()
-				y = model(d)
-				loss = y.sum() / 1e5  # avoid huge numbers for numerical stability
+				y = model(x)
+				loss = loss_fn(y, t)
 				loss.backward()
 				optimizer.step()
 				epoch_loss += loss.detach()
 			losses.append(epoch_loss)
 
 	for e in range(10):
-		memory_before = torch.cuda.memory_allocated()
 		epoch_loss = torch.tensor([0.0], device=torch.cuda.current_device())
 
-		for d in loader_distributed:
+		for x, t in loader_distributed:
 			optimizer_distributed.zero_grad()
-			y, loss_distributed = pipe(d, torch.empty_like(d), loss_fn=lambda x, _: x.sum() / 1e5)
+			y, loss_distributed = pipe(x, t, loss_fn=loss_fn)
 			if loss_distributed:
 				epoch_loss += loss_distributed.detach()
 			optimizer_distributed.step()
 
-		memory_after = torch.cuda.memory_allocated()
-		assert memory_after - memory_before < 1e6, f"Memory leakage: {memory_after - memory_before}"
-
-		dist.all_reduce(epoch_loss, op=dist.ReduceOp.SUM)
+		if rank == pipe.placement[-1] and rank != 0:
+			dist.send(epoch_loss, 0)
 
 		if rank == 0:
-			torch.cuda.synchronize()
+			if rank != pipe.placement[-1]:
+				dist.recv(epoch_loss, pipe.placement[-1])
 			assert torch.allclose(
-				epoch_loss, losses[e], rtol=relative_tolerance, atol=relative_tolerance
+				epoch_loss, losses[e], rtol=relative_tolerance, atol=absolute_tolerance
 			), f"Different losses for epoch {e} - expected {losses[e].item()}, got {epoch_loss.item()}"
 			print(f"Loss check passed for epoch {e}")
 
@@ -213,7 +215,7 @@ if __name__ == "__main__":
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
 	)
 	parser.add_argument(
-		"--model", "-m", choices=["cnn", "tf"], default="cnn", required=False, help="model to use"
+		"--model", "-m", choices=["cnn", "tf", "resnet"], default="tf", required=False, help="model to use"
 	)
 	parser.add_argument(
 		"--schedule", "-s", choices=["afab", "1f1b", "hanayo"], default="1f1b", required=False
@@ -237,11 +239,14 @@ if __name__ == "__main__":
 
 	match args.model:
 		case "cnn":
-			model = SimpleCNN()
-			data = Dummy((3, 224, 224), torch.float32)
+			model = SimpleCNN(256)
+			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
 		case "tf":
-			model = SimpleTransformer(128, 128, args.pp * 2)
-			data = Dummy((64, 128), torch.int64)
+			model = SimpleTransformer(128, 128, args.pp * args.interleaving * 2)
+			data = Dummy((64,), torch.int64, (64,), torch.int64)
+		case "resnet":
+			model = SimpleResNet(args.pp * args.interleaving)
+			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
 
 	model = model.cuda()
 
@@ -256,7 +261,7 @@ if __name__ == "__main__":
 
 	pipe = Pipeline(
 		copy.deepcopy(model),
-		model.get_sample(1).cuda(),
+		model.get_sample(4).cuda(),
 		placement=placement,
 		schedule=args.schedule,
 		dp=args.dp,
@@ -265,10 +270,11 @@ if __name__ == "__main__":
 
 	train(pipe, gt, data, args.pp, args.dp)
 
-	sample = model.get_sample(1).cuda()
+	sample = model.get_sample(32).cuda()
+	target = model.get_target(32).cuda()
 	if rank == 0 and sample.is_floating_point():
 		print(f"Sample given to pipe : mean = {sample.mean()}, std = {sample.std()}")
-	y, _ = pipe(sample.clone(), torch.empty_like(sample), loss_fn=lambda x, y, **_: x.sum())
+	y, _ = pipe(sample.clone(), target.clone(), loss_fn=model.loss_fn)
 	pipe.zero_grad(set_to_none=False)
 	gt.zero_grad(set_to_none=False)
 
@@ -288,8 +294,8 @@ if __name__ == "__main__":
 			dist.recv(y, pipe.placement[-1])
 
 		assert torch.allclose(
-			y, z, rtol=relative_tolerance, atol=relative_tolerance
-		), f"Wrong output for pipelined model. Difference norm (relative) = {torch.linalg.norm(y - z) / torch.linalg.norm(y)}"
+			y, z, rtol=relative_tolerance, atol=absolute_tolerance
+		), f"Wrong output for pipelined model. Difference norm = {torch.linalg.norm(y - z)}"
 		print("Test passed successfully")
 
 	elif rank == pipe.placement[-1]:

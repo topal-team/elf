@@ -22,7 +22,7 @@ if __name__ == "__main__":
 	optimizer = torch.optim.Adam(model.parameters())
 	for e in range(10):
 		if rank == 0:
-			print(f"Epoch {e}")
+			print(f"Sample {e}")
 		sample = torch.randn((32, 3, 224, 224)).cuda()
 		target = torch.randn((32, 1000)).cuda()
 		_ = model(sample, target, loss_fn)

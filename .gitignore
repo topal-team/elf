@@ -5,6 +5,7 @@ __pycache__/
 
 # Random stuff
 results/
+images/*.sif
 
 # Slurm outputs
 core.*

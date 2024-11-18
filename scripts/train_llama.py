@@ -14,7 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 import datasets
 from transformers import AutoTokenizer
 
-from models.GPT import GPT, GPTXXXLConfig
+from models.GPT import GPT, GPTXXXLConfig, GPTLargeConfig
 from pipeline import Pipeline
 
 import argparse
@@ -31,6 +31,18 @@ def pretty_print_params(n):
 		return f"{n/1e6:.1f}M"
 	else:
 		return f"{int(n)}"
+
+
+def pretty_print_step(times):
+	total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / (
+		2**30
+	)
+	memory = torch.cuda.max_memory_allocated() / (2**30)
+	info = f"Rank {rank} -\n"
+	for k, v in times.items():
+		info += f"\t{k} : {v:.2f}s\n"
+	info += f"\tPeak memory : {memory:.2f}GB ({100 * memory / total_memory:.2f}%)"
+	print(info)
 
 
 def parse_args():
@@ -64,6 +76,9 @@ def parse_args():
 		help="Max size of dataset, in number of sequences",
 	)
 	parser.add_argument(
+		"--save_path", "-sp", type=str, default=None, required=False, help="Path to save checkpoints"
+	)
+	parser.add_argument(
 		"-dp", type=int, default=1, required=False, help="Number of data parallel processes"
 	)
 	parser.add_argument(
@@ -90,9 +105,6 @@ def main():
 	# Initialize tokenizer
 	tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 	tokenizer.pad_token = tokenizer.eos_token
-	# if rank == 0:
-	# 	tokenizer.save_pretrained("/net/storage/pr3/project/tutorial/elf/")
-	# 	print("Saved tokenizer")
 
 	# Load dataset
 	if os.path.exists(args.dataset_path + "/tokenized/train"):
@@ -108,11 +120,10 @@ def main():
 		print(f"Vocab size: {tokenizer.vocab_size}")
 
 	sampler = DistributedSampler(tokenized_dataset, num_replicas=args.dp, rank=rank // args.pp)
-	# Create DataLoader
 	dataloader = DataLoader(tokenized_dataset, batch_size=args.batch_size, sampler=sampler)
 
 	# Initialize model
-	model_args = GPTXXXLConfig(tokenizer.vocab_size + 2, args.max_seq_len)
+	model_args = GPTLargeConfig(tokenizer.vocab_size + 2, args.max_seq_len)
 	model = GPT(model_args)
 
 	if rank == 0:
@@ -121,8 +132,9 @@ def main():
 			pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
 		)
 	# placement = list(range(args.pp)) + list(reversed(range(args.pp)))
-	placement = list(range(args.pp)) * 2
-	sample = torch.randint(0, 10, (args.batch_size // len(placement), args.max_seq_len))
+	placement = list(range(args.pp))
+	mb_size = args.batch_size // len(placement)
+	sample = torch.randint(0, 10, (mb_size, args.max_seq_len))
 	pipe = Pipeline(
 		model, sample, placement, partition="metis", schedule="1f1b", dp=args.dp, worker=1
 	)
@@ -142,6 +154,8 @@ def main():
 	start = time.time()
 	torch.cuda.cudart().cudaProfilerStart()
 
+	log_step = len(dataloader) // (5 * args.dp)  # print 5x per epoch
+
 	# Training loop
 	for epoch in range(args.epochs):
 		sampler.set_epoch(epoch)
@@ -154,21 +168,19 @@ def main():
 
 			optimizer.zero_grad()
 
-			_, loss = pipe(
-				input_ids, input_ids, loss_fn, split_size=args.batch_size // len(placement), profile=True
-			)
+			_, loss = pipe(input_ids, input_ids, loss_fn, split_size=mb_size, profile=True)
 			if loss:
 				total_loss += loss.item()
 
 			optimizer.step()
 
-			if i % 50 == 49:
+			if (i + 1) % log_step == 0:
 				if rank == ws - 1:
-					print(f"[{epoch + 1} | {i}] : {total_loss / (i + 1):.4f}")
-				if rank < args.pp:
 					print(
-						f"Rank {rank} - Last registered times : {pipe.times}s | Peak memory : {torch.cuda.max_memory_allocated() / (2 ** 30):.2f}GB"
+						f"[Epoch {epoch + 1} | {(i*args.dp) + 1} / {len(dataloader)}] : {total_loss / (i + 1):.4f}"
 					)
+				if rank < args.pp:
+					pretty_print_step(pipe.times)
 					torch.cuda.reset_peak_memory_stats()
 
 		if rank == ws - 1:
@@ -176,9 +188,11 @@ def main():
 			print(
 				f"Epoch {epoch + 1}/{args.epochs}, Average Loss: {avg_loss:.4f} (Time taken: {time.time() - start:.4f}s)"
 			)
-		pipe.save(
-			f"/net/scratch/hscra/project/tutorial/tutorial051/checkpoint_{epoch + 1}.pt", worker=1
-		)
+
+		if args.save_path is not None:
+			if not os.path.exists(args.save_path):
+				os.makedirs(args.save_path)
+			pipe.save(f"{args.save_path}/checkpoint_{epoch + 1}.pt", worker=1)
 
 	torch.cuda.synchronize()
 	end = time.time()

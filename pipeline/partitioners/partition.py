@@ -15,7 +15,7 @@ logger = logging.getLogger("partition")
 
 
 def check_partition(graph, parts, inputs, outputs):
-	original_inputs = set(node.target for node in graph.nodes if node.op == "placeholder")
+	original_inputs = list(node.target for node in graph.nodes if node.op == "placeholder")
 
 	if original_inputs != inputs[0]:
 		raise Exception(
@@ -45,7 +45,7 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
 		return env[a.name]
 
 	with subgraph.inserting_before():
-		for i in inputs:
+		for i in reversed(inputs): # we are inserting before, so we do in reverse order
 			node = subgraph.placeholder(i)
 			env[node.name] = node
 
@@ -53,7 +53,7 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
 		env[node.name] = subgraph.node_copy(node, load_arg)
 
 	with subgraph.inserting_after():
-		subgraph.output({o: env[o] for o in outputs})
+		subgraph.output(tuple(env[o] for o in outputs))
 
 	return torch.fx.GraphModule(graph_module, subgraph)
 
@@ -68,15 +68,15 @@ def get_inputs_outputs(parts):
 	:return: 2 dicts, one for inputs and one for outputs, respectively. Each one has the format: {partition_idx: [target1, target2, ..]} where targets are node names.
 	:rtype: Dict[int, List[str]], Dict[int, List[str]]
 	"""
-	inputs = {i: set() for i in range(len(parts))}
-	outputs = {i: set() for i in range(len(parts))}
+	inputs = {i: [] for i in range(len(parts))}
+	outputs = {i: [] for i in range(len(parts))}
 
 	def add_outputs(i, arg):
 		if isinstance(arg, (list, tuple)):
 			for item in arg:
 				add_outputs(i, item)
 		elif hasattr(arg, "name"):
-			outputs[i].add(arg.name)
+			outputs[i].append(arg.name)
 		elif isinstance(arg, dict):
 			for value in arg.values():
 				add_outputs(i, value)
@@ -87,7 +87,7 @@ def get_inputs_outputs(parts):
 		to_remove = []
 		for node in part:
 			if node.op == "placeholder":
-				inputs[i].add(node.target)
+				inputs[i].append(node.target)
 				to_remove.append(node)
 				continue
 			elif node.op == "output":
@@ -98,15 +98,15 @@ def get_inputs_outputs(parts):
 			for dep in node.all_input_nodes:
 				if dep not in part and dep.name not in inputs[i]:
 					if dep.op == "placeholder":
-						inputs[i].add(dep.target)
+						inputs[i].append(dep.target)
 					else:
-						inputs[i].add(dep.name)
+						inputs[i].append(dep.name)
 					if i != 0:
 						if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
 							raise Exception(
 								f"Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}."
 							)
-						outputs[i - 1].add(dep.name)
+						outputs[i - 1].append(dep.name)
 
 		for node in to_remove:
 			part.remove(node)
@@ -117,58 +117,17 @@ def get_inputs_outputs(parts):
 			continue
 		if i != 0:
 			for output in outputs[i - 1]:
-				inputs[i].add(output)
-				outputs[i].add(output)
+				inputs[i].append(output)
+				outputs[i].append(output)
 		if i != len(parts) - 1:
 			for inp in inputs[i + 1]:
 				# Special case: since input is a reserved python name,
 				# it is replaced in code by input_1. So the dependency will be on input_1 but is fullfilled by input.
 				if "input" not in inp and "input" not in inputs[i]:
-					inputs[i].add(inp)
-				outputs[i].add(inp)
+					inputs[i].append(inp)
+				outputs[i].append(inp)
 
 	return inputs, outputs
-
-
-def get_inputs_outputs_single(part):
-	"""
-	Get the input/output nodes of a single part from the graph
-	Removes inputs/outputs nodes of each part. They should be added back later.
-	Useful for already splitted graphs
-
-	:param part: one part of a partitioned model
-	:type part: List[fx.Node]
-
-	:return: names of the input and output variables
-	:rtype: List[str], List[str]
-	"""
-	inputs = set()
-	outputs = set()
-
-	def add_outputs(arg):
-		if isinstance(arg, (list, tuple)):
-			for item in arg:
-				add_outputs(item)
-		elif hasattr(arg, "name"):
-			outputs.add(arg.name)
-		elif isinstance(arg, dict):
-			for value in arg.values():
-				add_outputs(value)
-
-	to_remove = []
-	for node in part:
-		if node.op == "placeholder":
-			inputs.add(node.target)
-			to_remove.append(node)
-		if node.op == "output":
-			for arg in node.args:
-				add_outputs(arg)
-			to_remove.append(node)
-
-	for node in to_remove:
-		part.remove(node)
-
-	return part, inputs, outputs
 
 
 def duplicate_symsizes(graph):
@@ -311,9 +270,10 @@ def partition_graph(model, n, sample, mode="naive"):
 		subgraph = create_subgraph(graph, p, inputs[i], outputs[i])
 		remove_inplace_leaves(subgraph)
 		blocks.append(subgraph)
+		logger.info(f"Part {i} - signature = {inputs[i]} -> {outputs[i]}")
 
 	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
 	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
 	logger.info(f'Estimated times : {["%.3fs" % t for t in estimated_times]}')
 	logger.info(f'Estimated memory transfers : {["%.1fMB" % t for t in estimated_mems]}')
-	return blocks, inputs, outputs
+	return blocks

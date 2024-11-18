@@ -33,6 +33,25 @@ def op_to_str(op):
 			return f"Send to {op.peer}"
 		case dist.irecv:
 			return f"Receive from {op.peer}"
+		
+def pretty_print_params(n):
+	if n > 1e9:
+		return f"{n/1e9:.1f}B"
+	elif n > 1e6:
+		return f"{n/1e6:.1f}M"
+	else:
+		return f"{int(n)}"
+	
+def pretty_print_step(rank, times):
+	total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / (
+		2**30
+	)
+	memory = torch.cuda.max_memory_allocated() / (2**30)
+	info = f"Rank {rank} -\n"
+	for k, v in times.items():
+		info += f"\t{k} : {v:.2f}s\n"
+	info += f"\tPeak memory : {memory:.2f}GB ({100 * memory / total_memory:.2f}%)"
+	print(info)
 
 
 class TensorMetadata:
@@ -124,7 +143,7 @@ class NameMapping:
 		return self.outputs_to_inputs[name]
 
 	def __repr__(self):
-		s = "NameMapping:(\n"
+		s = "NameMapping: (\n"
 		for inp, out in self.inputs_to_outputs.items():
 			s += f"  {inp} <-> {out}\n"
 		s += ")"
@@ -141,11 +160,11 @@ class Timer:
 
 	Utilisation example: ::
 
-	    with Timer() as timer:
-	        # do some stuff
-	        # everything in this context will be timed
-	    # if you do something here, it will not be timed
-	    print(timer.time())
+		with Timer() as timer:
+			# do some stuff
+			# everything in this context will be timed
+		# if you do something here, it will not be timed
+		print(timer.time())
 
 	"""
 
@@ -204,17 +223,17 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
 
 	Usage: ::
 
-	    with activations_offloading():
-	        y = model(x)
-	    # do stuff
-	    activations_offloading().wait_for_offloading() # GPU memory for activations is freed
-	    # ...
-	    activations_offloading().prefetch() # GPU memory is re-allocated and activations moved back to CPU
-	    # ...
-	    loss.backward() # all tensors are on GPU for backward
+		with activations_offloading():
+			y = model(x)
+		# do stuff
+		activations_offloading().wait_for_offloading() # GPU memory for activations is freed
+		# ...
+		activations_offloading().prefetch() # GPU memory is re-allocated and activations moved back to CPU
+		# ...
+		loss.backward() # all tensors are on GPU for backward
 
 	.. warning::
-	    Activation offloading has some known issues that cause CPU memory to be overused.
+		Activation offloading has some known issues that cause CPU memory to be overused.
 
 	"""
 
@@ -283,3 +302,47 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
 				unpacked.copy_(tensor, non_blocking=True)
 			self.tensors[key] = unpacked
 			self.events[key].record(self.stream)
+
+
+def send_model(model, dst):
+	# First send model structure without parameters/buffers
+	state = {}
+	for name, param in model.named_parameters():
+		state[name] = param.data
+		param.data = torch.empty(0) # Clear parameter data temporarily
+	for name, buffer in model.named_buffers():
+		state[name] = buffer.data
+		buffer.data = torch.empty(0) # Clear buffer data temporarily
+		
+	dist.send_object_list([model], dst)
+
+	# Restore parameter/buffer data
+	for name, param in model.named_parameters():
+		param.data = state[name]
+	for name, buffer in model.named_buffers():
+		buffer.data = state[name]
+
+	# Send parameters and buffers
+	params = sorted(model.named_parameters(), key=lambda x: x[0])
+	for name, param in params:
+		dist.send(param.data, dst)
+	
+	buffers = sorted(model.named_buffers(), key=lambda x: x[0])
+	for name, buffer in buffers:
+		dist.send(buffer.data, dst)
+
+def recv_model(src):
+	model = [None]
+	dist.recv_object_list(model, src)
+	model = model[0]
+
+	params = sorted(model.named_parameters(), key=lambda x: x[0])
+	for name, param in params:
+		dist.recv(param.data, src)
+	
+
+	buffers = sorted(model.named_buffers(), key=lambda x: x[0])
+	for name, buffer in buffers:
+		dist.recv(buffer.data, src)
+	
+	return model

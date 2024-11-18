@@ -143,6 +143,9 @@ def profile_operations(graph_module, input_sample, niter=10):
 		# Values should be in the same order as the placeholders
 		input_sample = list(input_sample.values())
 
+	ninputs = len([n for n in graph_module.graph.nodes if n.op == "placeholder"])
+	assert ninputs == len(input_sample), f"Expected {ninputs} inputs, got {len(input_sample)}"
+
 	with torch.no_grad():
 		profiler.boxed_run(input_sample)
 

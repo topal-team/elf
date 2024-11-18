@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import os
 import sys
+import copy
 
 sys.path.append("./")
 from pipeline import Pipeline
@@ -26,7 +27,7 @@ def load_full_model(size, path="test-model.pt"):
 	"""
 	Loads the sequential model stored in `path`, and returns the `size` first layers.
 	"""
-	model = torch.load(path)
+	model = torch.load(path, weights_only=False)
 	new_model = nn.Sequential(*list(model.children())[:size])
 	return new_model
 
@@ -42,7 +43,7 @@ def load_parts_model(placement, global_rank, path="test-model.pt"):
 		dist.barrier()
 		if not os.path.exists(path):
 			raise FileNotFoundError(f"Model file {path} not found even after attempting to create it.")
-	model = torch.load(path)
+	model = torch.load(path, weights_only=False)
 	children = list(model.children())
 	blocks = [children[idx] for idx in indices]
 	return blocks
@@ -54,7 +55,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 	To do that, we compute from a random sample and compare with the results/gradients from the same model, fully reconstruced on a single device
 	"""
 	batch = torch.randn((batch_size, 3000), device=rank)
-	target = torch.randn_like(batch, device=rank)
+	target = torch.randn_like(batch)
 
 	# Pipelined model will use the batch from its first rank
 	# While full model will use the batch from the last rank of the pipelined model
@@ -65,8 +66,8 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 		elif global_rank == placement[-1]:
 			dist.recv(batch, src=placement[0])
 
-	pipe = Pipeline(blocks, batch, placement, partition=False, schedule=scheduler)
-	output, _ = pipe(batch, target, F.mse_loss, split_size)
+	pipe = Pipeline(copy.deepcopy(blocks), batch, placement, partition=False, schedule=scheduler)
+	output, pipeloss = pipe(batch, target, F.mse_loss, split_size)
 	# we shouldn't access directly the internal modules but it's for the purpose of testing
 	blocks = pipe.blocks
 	logger.debug(f"[Rank {global_rank}] : result = {output}")
@@ -93,17 +94,18 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 
 	# Last device has the result, we reconstruct the full model on this one for simplicity
 	if global_rank == placement[-1]:
-		batch.requires_grad = True
 		full_model = load_full_model(len(placement)).cuda()
-		groundtruth = full_model(batch)
+		groundtruth = full_model(batch.clone().detach())
 		assert torch.allclose(
 			output, groundtruth, rtol=1e-3, atol=5e-6
 		), f"Pipelined and regular models have different outputs : {output} and {groundtruth}"
-		logger.info("Outputs are correct :)")
+		print("Outputs are correct")
 
-		loss = F.mse_loss(
-			groundtruth, target, reduction="sum"
-		)  # If we use default reduction (mean) we need to also apply it on pipeline micro batches, which is not trivial
+		loss = F.mse_loss(groundtruth, target)
+		assert torch.allclose(
+			pipeloss, loss
+		), f"Pipelined and regular models have different losses : {pipeloss} and {loss}"
+		print("Losses are correct")
 		loss.backward()
 		# First device has the gradients, it will check that they are right
 		if placement[0] != placement[-1]:
@@ -123,7 +125,7 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 		assert torch.allclose(
 			grads, groundtruth, rtol=1e-3, atol=1e-6
 		), f"Pipelined and regular models have different gradients : {grads} and {groundtruth}"
-		logger.info("Gradients are correct :))")
+		print("Gradients are correct")
 
 	pipe.clear()
 	del pipe, blocks
@@ -173,12 +175,12 @@ if __name__ == "__main__":
 				for s in split_sizes:
 					layers = load_parts_model(p, global_rank)
 					if global_rank == 0:
-						logger.info(
+						print(
 							f"Testing schedule {schedule} with placement {p}, batch size {b} and split size {s}"
 						)
 					test_pipeline(layers, p, schedule, b, s)
 					if global_rank == 0:
-						logger.info("\n")
+						print("")
 					torch.cuda.synchronize()
 					dist.barrier()
 

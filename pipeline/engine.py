@@ -9,7 +9,7 @@ from collections import deque
 import time
 
 from .schedule import OperationType
-from .utils import Timer, op_to_str, NameMapping
+from .utils import Timer, op_to_str
 
 import logging
 
@@ -22,10 +22,10 @@ def _fake_p2p(data):
 
 	:param data: Input data to be processed
 	:type data: Iterator[Tuple[str, Tensor]]
-	:return: Dictionary with fake communication buffers
-	:rtype: dict
+	:return: Tuple with fake communication buffers
+	:rtype: Tuple[Tensor]
 	"""
-	return {key: [None, value.detach()] for key, value in data}
+	return [[None, value.detach()] for value in data]
 
 
 class Engine:
@@ -65,15 +65,16 @@ class Engine:
 
 		self.comms.clear()
 		stream.synchronize()
+		logger.debug(f"Rank {self.rank} - Finished batched communications")
 
 	def train_step(self, batch, target, loss_fn, schedule, mb_sizes, profile=False):
 		"""
 		Executes a schedule on a batch of data
 
 		:param batch: input data, only used on the first block of the pipeline
-		:type batch: Tensor
+		:type batch: List[Tensor]
 		:param target: groundtruth, only used on the last block of the pipeline
-		:type target: Tensor
+		:type target: List[Tensor]
 		:param loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own make sure that summing the loss of every micro-batch independently is equivalent to the loss on the entire batch (e.g. no average across batches). The loss is averaged across the entire batch at the end.
 		:type loss_fn: function (Tensor, Tensor) -> Tensor
 		:param schedule: list of operations. For more info, see schedule.
@@ -100,10 +101,10 @@ class Engine:
 		"""
 		split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]
 		microbatches = iter(zip(*split_batches))
+		microtargets = target.split(mb_sizes, dim=0)
 
 		result = []
 		losses = []
-		current_target = (0, 0)  # micro batch id, position in target tensor
 
 		grad_fns = deque()
 
@@ -126,7 +127,8 @@ class Engine:
 				torch.cuda.synchronize()
 				warmup_start = time.time()
 
-			if not op.options.get("batched_comm", False):
+			# if not op.options.get("batched_comm", False):
+			if op.op in [OperationType.FORWARD, OperationType.BACKWARD]:
 				self._run_comms()
 
 			match op.op:
@@ -135,10 +137,11 @@ class Engine:
 					# If the block as multiple outputs, this flattens them
 					# TODO: correctly handle that in multiple result lists
 					if y is not None:
-						for output in y.values():
+						for output in y:
 							if isinstance(output, torch.Tensor):
 								result.append(output.detach().requires_grad_(False))
 							else:
+								logger.warning("Non-tensor output")
 								result.append(output)
 
 				case OperationType.BACKWARD:
@@ -146,22 +149,20 @@ class Engine:
 
 				case OperationType.SEND_FORWARD:
 					if op.options.get("dst", block.next) == block.rank:
-						# The next block is on the same device ; we bypass p2p comms
 						next_block = self.id_to_block.get(op.block_id + 1)
+						# The next block is on the same device ; we bypass p2p comms
 						acts = block.act_to_send.popleft()
-						acts = {block.name_mapping_out.to_input(k): v for k, v in acts.items()}
-						next_block.inputs_to_forward.append(_fake_p2p(acts.items()))
+						next_block.inputs_to_forward.append(_fake_p2p(acts))
 
 					if comm := block.send_forward(**op.options):
 						self.comms.extend(comm)
 
 				case OperationType.SEND_BACKWARD:
-					if op.options.get("src", block.previous) == block.rank:
+					if op.options.get("dst", block.previous) == block.rank:
 						# The previous block is on the same device ; we bypass p2p comms
-						next_block = self.id_to_block.get(op.block_id - 1)
+						prev_block = self.id_to_block.get(op.block_id - 1)
 						grads = block.grads_to_send.popleft()
-						grads = {block.name_mapping_in.to_output(k): v for k, v in grads.items()}
-						next_block.grads_to_backward.append(_fake_p2p(grads.items()))
+						prev_block.grads_to_backward.append(_fake_p2p(grads))
 
 					if comm := block.send_backward(**op.options):
 						self.comms.extend(comm)
@@ -169,15 +170,7 @@ class Engine:
 				case OperationType.RECV_FORWARD:
 					if block.previous is None:
 						microbatch = next(microbatches)
-						inputs = zip(block.inputs, microbatch)
-						block.inputs_to_forward.append(_fake_p2p(inputs))
-
-					if not block.metadata and op.options.get("src", block.previous) == block.rank:
-						prev_block = self.id_to_block.get(op.block_id - 1)
-						mapping = NameMapping(block.inputs, prev_block.outputs)
-						block.name_mapping_in = mapping
-						prev_block.name_mapping_out = mapping
-						logger.debug(f"Synced metadata of {block} and {prev_block} : {mapping}")
+						block.inputs_to_forward.append(_fake_p2p(microbatch))
 
 					if comm := block.recv_forward(mb_sizes[op.mb_id], **op.options):
 						self.comms.extend(comm)
@@ -191,13 +184,10 @@ class Engine:
 						assert op.mb_id < len(
 							result
 						), f"Loss forward for mb {op.mb_id} but only {len(result)} results computed"
-						i, start = current_target
-						end = start + mb_sizes[i]
-						loss, grad_fn = compute_loss(block, result[op.mb_id], target[start:end], loss_fn)
+						loss, grad_fn = compute_loss(block, result[op.mb_id], microtargets[op.mb_id], loss_fn)
 						losses.append(loss)
 						grad_fns.append(grad_fn)
 						logger.debug(f"{block} - Computed loss = {loss.item()}")
-						current_target = (i + 1, end)
 					else:
 						logger.warning(f"Tried to compute loss on a non-last block {block}")
 						continue
@@ -211,13 +201,13 @@ class Engine:
 						with Timer() as timer:
 							grads = grad_fn()
 						block.compute_time.append(timer.time)
-						block.grads_to_backward.append(_fake_p2p(grads.items()))
+						block.grads_to_backward.append(_fake_p2p(grads))
 					else:
 						logger.warning(f"Tried to compute loss backward on a non-last block {block}")
 						continue
 
 				case OperationType.ALL_REDUCE_PARAM_GRADS:
-					block.scale_grads(sum(mb_sizes))  # we also average out the gradients here
+					block.scale_grads(sum(mb_sizes)) # we also average out the gradients here
 					block.all_reduce_param_grads(**op.options)
 
 				case _:
@@ -263,11 +253,12 @@ def compute_loss(block, output, target, loss_fn):
 	:type loss_fn: function (Tensor, Tensor, reduction = 'sum') -> Tensor
 
 	:return: loss value, gradient function
-	:rtype: Tensor, Callable[[], Dict[str, Tensor]]
+	:rtype: Tensor, Callable[[], Tuple[Tensor]]
 	"""
+	if not isinstance(output, torch.Tensor) or not isinstance(target, torch.Tensor):
+		logger.warning("Loss computation with non-tensor output or target")
+
 	output = output.detach().requires_grad_()
-	if len(block.outputs) != 1:
-		raise RuntimeError("Multiple outputs not supported yet for loss computation")
 
 	with Timer() as timer:
 		try:
@@ -280,6 +271,6 @@ def compute_loss(block, output, target, loss_fn):
 
 	def grad_fn():
 		loss.backward()
-		return {block.outputs[0]: output.grad.data}
+		return (output.grad.data,)
 
 	return loss.detach().requires_grad_(False), grad_fn

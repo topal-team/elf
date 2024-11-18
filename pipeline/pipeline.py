@@ -9,7 +9,7 @@ from .block import PipelineBlock
 from .schedule import *
 from .engine import Engine
 from .task_graph import graph_from_schedule, find_cycles, fix_cycle
-from .partitioners import partition_graph, get_inputs_outputs_single, create_subgraph
+from .partitioners import partition_graph
 
 import logging
 
@@ -47,6 +47,7 @@ class Pipeline:
 		torch.cuda.set_device(local_rank)
 
 		if placement == "auto":
+			pp = ws // dp
 			placement = self._get_default_placement(schedule, pp)
 
 		assert max(placement) < ws, "Placement is out of bounds"
@@ -59,7 +60,7 @@ class Pipeline:
 
 		if isinstance(partition, str):
 			try:
-				model, inputs, outputs = shared_partition(
+				model = shared_partition(
 					model, placement, sample, partition, worker=worker
 				)
 			except Exception as e:
@@ -68,13 +69,9 @@ class Pipeline:
 				)
 				raise e
 		elif not partition:
-			try:
-				model, inputs, outputs = local_partition(model, placement)
-			except Exception as e:
-				logger.error(
-					"Error partitioning the model. This probably means that your model uses features either not supported by torch.fx/torch.export"
-				)
-				raise e
+			# Model is already the right part, just make sure it's a list
+			if isinstance(model, torch.nn.Module):
+				model = [model]
 		else:
 			raise Exception(
 				"Partition strategy should be either False when using pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
@@ -82,7 +79,7 @@ class Pipeline:
 
 		self.placement = placement
 		self.scheduler = self._get_scheduler(schedule)
-		self.blocks = self._create_pipeline(model, inputs, outputs)
+		self.blocks = self._create_pipeline(model)
 		self._init_process_groups()
 		self.engine = Engine(self.blocks)
 
@@ -91,7 +88,7 @@ class Pipeline:
 		self.last_options = {}
 		self.last_nmb = 0
 
-	def __call__(self, batch, target, loss_fn, split_size=1, profile=False, **options):
+	def __call__(self, batch, target, loss_fn, split_size=0, profile=False, **options):
 		"""
 		Execute the schedule on a batch of data
 
@@ -101,7 +98,7 @@ class Pipeline:
 		:type target: torch.Tensor
 		:param loss_fn: loss function to be used. We recommend using torch's built-in loss functions, but you can pass any function that matches the signature. Be careful, summing the loss of every micro-batch should be equivalent to computing the loss on the full batch (i.e., no average over batch dimension)
 		:type loss_fn: Function (Tensor, Tensor) -> Tensor
-		:param split_size: either one size for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or a list of possibly different micro batch sizes. In that case the sum of the sizes must be equal to the batch size.
+		:param split_size: either one size for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or a list of possibly different micro batch sizes. In that case the sum of the sizes must be equal to the batch size. Default value is (batch_size // number of stages)
 		:type split_size: int or List[int]
 		:param profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
 		:type profile: boolean
@@ -112,6 +109,10 @@ class Pipeline:
 		# We expect a list of arguments, not a single tensor
 		if isinstance(batch, torch.Tensor):
 			batch = [batch]
+
+		# Move to GPU
+		batch = tuple(item.cuda() if isinstance(item, torch.Tensor) else item for item in batch)
+		target = target.cuda() # We don't support multiple targets yet
 
 		mb_sizes = self._get_mb_sizes(split_size, batch)
 		n_micro_batches = len(mb_sizes)
@@ -139,7 +140,9 @@ class Pipeline:
 		if len(result) != 0:
 			result = torch.cat(result, dim=0)
 			losses = torch.tensor(losses, device=result.device)
-			losses = losses.mean()
+			losses = losses.sum() / sum(mb_sizes)
+			if self.dp > 1:
+				dist.all_reduce(losses, group=self.blocks[-1].dp_group, op=dist.ReduceOp.AVG)
 			return result, losses
 		else:
 			return None, None
@@ -224,6 +227,7 @@ class Pipeline:
 						full_state[p_name] = p.cpu().detach()
 
 			torch.save(full_state, path)
+			logger.info(f"Saved model to {path}")
 
 		else:
 			if worker in dist.get_process_group_ranks(pp_group):
@@ -231,7 +235,7 @@ class Pipeline:
 
 	def _get_default_placement(self, schedule, pp):
 		if schedule == "hanayo":
-			return [i for i in range(pp)] + reversed([i for i in range(pp)])
+			return [i for i in range(pp)] + list(reversed([i for i in range(pp)]))
 		else:
 			return [i for i in range(pp)]
 
@@ -250,6 +254,11 @@ class Pipeline:
 		# Assuming all elements in the list have the same batch size
 		batch_size = batch[0].size(0)
 		if isinstance(split_size, int):
+			if split_size > batch_size:
+				logger.warning(f"Split size {split_size} is greater than batch size {batch_size}")
+				split_size = batch_size
+			if split_size == 0:
+				split_size = batch_size // len(self.placement) if len(self.placement) <= batch_size else 1
 			n_micro_batches = batch_size // split_size
 			mb_sizes = [split_size for _ in range(n_micro_batches)]
 			if batch_size % split_size != 0:
@@ -299,7 +308,7 @@ class Pipeline:
 		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
 
-	def _create_pipeline(self, layers, inputs, outputs):
+	def _create_pipeline(self, layers):
 		"""
 		Transforms a list of layers placed on different devices to a working pipeline
 
@@ -321,9 +330,9 @@ class Pipeline:
 		ids = [i for i in range(len(placement)) if placement[i] == rank]
 		blocks = []
 		for i in range(len(layers)):
-			new_block = PipelineBlock(layers[i], ids[i], placement, inputs[i], outputs[i])
+			new_block = PipelineBlock(layers[i], ids[i], placement)
+			logger.debug(f"{new_block.previous} -> {new_block} -> {new_block.next}")
 			blocks.append(new_block)
-			logger.info(f"{new_block} : inputs = {new_block.inputs}, outputs = {new_block.outputs}")
 
 		return blocks
 
@@ -383,13 +392,8 @@ def shared_partition(model, placement, sample, mode, worker=0):
 
 	:type mode: str
 
-	:return:
-
-		- Blocks for this process
-		- Inputs for each block of this process
-		- Outputs for each block of this process
-
-	:rtype: List[nn.Module], List[List[str]], List[List[str]]
+	:return: blocks (modules) for this process
+	:rtype: List[nn.Module]
 	"""
 	rank = dist.get_rank()
 	ws = dist.get_world_size()
@@ -398,6 +402,7 @@ def shared_partition(model, placement, sample, mode, worker=0):
 	# Rank 0 profiles & partition the graph, then shares it to everyone
 	# TODO: what if devices are heterogenous ? how to profile correctly ?
 	if rank == worker:
+		# Worker partitions and sends to the first pipeline ranks
 		assert mode in [
 			"naive",
 			"constrained",
@@ -405,72 +410,36 @@ def shared_partition(model, placement, sample, mode, worker=0):
 			"metis",
 		], "Partition strategies available are : [naive, constrained, dagP, metis]"
 
-		blocks, all_inputs, all_outputs = partition_graph(model, len(placement), sample, mode=mode)
+		parts = partition_graph(model, len(placement), sample, mode=mode)
 		for d in range(n_devices):
-			blocks_on_d = [blocks[i] for i in range(len(blocks)) if placement[i] == d]
-			inputs_on_d = [all_inputs[i] for i in all_inputs.keys() if placement[i] == d]
-			outputs_on_d = [all_outputs[i] for i in all_outputs.keys() if placement[i] == d]
+			blocks_on_d = [parts[i] for i in range(len(parts)) if placement[i] == d]
 			if d == worker:
-				models, inputs, outputs = blocks_on_d, inputs_on_d, outputs_on_d
+				blocks = blocks_on_d
 			else:
-				dist.send_object_list([blocks_on_d, inputs_on_d, outputs_on_d], dst=d)
-				# torch.cuda.synchronize()
+				dist.send_object_list(blocks_on_d, dst=d)
 
-		for dp in range(1, ws // n_devices):
-			dst = rank + dp * n_devices
-			dist.send_object_list([models, inputs, outputs], dst=dst)
-			# torch.cuda.synchronize()
-
-	elif rank < n_devices:
-		blocks = [None for _ in range(3)]
-
-		dist.recv_object_list(blocks, src=worker)
-		torch.cuda.synchronize()
-		models, inputs, outputs = blocks
 		for dp in range(1, ws // n_devices):
 			dst = rank + dp * n_devices
 			dist.send_object_list(blocks, dst=dst)
-			# torch.cuda.synchronize()
+
+	elif rank < n_devices:
+		# First pipeline share to their DP replicas
+		n_blocks = placement.count(rank)
+		blocks = [None for _ in range(n_blocks)]
+
+		dist.recv_object_list(blocks, src=worker)
+		torch.cuda.synchronize()
+		for dp in range(1, ws // n_devices):
+			dst = rank + dp * n_devices
+			dist.send_object_list(blocks, dst=dst)
 	else:
-		blocks = [None for _ in range(3)]
+		# Other ranks only receive
+		n_blocks = placement.count(rank % n_devices)
+		blocks = [None for _ in range(n_blocks)]
 		dist.recv_object_list(blocks, src=rank % n_devices)
 		torch.cuda.synchronize()
-		models, inputs, outputs = blocks
 
-	for m, i, o in zip(models, inputs, outputs):
-		logger.info(f"Rank {rank} - signature = {i} -> {o}")
-		logger.debug(f"Rank {rank} - code = {m.code}")
+	torch.cuda.synchronize()
+	logger.debug(f"Rank {rank} has {len(blocks)} block" + ("s" if len(blocks) > 1 else ""))
 
-	return models, inputs, outputs
-
-
-def local_partition(model, placement):
-	"""
-	Partitions a pre-partitioned model locally for each process.
-
-	This function takes a model that has already been partitioned and identifies the model parts
-	assigned to the current rank, traces them, and extracts their inputs and outputs.
-
-	:param model: The pre-partitioned model. Can be a single nn.Module or a list of nn.Modules.
-	:type model: nn.Module or List[nn.Module]
-	:param placement: A list indicating the rank assignment for each part of the model.
-	:type placement: List[int]
-
-	:return: A tuple containing:
-		- The partitioned model parts for the current rank
-		- A list of inputs for each model part
-		- A list of outputs for each model part
-	:rtype: Tuple[List[nn.Module], List[List[str]], List[List[str]]]
-	"""
-	rank = dist.get_rank()
-	inputs = {}
-	outputs = {}
-	if isinstance(model, torch.nn.Module):
-		model = [model]
-	ids = [i for i in range(len(placement)) if placement[i] == rank]
-	for i in range(len(ids)):
-		trace = torch.fx.symbolic_trace(model[i])
-		new, inputs[i], outputs[i] = get_inputs_outputs_single(list(trace.graph.nodes))
-		model[i] = create_subgraph(trace, new, inputs[i], outputs[i])
-
-	return model, inputs, outputs
+	return blocks
