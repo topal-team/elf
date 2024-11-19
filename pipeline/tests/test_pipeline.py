@@ -9,6 +9,7 @@ from datetime import timedelta
 
 import pytest
 
+
 @pytest.fixture(scope="session")
 def init_dist():
 	assert "RANK" in os.environ, "Cannot run multi-process tests without torchrun"
@@ -26,6 +27,7 @@ def init_dist():
 		yield rank, local_rank, world_size
 	finally:
 		dist.destroy_process_group()
+
 
 @pytest.mark.single
 def test_metadata():
@@ -72,8 +74,10 @@ class FakeWorker:
 	def is_completed(self):
 		return self.done
 
+
 def _fake_p2p(tensor):
 	return [FakeWorker(True), tensor]
+
 
 @pytest.mark.single
 def test_block():
@@ -168,9 +172,7 @@ def test_block_multi(init_dist):
 		assert len(block.inputs_to_forward) == 0
 		assert len(block.inputs_to_keep) == 1
 
-		assert torch.allclose(
-			block.act_to_send[0][0], torch.full((2, 2), 2.0, device=local_rank)
-		)
+		assert torch.allclose(block.act_to_send[0][0], torch.full((2, 2), 2.0, device=local_rank))
 
 		w = block.send_forward()  # Should be matched by a recv_forward
 		assert w is None

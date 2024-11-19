@@ -4,10 +4,12 @@ Pipeline API and setup
 
 import os
 import torch
+import shutil
 import torch.distributed as dist
 from .block import PipelineBlock
 from .schedule import *
 from .engine import Engine
+from .utils import *
 from .task_graph import graph_from_schedule, find_cycles, fix_cycle
 from .partitioners import partition_graph
 
@@ -22,7 +24,7 @@ class Pipeline:
 	"""
 
 	def __init__(
-		self, model, sample, placement="auto", partition="naive", schedule="afab", dp=1, worker=0
+		self, model, sample, placement="auto", partitioner="metis", schedule="afab", dp=1, worker=0
 	):
 		"""
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
@@ -31,8 +33,8 @@ class Pipeline:
 		:type sample: torch.Tensor or List[torch.Tensor]
 		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement, which is ``[0, 1, .., world size - 1]``
 		:type placement: List[int] or str
-		:param partition: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
-		:type partition: boolean or str
+		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
+		:type partitioner: boolean or str
 		:param schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b"), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
 		:type schedule: str or function(List[int], int, **kwargs) -> List[Operation]
 		:param dp: number of data parallel processes to use.
@@ -58,29 +60,12 @@ class Pipeline:
 		self.pp = pp
 		self.dp = dp
 
-		if isinstance(partition, str):
-			try:
-				model = shared_partition(
-					model, placement, sample, partition, worker=worker
-				)
-			except Exception as e:
-				logger.error(
-					"Error partitioning the model. This probably means that your model uses features either not supported by torch.fx/torch.export, or by this library (such as skip connections). If the error persists, consider using a pre-partitioned model"
-				)
-				raise e
-		elif not partition:
-			# Model is already the right part, just make sure it's a list
-			if isinstance(model, torch.nn.Module):
-				model = [model]
-		else:
-			raise Exception(
-				"Partition strategy should be either False when using pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
-			)
+		self._init_process_groups()  # sets pp_group and dp_groups
 
 		self.placement = placement
+		parts = self._partition_model(model, partitioner, sample, worker)
+		self.blocks = self._create_pipeline(parts)
 		self.scheduler = self._get_scheduler(schedule)
-		self.blocks = self._create_pipeline(model)
-		self._init_process_groups()
 		self.engine = Engine(self.blocks)
 
 		# Used to avoid re-generating schedule every time
@@ -96,7 +81,7 @@ class Pipeline:
 		:type batch: torch.Tensor or List[torch.Tensor]
 		:param target: targets
 		:type target: torch.Tensor
-		:param loss_fn: loss function to be used. We recommend using torch's built-in loss functions, but you can pass any function that matches the signature. Be careful, summing the loss of every micro-batch should be equivalent to computing the loss on the full batch (i.e., no average over batch dimension)
+		:param loss_fn: loss function to be used. We recommend using torch's built-in loss functions, but you can pass any function that matches the signature. Be careful, the loss is computed on each micro-batch, then averaged over the batch dimension. Depending on the loss function, this may not be equivalent to computing the loss on the full batch.
 		:type loss_fn: Function (Tensor, Tensor) -> Tensor
 		:param split_size: either one size for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or a list of possibly different micro batch sizes. In that case the sum of the sizes must be equal to the batch size. Default value is (batch_size // number of stages)
 		:type split_size: int or List[int]
@@ -112,7 +97,7 @@ class Pipeline:
 
 		# Move to GPU
 		batch = tuple(item.cuda() if isinstance(item, torch.Tensor) else item for item in batch)
-		target = target.cuda() # We don't support multiple targets yet
+		target = target.cuda()  # We don't support multiple targets yet
 
 		mb_sizes = self._get_mb_sizes(split_size, batch)
 		n_micro_batches = len(mb_sizes)
@@ -308,16 +293,35 @@ class Pipeline:
 		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
 
-	def _create_pipeline(self, layers):
+	def _partition_model(self, model, partitioner, sample, worker):
+		"""
+		Either partitions the model, or makes sure it's already partitioned correctly
+		"""
+		if isinstance(partitioner, str):
+			try:
+				parts = self._shared_partition(model, sample, partitioner, worker=worker)
+			except Exception as e:
+				logger.error(
+					"Error partitioning the model. This probably means that your model uses features either not supported by torch.fx/torch.export, or by this library (such as skip connections). If the error persists, consider using a pre-partitioned model"
+				)
+				raise e
+		elif not partitioner:
+			# Model is already the right part, just make sure it's a list
+			if isinstance(model, torch.nn.Module):
+				parts = [model]
+		else:
+			raise Exception(
+				"Partition strategy should be either False when using pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
+			)
+
+		return parts
+
+	def _create_pipeline(self, parts):
 		"""
 		Transforms a list of layers placed on different devices to a working pipeline
 
-		:param layers: List of layers / groups of layers coming from a partitioned model. This list has to be sequential in terms of computation
-		:type layers: List[nn.Module]
-		:param inputs: name of variables taken as input by each block
-		:type inputs: List[List[str]]
-		:param outputs: name of variables returned by each block
-		:type outputs: List[List[str]]
+		:param parts: List of model parts coming from a partitioned model
+		:type parts: List[nn.Module]
 
 		:return: list of blocks handled by this process with everything set up for the pipeline to work
 		:rtype: List[PipelineBlock]
@@ -329,9 +333,11 @@ class Pipeline:
 
 		ids = [i for i in range(len(placement)) if placement[i] == rank]
 		blocks = []
-		for i in range(len(layers)):
-			new_block = PipelineBlock(layers[i], ids[i], placement)
+		for i in range(len(parts)):
+			new_block = PipelineBlock(parts[i], ids[i], placement)
 			logger.debug(f"{new_block.previous} -> {new_block} -> {new_block.next}")
+			new_block.pp_group = self.pp_group
+			new_block.dp_group = self.dp_groups[ids[i] % self.pp] if self.dp > 1 else None
 			blocks.append(new_block)
 
 		return blocks
@@ -343,103 +349,98 @@ class Pipeline:
 		rank = dist.get_rank()
 		world_size = dist.get_world_size()
 
-		offset = (rank // self.pp) * self.pp
-		placement = [p + offset for p in self.placement]
+		dp_rank = rank // self.pp
 
-		ids = [i for i in range(len(placement)) if placement[i] == rank]
+		self.pp_group = None
+		self.dp_groups = []
+		for pp in range(self.dp):
+			members = [r for r in range(world_size) if r // self.pp == pp]
+			if rank == members[0]:
+				logger.info(f"Creating PP group with members {members}")
+			pp_group = dist.new_group(members)
+			if pp == dp_rank:
+				self.pp_group = pp_group
+
 		if self.dp > 1:
-			for stage in range(len(placement)):
-				members = [r for r in range(world_size) if (placement[stage] % self.pp) == (r % self.pp)]
+			for dp in range(self.pp):
+				members = [r for r in range(world_size) if r % self.pp == dp]
 				if rank == members[0]:
 					logger.info(f"Creating DP group with members {members}")
-				dp_group = dist.new_group(members)
-				if stage in ids:
-					self.blocks[ids.index(stage)].dp_group = dp_group
+				self.dp_groups.append(dist.new_group(members))
 
-		if self.pp > 1:
-			for dp_rank in range(self.dp):
-				members = [r for r in range(world_size) if r // self.pp == dp_rank]
-				if rank == members[0]:
-					logger.info(f"Creating PP group with members {members}")
-				pp_group = dist.new_group(members)
-				if rank in members:
-					for b in self.blocks:
-						b.pp_group = pp_group
+	def _shared_partition(self, model, sample, partitioner, worker=0):
+		"""
+		Partitions a model according to a placement & mode, then shares it to every process to be consistent
 
-					# Init communicators to avoid hangs later on
-					buffer = torch.empty(1, device=torch.cuda.current_device())
-					dist.all_reduce(buffer, group=pp_group)
-					torch.cuda.synchronize()
+		:param model: model to partition
+		:type model: nn.Module
+		:param sample: example of input data that will be processed by the model
+		:type sample: Tensor
+		:param partitioner: partitioner to use ; available options are :
 
+			- "naive": simple load balancing algorithm
+			- "constrained": naive with less communication
+			- "metis": use METIS
+			- "dagP": use dagP / rMLGP
+			For more info, see partition.
 
-def shared_partition(model, placement, sample, mode, worker=0):
-	"""
-	Partitions a model according to a placement & mode, then shares it to every process to be consistent
+		:type partitioner: str
+		:param worker: rank of the process that will profile the model and partition it
+		:type worker: int
 
-	:param model: model to partition
-	:type model: nn.Module
-	:param placement: list of device ranks
-	:type placement: List[int]
-	:param sample: example of input data that will be processed by the model
-	:type sample: Tensor
-	:param mode: partitioner to use ; available options are :
+		:return: blocks (modules) for this process
+		:rtype: List[nn.Module]
+		"""
+		rank = dist.get_rank()
 
-		- "naive": simple load balancing algorithm
-		- "constrained": naive with less communication
-		- "metis": use METIS
-		- "dagP": use dagP / rMLGP
-		For more info, see partition.
+		# Rank 'worker' profiles & partition the graph, then shares it to everyone
+		# TODO: what if devices are heterogenous ? how to profile correctly ?
+		n_blocks = self.placement.count(rank % self.pp)
+		blocks = [None for _ in range(n_blocks)]
+		if rank == worker:
+			partitioner = self._check_for_partitioner(partitioner)
 
-	:type mode: str
+			parts = partition_graph(model, len(self.placement), sample, partitioner=partitioner)
+			for d in range(self.pp):
+				blocks_on_d = [parts[i] for i in range(len(parts)) if self.placement[i] == d]
+				if d == worker:
+					blocks = blocks_on_d
+					for block in blocks:
+						block.cuda()
+				else:
+					logger.debug(f"Rank {rank} - Sending {len(blocks_on_d)} blocks to {d}")
+					send_models(blocks_on_d, dst=d, group=self.pp_group)
 
-	:return: blocks (modules) for this process
-	:rtype: List[nn.Module]
-	"""
-	rank = dist.get_rank()
-	ws = dist.get_world_size()
-	n_devices = max(placement) + 1
+		elif rank < self.pp:
+			# First pipeline share to their DP replicas
+			logger.debug(f"Rank {rank} - Receiving {len(blocks)} blocks from {worker}")
+			recv_models(blocks, src=worker, group=self.pp_group)
+			torch.cuda.synchronize()
 
-	# Rank 0 profiles & partition the graph, then shares it to everyone
-	# TODO: what if devices are heterogenous ? how to profile correctly ?
-	if rank == worker:
-		# Worker partitions and sends to the first pipeline ranks
-		assert mode in [
+		if self.dp > 1:
+			logger.debug(f"Rank {rank} - Broadcasting {len(blocks)} blocks with src {rank % self.pp}")
+			broadcast_models(blocks, src=rank % self.pp, group=self.dp_groups[rank % self.pp])
+			torch.cuda.synchronize()
+
+		logger.debug(f"Rank {rank} has {len(blocks)} block" + ("s" if len(blocks) > 1 else ""))
+
+		return blocks
+
+	def _check_for_partitioner(self, partitioner):
+		assert partitioner in [
 			"naive",
 			"constrained",
 			"dagP",
 			"metis",
 		], "Partition strategies available are : [naive, constrained, dagP, metis]"
 
-		parts = partition_graph(model, len(placement), sample, mode=mode)
-		for d in range(n_devices):
-			blocks_on_d = [parts[i] for i in range(len(parts)) if placement[i] == d]
-			if d == worker:
-				blocks = blocks_on_d
-			else:
-				dist.send_object_list(blocks_on_d, dst=d)
+		if partitioner == "metis":
+			if not shutil.which("gpmetis"):
+				logger.warning("metis is not installed, falling back to naive")
+				return "naive"
+		elif partitioner == "dagP":
+			if not shutil.which("rMLGP"):
+				logger.warning("dagP is not installed, falling back to metis")
+				return self._check_for_partitioner("metis")
 
-		for dp in range(1, ws // n_devices):
-			dst = rank + dp * n_devices
-			dist.send_object_list(blocks, dst=dst)
-
-	elif rank < n_devices:
-		# First pipeline share to their DP replicas
-		n_blocks = placement.count(rank)
-		blocks = [None for _ in range(n_blocks)]
-
-		dist.recv_object_list(blocks, src=worker)
-		torch.cuda.synchronize()
-		for dp in range(1, ws // n_devices):
-			dst = rank + dp * n_devices
-			dist.send_object_list(blocks, dst=dst)
-	else:
-		# Other ranks only receive
-		n_blocks = placement.count(rank % n_devices)
-		blocks = [None for _ in range(n_blocks)]
-		dist.recv_object_list(blocks, src=rank % n_devices)
-		torch.cuda.synchronize()
-
-	torch.cuda.synchronize()
-	logger.debug(f"Rank {rank} has {len(blocks)} block" + ("s" if len(blocks) > 1 else ""))
-
-	return blocks
+		return partitioner

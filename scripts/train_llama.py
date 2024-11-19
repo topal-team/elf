@@ -14,7 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 import datasets
 from transformers import AutoTokenizer
 
-from models.GPT import GPT, GPTXXXLConfig, GPTLargeConfig
+from models.GPT import GPT, GPTLargeConfig
 from pipeline import Pipeline
 
 import argparse

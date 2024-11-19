@@ -207,7 +207,7 @@ class Engine:
 						continue
 
 				case OperationType.ALL_REDUCE_PARAM_GRADS:
-					block.scale_grads(sum(mb_sizes)) # we also average out the gradients here
+					block.scale_grads(sum(mb_sizes))  # we also average out the gradients here
 					block.all_reduce_param_grads(**op.options)
 
 				case _:

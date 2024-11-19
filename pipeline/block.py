@@ -54,6 +54,7 @@ class PipelineBlock:
 		self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
 
 		# Process groups for collective communications
+		self.pp_group = None
 		self.dp_group = None
 
 		self.metadata = []
@@ -106,7 +107,7 @@ class PipelineBlock:
 		self.compute_time.append(timer.time)
 
 		if torch.cuda.is_available():
-			torch.cuda.synchronize() # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
+			torch.cuda.synchronize()  # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
 
 		if not self.out_metadata:
 			self._register_out_metadata(y)
@@ -157,7 +158,7 @@ class PipelineBlock:
 				act[i].backward(grads[i], retain_graph=(i != len(self.out_metadata) - 1))
 
 		if torch.cuda.is_available():
-			torch.cuda.synchronize() # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
+			torch.cuda.synchronize()  # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
 
 		self.compute_time.append(timer.time)
 
@@ -188,7 +189,9 @@ class PipelineBlock:
 			return sends
 		else:
 			for i in range(len(self.out_metadata)):
-				logger.debug(f"{self} - Sending activation to layer {self.id + 1} on rank {dst} (shape = {activations[i].shape})")
+				logger.debug(
+					f"{self} - Sending activation to layer {self.id + 1} on rank {dst} (shape = {activations[i].shape})"
+				)
 				tensor = activations[i].contiguous()
 				dist.isend(tensor, dst, group=self.pp_group)
 
@@ -296,7 +299,7 @@ class PipelineBlock:
 				recvs.append(dist.P2POp(dist.irecv, buffers[i][1], src, group=self.pp_group))
 			return recvs
 
-		else:	
+		else:
 			logger.debug(
 				f"{self} - Starting to receive gradients with shape {self.out_metadata} from layer {self.id + 1} on rank {src}"
 			)

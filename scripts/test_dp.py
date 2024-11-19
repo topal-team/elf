@@ -127,7 +127,8 @@ class Dummy(Dataset):
 		super().__init__()
 		self.n = n
 		self.data = [
-			torch.zeros(shape_in, device=torch.cuda.current_device(), dtype=dtype_in) + i for i in range(n)
+			torch.zeros(shape_in, device=torch.cuda.current_device(), dtype=dtype_in) + i
+			for i in range(n)
 		]
 		self.targets = [
 			torch.ones(shape_out, device=torch.cuda.current_device(), dtype=dtype_out) for _ in range(n)
@@ -215,7 +216,12 @@ if __name__ == "__main__":
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
 	)
 	parser.add_argument(
-		"--model", "-m", choices=["cnn", "tf", "resnet"], default="tf", required=False, help="model to use"
+		"--model",
+		"-m",
+		choices=["cnn", "tf", "resnet"],
+		default="tf",
+		required=False,
+		help="model to use",
 	)
 	parser.add_argument(
 		"--schedule", "-s", choices=["afab", "1f1b", "hanayo"], default="1f1b", required=False

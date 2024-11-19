@@ -33,7 +33,8 @@ def op_to_str(op):
 			return f"Send to {op.peer}"
 		case dist.irecv:
 			return f"Receive from {op.peer}"
-		
+
+
 def pretty_print_params(n):
 	if n > 1e9:
 		return f"{n/1e9:.1f}B"
@@ -41,7 +42,8 @@ def pretty_print_params(n):
 		return f"{n/1e6:.1f}M"
 	else:
 		return f"{int(n)}"
-	
+
+
 def pretty_print_step(rank, times):
 	total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / (
 		2**30
@@ -304,45 +306,32 @@ class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
 			self.events[key].record(self.stream)
 
 
-def send_model(model, dst):
-	# First send model structure without parameters/buffers
-	state = {}
-	for name, param in model.named_parameters():
-		state[name] = param.data
-		param.data = torch.empty(0) # Clear parameter data temporarily
-	for name, buffer in model.named_buffers():
-		state[name] = buffer.data
-		buffer.data = torch.empty(0) # Clear buffer data temporarily
-		
-	dist.send_object_list([model], dst)
+# TODO: instead of sending full tensors, we could send parameter/buffers metadata only
+# and then construct tensors on the recv side directly
 
-	# Restore parameter/buffer data
-	for name, param in model.named_parameters():
-		param.data = state[name]
-	for name, buffer in model.named_buffers():
-		buffer.data = state[name]
+def send_models(models, dst, group=None):
+	"""
+	Sends a list of models using p2p comms
+	"""
+	# Send using CPU
+	dist.send_object_list(models, dst, group)
 
-	# Send parameters and buffers
-	params = sorted(model.named_parameters(), key=lambda x: x[0])
-	for name, param in params:
-		dist.send(param.data, dst)
-	
-	buffers = sorted(model.named_buffers(), key=lambda x: x[0])
-	for name, buffer in buffers:
-		dist.send(buffer.data, dst)
 
-def recv_model(src):
-	model = [None]
-	dist.recv_object_list(model, src)
-	model = model[0]
+def recv_models(models, src, group=None):
+	"""
+	Receives a list of models using p2p comms
+	"""
+	dist.recv_object_list(models, src, group)
+	for m in models:
+		m.cuda()
 
-	params = sorted(model.named_parameters(), key=lambda x: x[0])
-	for name, param in params:
-		dist.recv(param.data, src)
-	
 
-	buffers = sorted(model.named_buffers(), key=lambda x: x[0])
-	for name, buffer in buffers:
-		dist.recv(buffer.data, src)
-	
-	return model
+def broadcast_models(models, src, group=None):
+	"""
+	Broadcasts a list of models using p2p comms
+	"""
+	dist.broadcast_object_list(models, src, group)
+	for m in models:
+		m.cuda()
+
+	return models

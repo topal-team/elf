@@ -45,7 +45,7 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
 		return env[a.name]
 
 	with subgraph.inserting_before():
-		for i in reversed(inputs): # we are inserting before, so we do in reverse order
+		for i in reversed(inputs):  # we are inserting before, so we do in reverse order
 			node = subgraph.placeholder(i)
 			env[node.name] = node
 
@@ -193,7 +193,7 @@ def extract_graph(model, sample, mode="fx"):
 		raise ValueError(f"Unknown graph extraction mode: {mode}")
 
 
-def partition_graph(model, n, sample, mode="naive"):
+def partition_graph(model, n, sample, partitioner="naive"):
 	"""
 	Splits a graph into n parts of roughly equal time.
 
@@ -203,14 +203,14 @@ def partition_graph(model, n, sample, mode="naive"):
 	:type n: int
 	:param sample: example of inputs to feed to the model (used for profiling)
 	:type sample: Tensor
-	:param mode: Different modes are available:
+	:param partitioner: Different partitioners are available:
 
 	        - naive: does not take into account memory, no constraint on the number of inputs/outputs
 	        - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
 	        - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
 	        - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
 
-	:type mode: str
+	:type partitioner: str
 
 	:raise Exception: if the partition is invalid
 
@@ -241,13 +241,13 @@ def partition_graph(model, n, sample, mode="naive"):
 
 	times, memories = profile_operations(graph, sample)
 
-	if mode == "naive":
+	if partitioner == "naive":
 		parts = split_graph(graph, times, memories, n)
-	elif mode == "constrained":
+	elif partitioner == "constrained":
 		parts = split_graph_constrained(graph, times, memories, n)
-	elif mode == "metis":
+	elif partitioner == "metis":
 		parts = split_graph_metis(graph, times, memories, n)
-	elif mode == "dagP":
+	elif partitioner == "dagP":
 		parts = split_graph_dagP(graph, times, memories, n)
 	else:
 		raise Exception(
