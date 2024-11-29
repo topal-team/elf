@@ -18,7 +18,7 @@ batch_size = 128
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
-mb_size = batch_size // len(placement)
+mb_size = batch_size // (max(placement) + 1)
 
 def get_part(rank):
 	blocks_per_stage = len(model.blocks) // len(placement)

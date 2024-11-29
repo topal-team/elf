@@ -16,7 +16,7 @@ if __name__ == "__main__":
 	dist.init_process_group(backend="nccl")
 
 	model = resnet50()
-	sample = torch.randn((32, 3, 224, 224)).cuda()
+	sample = torch.randn((8, 3, 224, 224)).cuda()
 	model = Pipeline(model, sample)
 	loss_fn = nn.functional.cross_entropy
 	optimizer = torch.optim.Adam(model.parameters())

@@ -92,7 +92,7 @@ if rank == 0:
 	)
 
 placement = list(range(args.pp)) * 2
-sample = torch.randn((batch_size // len(placement), 3, 224, 224))
+sample = torch.randn((batch_size // args.pp, 3, 224, 224))
 pipe = Pipeline(model, sample, placement, schedule="1f1b", dp=args.dp)
 
 # Define loss function and optimizer
@@ -106,9 +106,7 @@ for epoch in range(num_epochs):
 		inputs, labels = inputs.cuda(), labels.cuda()
 
 		optimizer.zero_grad()
-		_, loss = pipe(
-			inputs, labels, loss_fn=nn.functional.cross_entropy, split_size=batch_size // len(placement)
-		)
+		_, loss = pipe(inputs, labels, loss_fn=nn.functional.cross_entropy)
 		optimizer.step()
 		if loss:
 			running_loss += loss.item()

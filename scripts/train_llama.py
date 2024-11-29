@@ -133,7 +133,7 @@ def main():
 		)
 	# placement = list(range(args.pp)) + list(reversed(range(args.pp)))
 	placement = list(range(args.pp))
-	mb_size = args.batch_size // len(placement)
+	mb_size = args.batch_size // args.pp
 	sample = torch.randint(0, 10, (mb_size, args.max_seq_len))
 	pipe = Pipeline(
 		model, sample, placement, partitioner="metis", schedule="1f1b", dp=args.dp, worker=1
