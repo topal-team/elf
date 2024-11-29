@@ -7,7 +7,7 @@ import sys
 import copy
 
 sys.path.append("./")
-from pipeline import Pipeline
+from pipeline import Pipeline, get_sources_targets_sequential
 from argparse import ArgumentParser
 
 import logging
@@ -66,31 +66,13 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 		elif global_rank == placement[-1]:
 			dist.recv(batch, src=placement[0])
 
-	pipe = Pipeline(copy.deepcopy(blocks), batch, placement, partition=False, schedule=scheduler)
+	sources, targets = get_sources_targets_sequential(placement)
+
+	pipe = Pipeline(copy.deepcopy(blocks), batch, placement, partitioner=False, schedule=scheduler, sources=sources, targets=targets)
 	output, pipeloss = pipe(batch, target, F.mse_loss, split_size)
 	# we shouldn't access directly the internal modules but it's for the purpose of testing
 	blocks = pipe.blocks
 	logger.debug(f"[Rank {global_rank}] : result = {output}")
-
-	for b in blocks:
-		assert (
-			len(b.act_to_keep) == 0
-		), f"{b} - There should be no activation left, {len(b.activations)} still in queue"
-		assert (
-			len(b.inputs_to_forward) == 0
-		), f"{b} - There should be no input left to compute, {len(b.inputs)} still in queue"
-		assert (
-			len(b.act_to_send) == 0
-		), f"{b} - There should be no activation left to send, {len(b.act_to_send)} still in queue"
-		assert (
-			len(b.grads_to_backward) == 0
-		), f"{b} - There should be no gradients left, {len(b.grads)} still in queue"
-		assert (
-			len(b.inputs_to_keep) == 0
-		), f"{b} - There should be no inputs left to backward, {len(b.inputs_to_keep)} still in queue"
-		assert (
-			len(b.grads_to_send) == 0
-		), f"{b} - There should be no grads left to send, {len(b.grads_to_send)} still in queue"
 
 	# Last device has the result, we reconstruct the full model on this one for simplicity
 	if global_rank == placement[-1]:

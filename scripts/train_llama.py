@@ -136,7 +136,7 @@ def main():
 	mb_size = args.batch_size // len(placement)
 	sample = torch.randint(0, 10, (mb_size, args.max_seq_len))
 	pipe = Pipeline(
-		model, sample, placement, partition="metis", schedule="1f1b", dp=args.dp, worker=1
+		model, sample, placement, partitioner="metis", schedule="1f1b", dp=args.dp, worker=1
 	)
 
 	# Initialize optimizer

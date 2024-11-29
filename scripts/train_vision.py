@@ -93,7 +93,7 @@ if rank == 0:
 
 placement = list(range(args.pp)) * 2
 sample = torch.randn((batch_size // len(placement), 3, 224, 224))
-pipe = Pipeline(model, sample, placement, schedule="1f1b", partition="metis", dp=args.dp)
+pipe = Pipeline(model, sample, placement, schedule="1f1b", dp=args.dp)
 
 # Define loss function and optimizer
 optimizer = optim.Adam(pipe.parameters(), lr=learning_rate)

@@ -10,7 +10,7 @@ import subprocess
 
 # Some edges should not be part of the cut; for instance values that are not torch.Tensor are a problem to send/recv for pipelining.
 # To avoid that we put a soft constraint by giving them a huge communication cost.
-NON_TENSOR = 2 << 40
+NON_TENSOR = 2 << 24
 
 
 class Node:
@@ -115,8 +115,9 @@ def convert_fx(module, times, memories):
 	# Map memories into [1, 100] to have consistent memory sizes
 	tensor_memories = list(filter(lambda x: x != 0, memories.values()))
 	min_memory = min(tensor_memories)
-	max_memory = max(tensor_memories)
+	max_memory = max(mem for mem in tensor_memories if mem != NON_TENSOR)
 	memory_range = max_memory - min_memory
+	memory_range = memory_range if memory_range != 0 else 1
 	scaled_memories = {
 		name: to_weight(1 + 99 * ((memory - min_memory) / memory_range))
 		if memory != NON_TENSOR
@@ -186,6 +187,7 @@ def write_metis(graph):
 	file.write(f"{n} {m} {fmt} {ncon}\n")
 	for node in graph.values():
 		file.write(node.to_metis_line() + "\n")
+
 	return file
 
 
@@ -211,8 +213,6 @@ def read_metis(graph, file):
 
 	for line in range(len(lines)):
 		i = lines[line]
-		# WE NEED TO HAVE CONTIGUOUS PARTITIONS
-		# METIS does not enforce that, so we have to fix it by ignoring some attributions
 		if i not in mapping:
 			parts.append([])
 			mapping.append(i)
@@ -245,10 +245,11 @@ def execute_metis(file, n):
 			file.name,
 			str(n),
 			"-objtype=vol",
-			"-contig",
+			"-contig",  # avoid back and forths
+			"-minconn",  # avoid skip connections
 			"-ufactor=500",
-			"-ncuts=2000",
-			"-niter=2000",
+			"-ncuts=200",
+			"-niter=200",
 		],
 		stdout=subprocess.DEVNULL,
 	)  # Execute gpmetis

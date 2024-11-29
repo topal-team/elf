@@ -8,7 +8,7 @@ import torch.distributed as dist
 from collections import deque
 import time
 
-from .schedule import OperationType
+from .scheduling import OperationType, OpOptions
 from .utils import Timer, op_to_str
 
 import logging
@@ -25,7 +25,7 @@ def _fake_p2p(data):
 	:return: Tuple with fake communication buffers
 	:rtype: Tuple[Tensor]
 	"""
-	return [[None, value.detach()] for value in data]
+	return [None, data.detach()]
 
 
 class Engine:
@@ -44,7 +44,15 @@ class Engine:
 		for b in self.blocks:
 			assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
 		self.id_to_block = {b.id: b for b in self.blocks}
-		self.comms = []
+		self.comms = {}
+
+	def _add_comm(self, comm, id_):
+		if not comm:
+			return
+
+		if id_ not in self.comms:
+			self.comms[id_] = []
+		self.comms[id_].extend(comm)
 
 	def _run_comms(self):
 		"""
@@ -52,20 +60,33 @@ class Engine:
 		Internal function, this should not be used by the user
 		"""
 		if len(self.comms) == 0:
-			return 0
+			return
 
-		stream = torch.cuda.Stream()
-		with torch.cuda.stream(stream):
-			works = dist.batch_isend_irecv(self.comms)
-			logger.debug(
-				f"Rank {self.rank} - Running batched communications {[op_to_str(c) for c in self.comms]}"
-			)
-			for w in works:
-				w.wait()
+		for id_, comms in self.comms.items():
+			# We only run batched communications if we have both send and receive
+			if any(c.op.__name__ == "isend" for c in comms) and any(
+				c.op.__name__ == "irecv" for c in comms
+			):
+				stream = torch.cuda.Stream()
+				with torch.cuda.stream(stream):
+					if len(comms) > 1:
+						logger.debug(
+							f"Rank {self.rank} - Running batched communications with id {id_}: {[op_to_str(c) for c in comms]}"
+						)
+					works = dist.batch_isend_irecv(comms)
+					for w in works:
+						w.wait()
 
-		self.comms.clear()
-		stream.synchronize()
+				stream.synchronize()  # maybe we could enqueue everything and then synchronize every stream?
+				self.comms[id_] = []
+
 		logger.debug(f"Rank {self.rank} - Finished batched communications")
+
+		# Clean up
+		keys = list(self.comms.keys())
+		for k in keys:
+			if len(self.comms[k]) == 0:
+				del self.comms[k]
 
 	def train_step(self, batch, target, loss_fn, schedule, mb_sizes, profile=False):
 		"""
@@ -127,7 +148,7 @@ class Engine:
 				torch.cuda.synchronize()
 				warmup_start = time.time()
 
-			# if not op.options.get("batched_comm", False):
+			# This will synchronize ! We want to enqueue all possible communications
 			if op.op in [OperationType.FORWARD, OperationType.BACKWARD]:
 				self._run_comms()
 
@@ -148,39 +169,38 @@ class Engine:
 					block.backward(**op.options)
 
 				case OperationType.SEND_FORWARD:
-					if op.options.get("dst", block.next) == block.rank:
-						next_block = self.id_to_block.get(op.block_id + 1)
-						# The next block is on the same device ; we bypass p2p comms
-						acts = block.act_to_send.popleft()
-						next_block.inputs_to_forward.append(_fake_p2p(acts))
+					if op.options.get("dst") in self.id_to_block:
+						# The destination block is on the same device ; we bypass p2p comms
+						dst_block = self.id_to_block.get(op.options.get("dst"))
+						_transfer_forward(block, dst_block)
 
-					if comm := block.send_forward(**op.options):
-						self.comms.extend(comm)
+					comm = block.send_forward(**op.options)
+					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.SEND_BACKWARD:
-					if op.options.get("dst", block.previous) == block.rank:
-						# The previous block is on the same device ; we bypass p2p comms
-						prev_block = self.id_to_block.get(op.block_id - 1)
-						grads = block.grads_to_send.popleft()
-						prev_block.grads_to_backward.append(_fake_p2p(grads))
+					if op.options.get("dst") in self.id_to_block:
+						# The destination block is on the same device ; we bypass p2p comms
+						dst_block = self.id_to_block.get(op.options.get("dst"))
+						_transfer_backward(block, dst_block)
 
-					if comm := block.send_backward(**op.options):
-						self.comms.extend(comm)
+					comm = block.send_backward(**op.options)
+					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.RECV_FORWARD:
-					if block.previous is None:
+					if block.is_first:
 						microbatch = next(microbatches)
-						block.inputs_to_forward.append(_fake_p2p(microbatch))
+						for mb, var in zip(microbatch, block.inputs):
+							var.waiting.append(_fake_p2p(mb))
 
-					if comm := block.recv_forward(mb_sizes[op.mb_id], **op.options):
-						self.comms.extend(comm)
+					comm = block.recv_forward(mb_sizes[op.mb_id], **op.options)
+					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.RECV_BACKWARD:
-					if comm := block.recv_backward(mb_sizes[op.mb_id], **op.options):
-						self.comms.extend(comm)
+					comm = block.recv_backward(mb_sizes[op.mb_id], **op.options)
+					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.LOSS_FORWARD:
-					if block.next is None:
+					if block.is_last:
 						assert op.mb_id < len(
 							result
 						), f"Loss forward for mb {op.mb_id} but only {len(result)} results computed"
@@ -193,7 +213,7 @@ class Engine:
 						continue
 
 				case OperationType.LOSS_BACKWARD:
-					if block.next is None:
+					if block.is_last:
 						assert op.mb_id < len(
 							losses
 						), f"Loss backward for mb {op.mb_id} but only {len(losses)} losses computed"
@@ -201,7 +221,9 @@ class Engine:
 						with Timer() as timer:
 							grads = grad_fn()
 						block.compute_time.append(timer.time)
-						block.grads_to_backward.append(_fake_p2p(grads))
+						for grad, var in zip(grads, block.outputs):
+							for dst in var:  # should be only one destination
+								dst.waiting.append(_fake_p2p(grad))
 					else:
 						logger.warning(f"Tried to compute loss backward on a non-last block {block}")
 						continue
@@ -274,3 +296,34 @@ def compute_loss(block, output, target, loss_fn):
 		return (output.grad.data,)
 
 	return loss.detach().requires_grad_(False), grad_fn
+
+
+def _transfer_forward(block, dst_block):
+	"""
+	P2P communications bypass for same-rank blocks that need to communicate
+
+	:param block: source block
+	:type block: PipelineBlock
+	:param dst_block: target block
+	:type dst_block: PipelineBlock
+	"""
+	# We match by order and not by name because the names can be different with pre-partitioned models
+	all_to_send = [dst for var in block.outputs for dst in var if dst.peer == dst_block.id]
+	all_to_recv = [var for var in dst_block.inputs if var.peer == block.id]
+	for src, dst in zip(all_to_send, all_to_recv):
+		dst.waiting.append(_fake_p2p(src.finished.popleft()))
+
+
+def _transfer_backward(block, dst_block):
+	"""
+	P2P communications bypass for same-rank blocks that need to communicate
+
+	:param block: source block
+	:type block: PipelineBlock
+	:param dst_block: target block
+	:type dst_block: PipelineBlock
+	"""
+	all_to_send = [var for var in block.inputs if var.peer == dst_block.id]
+	all_to_recv = [src for var in dst_block.outputs for src in var if src.peer == block.id]
+	for src, dst in zip(all_to_send, all_to_recv):
+		dst.waiting.append(_fake_p2p(src.finished.popleft()))

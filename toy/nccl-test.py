@@ -10,6 +10,7 @@ def init_dist():
 	dist.init_process_group(backend="nccl", timeout=timedelta(seconds=30))
 	torch.cuda.set_device(local_rank)
 	ws = dist.get_world_size()
+	dist.barrier()  # init all communicators
 	return local_rank, rank, ws
 
 
@@ -95,10 +96,72 @@ def run_multinode_test(local_rank, rank, ws):
 	dist.destroy_process_group()
 
 
+def run_batched_test(local_rank, rank, ws):
+	x = torch.randn(10, device=local_rank)
+	y = torch.randn_like(x)
+
+	print(f"Rank {rank} - starting")
+	if rank == 0:
+		op1 = dist.P2POp(dist.isend, x, peer=1)
+		op2 = dist.P2POp(dist.irecv, y, peer=1)
+		works = dist.batch_isend_irecv([op1, op2])
+		for w in works:
+			w.wait()
+	elif rank == 1:
+		ops = [dist.P2POp(dist.isend, x, peer=0), dist.P2POp(dist.irecv, y, peer=0)]
+		works = dist.batch_isend_irecv(ops)
+		for w in works:
+			w.wait()
+	else:
+		return
+
+	torch.cuda.synchronize()
+
+	print(f"Rank {rank} - finished")
+	dist.destroy_process_group()
+
+
+def deadlock(local_rank, rank, ws):
+	x = torch.randn(10000, 10000, device=local_rank)
+	y = torch.randn_like(x)
+
+	if rank == 0:
+		wrecv = dist.irecv(y, src=1)
+		wsend = dist.isend(x, dst=1)
+	if rank == 1:
+		wsend = dist.isend(y, dst=0)
+		wrecv = dist.irecv(x, src=0)
+
+	wrecv.wait()
+	wsend.wait()
+	torch.cuda.synchronize()
+
+	print(f"Rank {rank} - Finished")
+	dist.destroy_process_group()
+
+
+def multiple_sends(local_rank, rank, ws):
+	x = torch.randn(10, device=local_rank)
+	if rank == 0:
+		w1 = dist.isend(x, dst=1)
+		w2 = dist.isend(x, dst=2)
+		w1.wait()
+		w2.wait()
+	if rank == 1:
+		dist.irecv(x, src=0).wait()
+
+	torch.cuda.synchronize()
+	print(f"Rank {rank} - Finished")
+	dist.destroy_process_group()
+
+
 if __name__ == "__main__":
 	local_rank, rank, ws = init_dist()
 	# run_p2p(local_rank, rank, ws)
 	# run_collective(local_rank, rank, ws)
 	# run_gather_object(local_rank, rank, ws)
 	# run_p2p_object(local_rank, rank, ws)
-	run_multinode_test(local_rank, rank, ws)
+	# run_multinode_test(local_rank, rank, ws)
+	# run_batched_test(local_rank, rank, ws)
+	# deadlock(local_rank, rank, ws)
+	multiple_sends(local_rank, rank, ws)

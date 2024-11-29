@@ -44,8 +44,8 @@ def compare_partitioners(model, sample):
 	)
 
 	for name, partitioner in zip(
-		["default", "constrained", "metis", "dagP"],
-		[split_graph, split_graph_constrained, split_graph_metis, split_graph_dagP],
+		["default", "constrained", "dfs", "metis", "dagP"],
+		[split_graph, split_graph_constrained, split_graph_dfs, split_graph_metis, split_graph_dagP],
 	):
 		print(f"-- {name} --")
 		with TimerCPU() as timer:
@@ -55,8 +55,10 @@ def compare_partitioners(model, sample):
 			parts.append([])
 
 		inputs, outputs = get_inputs_outputs(parts)
+		sources, targets = get_sources_targets(inputs, outputs)
+		signatures = [Signature(inputs[i], outputs[i], sources[i], targets[i]) for i in range(n)]
 		for p in inputs:
-			print(f"Part {p} signature : {inputs[p]} -> {outputs[p]}")
+			print(f"Part {p} signature : {signatures[p]}")
 
 		estimated_times = [sum(np.median(times[node.name]) for node in p) for p in parts]
 		memories_used = [sum([memories[o] for o in out]) / (2 << 20) for out in outputs.values()]
@@ -68,14 +70,14 @@ def compare_partitioners(model, sample):
 
 		real_times = []
 		sample = sample.to(device)
-		x = {i: sample for i in inputs[0]}
+		x = (sample,) if not isinstance(sample, tuple) else sample
 		for i, s in enumerate(blocks):
 			s = s.to(device)
 			with Timer() as timer:
 				with torch.no_grad():
-					x = s(**x)
+					x = s(*x)
 			real_times.append(timer.time())
-			x = {y: z for y, z in x.items() if i + 1 == len(inputs) or y in inputs[i + 1]}
+			# x = {y: z for y, z in x.items() if i + 1 == len(inputs) or y in inputs[i + 1]}
 			s = s.to("cpu", non_blocking=True)
 
 		print(f'\tEstimated times : {["%.3fs" % t for t in estimated_times]}')

@@ -72,7 +72,21 @@ def execute_dagP(file, n):
 	file.flush()  # Ensure all data is written before executing
 	file.seek(0)  # Reset file pointer to the beginning for reading in subprocess
 	subprocess.run(
-		["rMLGP", file.name, str(n), "--obj", "1", "--write_parts", "1", "--print", "0"],
+		[
+			"rMLGP",
+			file.name,
+			str(n),
+			"--obj",
+			"1",
+			"--write_parts",
+			"1",
+			"--print",
+			"0",
+			"--ratio",
+			"1.2",
+			"--runs",
+			"10",
+		],
 		stdout=subprocess.DEVNULL,
 	)
 	os.remove(f"{file.name}.bin")

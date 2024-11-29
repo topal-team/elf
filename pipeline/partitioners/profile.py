@@ -2,11 +2,12 @@
 Utils for operation profiling
 """
 
+import copy
 import torch
 import numpy as np
 from pipeline.utils import Timer
 
-DONT_CUT_HERE = 2 << 40
+DONT_CUT_HERE = 2 << 24
 
 
 class Profiler(torch.fx.Interpreter):
@@ -147,16 +148,17 @@ def profile_operations(graph_module, input_sample, niter=10):
 	assert ninputs == len(input_sample), f"Expected {ninputs} inputs, got {len(input_sample)}"
 
 	with torch.no_grad():
-		profiler.boxed_run(input_sample)
+		profiler.boxed_run(copy.copy(input_sample))  # no deepcopy to avoid copying tensors
 
 	# Restore original buffers
 	for name, buffer in graph_module.named_buffers():
 		buffer.data.copy_(original_buffers[name])
 
 	# With boxed runs placeholders bypass the profiler, we need to manually add them afterwards
+	inputs = iter(input_sample)
 	for node in graph_module.graph.nodes:
 		if node.op == "placeholder":
-			profiler.memories[node.name] = get_memory(input_sample)  # TODO: handle multiple inputs
+			profiler.memories[node.name] = get_memory(next(inputs))  # TODO: handle multiple inputs
 			profiler.times[node.name] = 0
 		if node.op == "output":
 			profiler.times[node.name] = 0

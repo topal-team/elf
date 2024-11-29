@@ -4,29 +4,49 @@ A schedule is a list of operations (see Operation) that will be executed in orde
 Every rank should generate the entire schedule for all ranks, in order to detect and fix cycles/deadlocks.
 """
 
-from .task_graph import OperationType, Operation
+from .scheduling import OperationType, Operation
 import logging
 
-logger = logging.getLogger("schedule")
+logger = logging.getLogger("schedules")
 
 
-def _add_forward_pass(schedule, placement, block_id, mb_id, rank, options):
-	for op_type in [OperationType.RECV_FORWARD, OperationType.FORWARD, OperationType.SEND_FORWARD]:
-		schedule.append(Operation(block_id, mb_id, op_type, rank, **options))
+def _add_forward_pass(schedule, placement, block_id, mb_id, rank, signature, options):
+	sources = sorted(signature.get_all_sources(), reverse=True)
+	destinations = sorted(signature.get_all_targets())
+	for src in sources:
+		schedule.append(
+			Operation(block_id, mb_id, OperationType.RECV_FORWARD, rank, src=src, **options)
+		)
+	schedule.append(Operation(block_id, mb_id, OperationType.FORWARD, rank, **options))
+	for dst in destinations:
+		schedule.append(
+			Operation(block_id, mb_id, OperationType.SEND_FORWARD, rank, dst=dst, **options)
+		)
 
 	if block_id == len(placement) - 1:
 		schedule.append(Operation(block_id, mb_id, OperationType.LOSS_FORWARD, rank, **options))
 
 
-def _add_backward_pass(schedule, placement, block_id, mb_id, rank, options):
+def _add_backward_pass(schedule, placement, block_id, mb_id, rank, signature, options):
+	# Reverse order, see above
+	sources = sorted(signature.get_all_sources(), reverse=True)
+	destinations = sorted(signature.get_all_targets())
 	if block_id == len(placement) - 1:
 		schedule.append(Operation(block_id, mb_id, OperationType.LOSS_BACKWARD, rank, **options))
 
-	for op_type in [OperationType.RECV_BACKWARD, OperationType.BACKWARD, OperationType.SEND_BACKWARD]:
-		schedule.append(Operation(block_id, mb_id, op_type, rank, **options))
+	# backward swaps the sources and destinations
+	for src in destinations:
+		schedule.append(
+			Operation(block_id, mb_id, OperationType.RECV_BACKWARD, rank, src=src, **options)
+		)
+	schedule.append(Operation(block_id, mb_id, OperationType.BACKWARD, rank, **options))
+	for dst in sources:
+		schedule.append(
+			Operation(block_id, mb_id, OperationType.SEND_BACKWARD, rank, dst=dst, **options)
+		)
 
 
-def generate_afab_schedule(placement, n_micro_batches, **options):
+def generate_afab_schedule(placement, n_micro_batches, signatures, **options):
 	"""
 	All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
 
@@ -47,11 +67,11 @@ def generate_afab_schedule(placement, n_micro_batches, **options):
 		# All forward
 		for i in range(n_micro_batches):
 			for id_ in ids:
-				_add_forward_pass(schedule, placement, id_, i, rank, options)
+				_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_], options)
 		# All backward
 		for i in range(n_micro_batches):
 			for id_ in reversed(ids):
-				_add_backward_pass(schedule, placement, id_, i, rank, options)
+				_add_backward_pass(schedule, placement, id_, i, rank, signatures[id_], options)
 
 		for id_ in ids:
 			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank, **options))
@@ -59,7 +79,7 @@ def generate_afab_schedule(placement, n_micro_batches, **options):
 	return schedule
 
 
-def generate_1f1b_schedule(placement, n_micro_batches, **options):
+def generate_1f1b_schedule(placement, n_micro_batches, signatures, **options):
 	"""
 	One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
 
@@ -86,7 +106,8 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 		# Warmup phase : each device can compute until the micro batch forward is finished (n_stages), but it can only start after it was forwarded through all the previous layers (rank)
 		while i < (stages_per_device * n_micro_batches) and i < (n_stages - rank):
 			i += 1
-			_add_forward_pass(schedule, placement, b_f * n_devices + rank, fwds[b_f], rank, options)
+			id_ = b_f * n_devices + rank
+			_add_forward_pass(schedule, placement, id_, fwds[b_f], rank, signatures[id_], options)
 			fwds[b_f] += 1
 
 			# each layer has time to compute n_devices micro batches before work arrives for the next layer
@@ -102,14 +123,16 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 		# Steady state
 		while i < (stages_per_device * n_micro_batches):
 			i += 1
-			_add_backward_pass(schedule, placement, b_b * n_devices + rank, bwds[b_b], rank, options)
+			id_ = b_b * n_devices + rank
+			_add_backward_pass(schedule, placement, id_, bwds[b_b], rank, signatures[id_], options)
 			bwds[b_b] += 1
 
 			# Same as before, except that we can compute 2x less micro batches because half of the time is spent doing forwards
 			if (i - state) % (n_devices // 2) == 0 or (i - state) % n_micro_batches == 0:
 				b_b = (b_b - 1) % stages_per_device
 
-			_add_forward_pass(schedule, placement, b_f * n_devices + rank, fwds[b_f], rank, options)
+			id_ = b_f * n_devices + rank
+			_add_forward_pass(schedule, placement, id_, fwds[b_f], rank, signatures[id_], options)
 			fwds[b_f] += 1
 
 			if (i >= n_stages and i % (n_devices // 2) == 0) or (i % n_micro_batches) == 0:
@@ -119,7 +142,8 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 			stages_per_device * n_micro_batches * 2 - (stages_per_device * n_micro_batches - state)
 		):
 			i += 1
-			_add_backward_pass(schedule, placement, b_b * n_devices + rank, bwds[b_b], rank, options)
+			id_ = b_b * n_devices + rank
+			_add_backward_pass(schedule, placement, id_, bwds[b_b], rank, signatures[id_], options)
 			bwds[b_b] += 1
 
 			# Finish all backwards
@@ -136,7 +160,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, **options):
 	return schedule
 
 
-def generate_hanayo_schedule(placement, n_micro_batches, **options):
+def generate_hanayo_schedule(placement, n_micro_batches, signatures, **options):
 	"""
 	Hanayo schedule as in https://dl.acm.org/doi/10.1145/3581784.3607073
 
@@ -163,47 +187,38 @@ def generate_hanayo_schedule(placement, n_micro_batches, **options):
 	for rank in range(n_devices):
 		done[rank] = min(n_devices - rank, n_micro_batches)
 		for i in range(done[rank]):
-			_add_forward_pass(schedule, placement, ids[rank][0], i, rank, options)
+			id_ = ids[rank][0]
+			_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_], options)
 
 	for w in range(n_waves):
 		for mb in range(n_micro_batches):
 			for rank in reversed(range(n_devices)):
-				_add_forward_pass(schedule, placement, ids[rank][2 * w + 1], mb, rank, options)
+				id_ = ids[rank][2 * w + 1]
+				_add_forward_pass(schedule, placement, id_, mb, rank, signatures[id_], options)
 
 				if done[rank] < n_micro_batches * n_waves:
+					id_ = ids[rank][2 * (done[rank] // n_micro_batches)]
 					_add_forward_pass(
-						schedule,
-						placement,
-						ids[rank][2 * (done[rank] // n_micro_batches)],
-						done[rank] % n_micro_batches,
-						rank,
-						options,
+						schedule, placement, id_, done[rank] % n_micro_batches, rank, signatures[id_], options
 					)
 					done[rank] += 1
 				else:
+					id_ = ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)]
 					_add_backward_pass(
-						schedule,
-						placement,
-						ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)],
-						enod[rank] % n_micro_batches,
-						rank,
-						options,
+						schedule, placement, id_, enod[rank] % n_micro_batches, rank, signatures[id_], options
 					)
 					enod[rank] += 1
 
 	for w in range(n_waves):
 		for mb in range(n_micro_batches):
 			for rank in reversed(range(n_devices)):
-				_add_backward_pass(schedule, placement, ids[rank][-2 * (w + 1)], mb, rank, options)
+				id_ = ids[rank][-2 * (w + 1)]
+				_add_backward_pass(schedule, placement, id_, mb, rank, signatures[id_], options)
 
 				if enod[rank] < n_micro_batches * n_waves:
+					id_ = ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)]
 					_add_backward_pass(
-						schedule,
-						placement,
-						ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)],
-						enod[rank] % n_micro_batches,
-						rank,
-						options,
+						schedule, placement, id_, enod[rank] % n_micro_batches, rank, signatures[id_], options
 					)
 					enod[rank] += 1
 

@@ -3,14 +3,15 @@ Pipeline API and setup
 """
 
 import os
+from pipeline.partitioners.utils import Signature
 import torch
 import shutil
 import torch.distributed as dist
 from .block import PipelineBlock
-from .schedule import *
+from .schedules import *
 from .engine import Engine
 from .utils import *
-from .task_graph import graph_from_schedule, find_cycles, fix_cycle
+from .scheduling import mark_batched_comms
 from .partitioners import partition_graph
 
 import logging
@@ -24,7 +25,7 @@ class Pipeline:
 	"""
 
 	def __init__(
-		self, model, sample, placement="auto", partitioner="metis", schedule="afab", dp=1, worker=0
+		self, model, sample, placement="auto", partitioner="metis", schedule="1f1b", dp=1, worker=0, sources = None, targets = None
 	):
 		"""
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
@@ -35,10 +36,16 @@ class Pipeline:
 		:type placement: List[int] or str
 		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
 		:type partitioner: boolean or str
-		:param schedule: pipeline algorithm to use. currently supported : GPipe ("afab") (default), PipeDream ("1f1b"), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
+		:param schedule: pipeline algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b") (default), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
 		:type schedule: str or function(List[int], int, **kwargs) -> List[Operation]
 		:param dp: number of data parallel processes to use.
 		:type dp: Optional[int]
+		:param worker: rank of the process that will profile the model and partition it
+		:type worker: int
+		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned.
+		:type sources: List[Dict[str, int]]
+		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned.
+		:type targets: List[Dict[str, List[int]]]
 		"""
 		if not dist.is_initialized() or "RANK" not in os.environ.keys():
 			logger.warning(
@@ -63,17 +70,17 @@ class Pipeline:
 		self._init_process_groups()  # sets pp_group and dp_groups
 
 		self.placement = placement
-		parts = self._partition_model(model, partitioner, sample, worker)
-		self.blocks = self._create_pipeline(parts)
+		parts, signatures = self._partition_model(model, partitioner, sample, worker, sources, targets)
+		self.blocks = self._create_pipeline(parts, signatures)
+		self.signatures = signatures
 		self.scheduler = self._get_scheduler(schedule)
 		self.engine = Engine(self.blocks)
 
 		# Used to avoid re-generating schedule every time
 		self.schedule = []
-		self.last_options = {}
 		self.last_nmb = 0
 
-	def __call__(self, batch, target, loss_fn, split_size=0, profile=False, **options):
+	def __call__(self, batch, target, loss_fn, split_size=0, profile=False):
 		"""
 		Execute the schedule on a batch of data
 
@@ -102,11 +109,10 @@ class Pipeline:
 		mb_sizes = self._get_mb_sizes(split_size, batch)
 		n_micro_batches = len(mb_sizes)
 
-		if n_micro_batches != self.last_nmb or options != self.last_options:
+		if n_micro_batches != self.last_nmb:
 			# We have to recompute the schedule
-			self._generate_schedule(n_micro_batches, options)
+			self._generate_schedule(n_micro_batches)
 
-			self.last_options = options
 			self.last_nmb = n_micro_batches
 
 		# Execute the schedule
@@ -116,8 +122,11 @@ class Pipeline:
 
 		# First and last block have some remaining tensors
 		for block in self.blocks:
-			block.grads_to_send.clear()
-			block.act_to_send.clear()
+			for var in block.inputs:
+				var.finished.clear()
+			for var in block.outputs:
+				for dst in var:
+					dst.finished.clear()
 
 		self.times = times
 
@@ -187,7 +196,7 @@ class Pipeline:
 		Save the model's state dictionary to a file.
 
 		.. warning::
-			This method should not be called when the pipeline was initialized with `partition=False`.
+			This method should not be called when the pipeline was initialized with `partitioner=False`.
 
 		:param path: The file path where the model state will be saved.
 		:type path: str
@@ -255,6 +264,8 @@ class Pipeline:
 		return mb_sizes
 
 	def _get_scheduler(self, schedule):
+		if not isinstance(schedule, str):
+			return schedule
 		match schedule.lower():
 			case "afab":
 				return generate_afab_schedule
@@ -263,9 +274,9 @@ class Pipeline:
 			case "hanayo":
 				return generate_hanayo_schedule
 			case _:
-				return schedule
+				raise Exception(f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo]")
 
-	def _generate_schedule(self, n_micro_batches, options):
+	def _generate_schedule(self, n_micro_batches):
 		"""
 		Generate a schedule for one execution.
 
@@ -276,16 +287,9 @@ class Pipeline:
 		:return: Generated schedule
 		:rtype: List[Operation]
 		"""
-		schedule = self.scheduler(self.placement, n_micro_batches, **options)
+		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
 
-		# Construct graph, detech cycle and add communication batching to fix them
-		cycles = find_cycles(graph_from_schedule(schedule))
-		if cycles and dist.get_rank() == 0:
-			logger.warning("Found potential deadlocks in the schedule ! Fixing them.")
-			for c in cycles:
-				logger.debug(f"Cycle : {c}")
-		for c in cycles:
-			fix_cycle(c)
+		mark_batched_comms(schedule, self.placement)
 
 		# Remove all operations that are not ours
 		ids = list(
@@ -293,30 +297,40 @@ class Pipeline:
 		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
 
-	def _partition_model(self, model, partitioner, sample, worker):
+	def _partition_model(self, model, partitioner, sample, worker, sources, targets):
 		"""
-		Either partitions the model, or makes sure it's already partitioned correctly
+		Either partitions the model, or makes sure it's already partitioned
 		"""
 		if isinstance(partitioner, str):
 			try:
-				parts = self._shared_partition(model, sample, partitioner, worker=worker)
+				parts, signatures = self._shared_partition(model, sample, partitioner, worker=worker)
 			except Exception as e:
 				logger.error(
-					"Error partitioning the model. This probably means that your model uses features either not supported by torch.fx/torch.export, or by this library (such as skip connections). If the error persists, consider using a pre-partitioned model"
+					"Error partitioning the model. This can be due to your model using features either not supported by torch.fx/torch.export, or by this library."
 				)
 				raise e
 		elif not partitioner:
 			# Model is already the right part, just make sure it's a list
 			if isinstance(model, torch.nn.Module):
 				parts = [model]
+			else:
+				parts = model
+
+			assert sources is not None and targets is not None, "Sources and targets must be provided when using pre-partitioned model"
+			signatures = []
+			for i in range(len(self.placement)):
+				inputs = sorted(list(sources[i].keys()))
+				outputs = sorted(list(targets[i].keys()))
+				signatures.append(Signature(inputs, outputs, [sources[i][j] for j in inputs], [targets[i][j] for j in outputs]))
+
 		else:
 			raise Exception(
 				"Partition strategy should be either False when using pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
 			)
 
-		return parts
+		return parts, signatures
 
-	def _create_pipeline(self, parts):
+	def _create_pipeline(self, parts, signatures):
 		"""
 		Transforms a list of layers placed on different devices to a working pipeline
 
@@ -334,11 +348,13 @@ class Pipeline:
 		ids = [i for i in range(len(placement)) if placement[i] == rank]
 		blocks = []
 		for i in range(len(parts)):
-			new_block = PipelineBlock(parts[i], ids[i], placement)
-			logger.debug(f"{new_block.previous} -> {new_block} -> {new_block.next}")
-			new_block.pp_group = self.pp_group
-			new_block.dp_group = self.dp_groups[ids[i] % self.pp] if self.dp > 1 else None
+			dp_group = self.dp_groups[ids[i] % self.pp] if self.dp > 1 else None
+			new_block = PipelineBlock(
+				parts[i], ids[i], placement, signatures[ids[i]], pp_group=self.pp_group, dp_group=dp_group
+			)
 			blocks.append(new_block)
+
+		dist.barrier(self.pp_group)  # init communicators for this process group with a collective
 
 		return blocks
 
@@ -394,13 +410,15 @@ class Pipeline:
 		rank = dist.get_rank()
 
 		# Rank 'worker' profiles & partition the graph, then shares it to everyone
-		# TODO: what if devices are heterogenous ? how to profile correctly ?
 		n_blocks = self.placement.count(rank % self.pp)
 		blocks = [None for _ in range(n_blocks)]
+		signatures = [None for _ in range(len(self.placement))]
 		if rank == worker:
 			partitioner = self._check_for_partitioner(partitioner)
 
-			parts = partition_graph(model, len(self.placement), sample, partitioner=partitioner)
+			parts, signatures = partition_graph(
+				model, len(self.placement), sample, partitioner=partitioner
+			)
 			for d in range(self.pp):
 				blocks_on_d = [parts[i] for i in range(len(parts)) if self.placement[i] == d]
 				if d == worker:
@@ -408,23 +426,25 @@ class Pipeline:
 					for block in blocks:
 						block.cuda()
 				else:
-					logger.debug(f"Rank {rank} - Sending {len(blocks_on_d)} blocks to {d}")
 					send_models(blocks_on_d, dst=d, group=self.pp_group)
+					dist.send_object_list(signatures, dst=d, group=self.pp_group)
 
 		elif rank < self.pp:
 			# First pipeline share to their DP replicas
-			logger.debug(f"Rank {rank} - Receiving {len(blocks)} blocks from {worker}")
 			recv_models(blocks, src=worker, group=self.pp_group)
+			dist.recv_object_list(signatures, src=worker, group=self.pp_group)
+
 			torch.cuda.synchronize()
 
 		if self.dp > 1:
-			logger.debug(f"Rank {rank} - Broadcasting {len(blocks)} blocks with src {rank % self.pp}")
-			broadcast_models(blocks, src=rank % self.pp, group=self.dp_groups[rank % self.pp])
+			r = rank % self.pp
+			broadcast_models(blocks, src=r, group=self.dp_groups[r])
+			dist.broadcast_object_list(signatures, src=r, group=self.dp_groups[r])
 			torch.cuda.synchronize()
 
 		logger.debug(f"Rank {rank} has {len(blocks)} block" + ("s" if len(blocks) > 1 else ""))
 
-		return blocks
+		return blocks, signatures
 
 	def _check_for_partitioner(self, partitioner):
 		assert partitioner in [
@@ -444,3 +464,20 @@ class Pipeline:
 				return self._check_for_partitioner("metis")
 
 		return partitioner
+
+def get_sources_targets_sequential(placement):
+	"""
+	Generates sources and targets for a fully sequential model (no skip connections), with one input and one output per stage.
+
+	:param placement: placement of the model blocks on gpus
+	:type placement: List[int]
+	:return: Sources and targets for each stage
+	:rtype: Tuple[Dict[int, Dict[str, int]], Dict[int, Dict[str, List[int]]]]
+	"""
+	sources = {}
+	targets = {}
+	for i in range(len(placement)):
+		# Everyone needs full signatures to generate schedule
+		sources[i] = {"input": i - 1 if i != 0 else None}
+		targets[i] = {"output": [i + 1 if i != len(placement) - 1 else None]}
+	return sources, targets

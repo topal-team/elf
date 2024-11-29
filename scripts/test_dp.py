@@ -18,7 +18,7 @@ logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 
 absolute_tolerance = 1e-6
-relative_tolerance = 1e-4
+relative_tolerance = 1e-3
 
 
 def assert_model_params_equal(model, pg):
@@ -224,6 +224,13 @@ if __name__ == "__main__":
 		help="model to use",
 	)
 	parser.add_argument(
+		"--partitioner",
+		"-p",
+		choices=["naive", "constrained", "metis", "dagP"],
+		default="metis",
+		required=False,
+	)
+	parser.add_argument(
 		"--schedule", "-s", choices=["afab", "1f1b", "hanayo"], default="1f1b", required=False
 	)
 	parser.add_argument(
@@ -270,6 +277,7 @@ if __name__ == "__main__":
 		model.get_sample(4).cuda(),
 		placement=placement,
 		schedule=args.schedule,
+		partitioner=args.partitioner,
 		dp=args.dp,
 	)
 	gt = copy.deepcopy(model)

@@ -5,10 +5,56 @@ Individual stage computation and communication management
 import torch
 import torch.distributed as dist
 from collections import deque
-from .utils import Timer, TensorMetadata, activations_offloading
+from .scheduling import OpOptions
+from .utils import Timer, TensorMetadata
 import logging
 
 logger = logging.getLogger("block")
+
+
+class Variable:
+	"""
+	Each block takes multiple variables as input and output, that are either received from or sent to another gpu.
+	This object represents one of them.
+	"""
+
+	def __init__(self, name, peer, group):
+		self.name = name
+
+		self.peer = peer  # block id (not rank!)to receive from / send to
+		self.group = group
+
+		self.metadata = None  # shape, dtype
+		self.was_metadata_sent = False  # flag to avoid sending metadata twice
+
+		self.waiting = deque()  # (work, tensor) : received object waiting to be processed
+		self.kept = deque()  # tensor : object kept for backward (only used for inputs)
+		self.finished = deque()  # tensor : object ready to be sent to the peer
+
+	def wait_and_pop(self):
+		"""
+		Get one element from the waiting queue. Waits for the corresponding communication to complete if needed.
+		"""
+		work, tensor = self.waiting.popleft()
+		if work is not None:
+			work.wait()
+		return tensor
+
+	def get_buffer(self, size):
+		"""
+		Get a buffer of the given batch size
+		"""
+		return self.metadata.get_buffer(size)
+
+	def __str__(self):
+		return f"Variable(name={self.name},peer={self.peer},metadata={self.metadata})"
+
+	def __repr__(self):
+		return str(self)
+
+	# Debug utility
+	def _state(self):
+		return f"{str(self)} - waiting: {len(self.waiting)}, kept: {len(self.kept)}, finished: {len(self.finished)}"
 
 
 class PipelineBlock:
@@ -17,7 +63,7 @@ class PipelineBlock:
 	Each block is one layer or group of contiguous layers placed on one device
 	"""
 
-	def __init__(self, model, id_, placement):
+	def __init__(self, model, id_, placement, signature, pp_group, dp_group):
 		"""
 		:param model: layer / group of layers that will perform the computation
 		:type model: nn.Module
@@ -25,40 +71,35 @@ class PipelineBlock:
 		:type id_: int
 		:param placement: mapping of each id on a device
 		:type placement: List[int]
-		:param inputs: name of variables taken as input by the block
-		:type inputs: List[str]
-		:param outputs: name of variables returned by the block
-		:type outputs: List[str]
+		:param signature: signature of the block
+		:type signature: Signature
 		"""
 		super(PipelineBlock, self).__init__()
 		# Block infos
 		self.rank = placement[id_]  # global rank
+		self.placement = placement  # need it to resolve src/dst later on
 		self.model = model.cuda() if torch.cuda.is_available() else model
 
 		self.id = id_  # rank in the model
 		self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-
-		# Queues of tensors to process
-		# Structure of one element is [[Work, Tensor], [Work, Tensor], ...]
-		self.inputs_to_forward = deque()  # Waiting for forward
-		self.grads_to_backward = deque()  # Waiting for backward
-
-		# Structure of one element is [Tensor1, Tensor2, ...]
-		self.act_to_send = deque()  # Sent to next block
-		self.grads_to_send = deque()  # Sent to previous block
-		self.act_to_keep = deque()  # Kept for backward
-		self.inputs_to_keep = deque()  # Kept for backward
-
-		# Ranks where the previous/next blocks in the model are placed
-		self.previous = None if self.id == 0 else placement[self.id - 1]
-		self.next = None if self.id == len(placement) - 1 else placement[self.id + 1]
+		self.is_last = self.id == len(placement) - 1
+		self.is_first = self.id == 0
 
 		# Process groups for collective communications
-		self.pp_group = None
-		self.dp_group = None
+		self.pp_group = pp_group
+		self.dp_group = dp_group
 
-		self.metadata = []
-		self.out_metadata = []
+		# Helpers to manage data queues and src/dst ranks
+		self.signature = signature
+		# One input comes from one block
+		self.inputs = [
+			Variable(name, src, self.pp_group) for name, src in zip(signature.inputs, signature.sources)
+		]
+		# But an output can be needed by multiple blocks
+		self.outputs = [
+			[Variable(name, dst, self.pp_group) for dst in dsts]
+			for name, dsts in zip(signature.outputs, signature.targets)
+		]
 
 		self.compute_time = []  # used to measure idle time
 
@@ -75,48 +116,55 @@ class PipelineBlock:
 		"""
 		logger.debug(f"{self} - Computing one forward with options {options}")
 
-		# Wait for all communications to finish
-		inputs = self.inputs_to_forward.popleft()
-		for i in range(len(self.metadata)):
-			work, x = inputs[i]
-			if work is not None:
-				work.wait()
-			inputs[i] = x
+		# Gather all variables needed for forward
+		inputs = []
+		for var in self.inputs:
+			x = var.wait_and_pop()
 
 			if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
 				x.requires_grad = True
 
-		# torch.cuda.synchronize()
+			inputs.append(x)
+
+		if torch.cuda.is_available():
+			torch.cuda.synchronize()
 		# Should we synchronize here to make sure all inputs are received?
 
 		with Timer() as timer:
-			if options.get("remat"):
+			if options.get(OpOptions.REMAT):
 				with torch.no_grad():
 					y = self.model(*inputs)
 					y = (y,) if not isinstance(y, tuple) else y
-			elif options.get("offload"):
-				with activations_offloading():
-					y = self.model(*inputs)
-					y = (y,) if not isinstance(y, tuple) else y
-				self.act_to_keep.append(y)
 			else:
 				y = self.model(*inputs)
 				y = (y,) if not isinstance(y, tuple) else y
-				self.act_to_keep.append(y)
+				for var, value in zip(self.outputs, y):
+					for dst in var:
+						dst.kept.append(value)
 
 		self.compute_time.append(timer.time)
 
 		if torch.cuda.is_available():
 			torch.cuda.synchronize()  # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
 
-		if not self.out_metadata:
+		if any(not dst.metadata for var in self.outputs for dst in var):
 			self._register_out_metadata(y)
 
-		self.act_to_send.append(y)
-		self.inputs_to_keep.append(inputs)
+		# Send to next
+		for var, value in zip(self.outputs, y):
+			for dst in var:
+				dst.finished.append(value)
 
-		if self.next is None:
-			return self.act_to_send.popleft()
+		# Keep inputs for backward
+		for var, value in zip(self.inputs, inputs):
+			var.kept.append(value)
+
+		if self.is_last:
+			output = []
+			for var in self.outputs:
+				assert len(var) == 1, "Output of the pipeline has multiple destinations"
+				output.append(var[0].finished.popleft())
+			return output
 
 	def backward(self, **options):
 		"""
@@ -127,99 +175,118 @@ class PipelineBlock:
 		"""
 		logger.debug(f"{self} - Computing one backward with options {options}")
 
-		x = self.inputs_to_keep.popleft()
+		inputs = []
+		for var in self.inputs:
+			inputs.append(var.kept.popleft())
 
-		if options.get("remat"):
+		if options.get(OpOptions.REMAT):
 			with Timer() as timer:
-				act = self.model(*x)
+				act = self.model(*inputs)
 			self.compute_time += timer.time
-		elif options.get("offload"):
-			act = self.act_to_keep.popleft().cuda()
 		else:
-			act = self.act_to_keep.popleft()
+			act = []
+			for var in self.outputs:
+				# Even if there are multiple destinations, it's the same tensor for everyone of them
+				act.append(var[0].kept.popleft())
+				for target in var[1:]:
+					target.kept.popleft()
 
-		# Wait for all communications to finish
-		grads = self.grads_to_backward.popleft()
-		for i in range(len(self.out_metadata)):
-			work, g = grads[i]
-			if work is not None:
-				work.wait()
-			grads[i] = g
+		grads = []
+		for var in self.outputs:
+			# For one tensor, the gradients are the sum of the gradients from every destination
+			g = var[0].wait_and_pop()
+			for dst in var[1:]:
+				g += dst.wait_and_pop()
+			grads.append(g)
 
-		# torch.cuda.synchronize()
+		if torch.cuda.is_available():
+			torch.cuda.synchronize()
 		# Should we synchronize here to make sure all gradients are received?
 
 		with Timer() as timer:
-			for i in range(len(self.out_metadata)):
+			for i in range(len(self.outputs)):
 				if not isinstance(act[i], torch.Tensor):
 					continue
-				assert act[i].shape == grads[i].shape
+				assert (
+					act[i].shape == grads[i].shape
+				), f"Expected same shape for activations and gradients, got {act[i].shape} and {grads[i].shape}"
 				# We may need to keep the graph for multiple backwards, if an intermediate value is needed by next blocks
-				act[i].backward(grads[i], retain_graph=(i != len(self.out_metadata) - 1))
+				act[i].backward(grads[i], retain_graph=(i != len(self.outputs) - 1))
 
 		if torch.cuda.is_available():
 			torch.cuda.synchronize()  # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
 
 		self.compute_time.append(timer.time)
 
-		self.grads_to_send.append(tuple(x[i].grad.data for i in range(len(x)) if x[i].requires_grad))
+		for var, value in zip(self.inputs, inputs):
+			# This is not technically an issue, but it might be a source of bugs
+			if not value.requires_grad or value.grad is None:
+				# Input usually doesn't need gradients, don't log everytime
+				if var.peer is not None:
+					logger.warning(f"{self} - No gradient computed for var {var}")
+				continue
+			var.finished.append(value.grad.data)
 
 	def send_forward(self, **options):
 		"""
 		Send one activation to the next layer in the model
 
 		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
+		:return: If the communications need to be batched, returns them
 		:rtype: List[dist.P2POp] or None
 		"""
-		dst = options.get("dst", self.next)
+		dst = options.get("dst")
 
-		if dst is None or dst == self.rank:
+		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		# Note: at least one forward was already done, sotorch.cuda.synchronize() output metadata was registered, and sent to next block
+		sends = []
+		for var in self.outputs:
+			for target in var:
+				# only perform communications for that dst
+				if target.peer != dst:
+					continue
 
-		activations = self.act_to_send.popleft()
+				if not target.was_metadata_sent:
+					self._send_metadata(dst)
+				outputs = target.finished.popleft().contiguous()
 
-		if options.get("batched_comm"):
-			sends = []
-			for i in range(len(self.out_metadata)):
-				tensor = activations[i].contiguous()
-				sends.append(dist.P2POp(dist.isend, tensor, dst, group=self.pp_group))
-			return sends
-		else:
-			for i in range(len(self.out_metadata)):
-				logger.debug(
-					f"{self} - Sending activation to layer {self.id + 1} on rank {dst} (shape = {activations[i].shape})"
-				)
-				tensor = activations[i].contiguous()
-				dist.isend(tensor, dst, group=self.pp_group)
+				rank = self.placement[dst]  # we now use the actual rank instead of the block id
+				if options.get(OpOptions.BATCHED_COMM):
+					sends.append(dist.P2POp(dist.isend, outputs, rank, group=self.pp_group))
+				else:
+					logger.debug(f"{self} - Sending outputs to rank {rank}")
+					dist.isend(outputs, rank, group=self.pp_group)
+
+		return sends  # if not batched, sends is still empty and therefore Falsy
 
 	def send_backward(self, **options):
 		"""
 		Send one gradient tensor to the previous layer in the model
 
 		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
+		:return: If the communications need to be batched, returns them
 		:rtype: List[dist.P2POp] or None
 		"""
-		dst = options.get("dst") or self.previous
-		if dst is None or dst == self.rank:
+		dst = options.get("dst")
+		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		grads = self.grads_to_send.popleft()
+		sends = []
+		for var in self.inputs:
+			if var.peer != dst:
+				continue
 
-		if options.get("batched_comm"):
-			sends = []
-			for i in range(len(self.metadata)):
-				tensor = grads[i].contiguous()
-				sends.append(dist.P2POp(dist.isend, tensor, dst, group=self.pp_group))
-			return sends
-		else:
-			logger.debug(f"{self} - Sending gradients to layer {self.id - 1} on rank {dst}")
-			for i in range(len(self.metadata)):
-				tensor = grads[i].contiguous()
-				dist.isend(tensor, dst, group=self.pp_group)
+			grads = var.finished.popleft().contiguous()
+
+			rank = self.placement[dst]
+			if options.get(OpOptions.BATCHED_COMM):
+				sends.append(dist.P2POp(dist.isend, grads, rank, group=self.pp_group))
+			else:
+				logger.debug(f"{self} - Sending gradients to rank {rank}")
+				dist.isend(grads, rank, group=self.pp_group)
+
+		return sends  # if not batched, sends is still empty and therefore Falsy
 
 	def recv_forward(self, mb_size, **options):
 		"""
@@ -228,43 +295,37 @@ class PipelineBlock:
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
 		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
+		:return: If the communications need to be batched, returns them
 		:rtype: List[dist.P2POp] or None
 		"""
-		src = options.get("src", self.previous)
+		src = options.get("src")
 
-		if options.get("offload") and len(self.act_to_keep) > 0:
-			# Free memory just before allocating the next buffer
-			activations_offloading().wait_for_offloading()
-
-		if not self.metadata:
+		# If some metadata is missing, it should be received from the previous block before actual data
+		if any(not var.metadata for var in self.inputs):
 			self._receive_metadata(src)
 
-		if src is None or src == self.rank:
+		if src is None or self.placement[src] == self.rank:
 			return
 
-		buffers = []
+		recvs = []
 		# We couple buffer and work objects for now so that we can wait at the right moment
-		for i in range(len(self.metadata)):
-			buffers.append([None, self.metadata[i].get_buffer(mb_size)])
+		for var in self.inputs:
+			if var.peer != src:
+				continue
 
-		self.inputs_to_forward.append(buffers)
+			buffer = var.metadata.get_buffer(mb_size)
 
-		if options.get("batched_comm"):
-			# This communication needs to be batched ;
-			# instead of executing it, we instanciate an object with the right setup and return it
-			recvs = []
-			for i in range(len(self.metadata)):
-				recvs.append(dist.P2POp(dist.irecv, buffers[i][1], src, group=self.pp_group))
-			return recvs
+			rank = self.placement[src]
+			if options.get(OpOptions.BATCHED_COMM):
+				recvs.append(dist.P2POp(dist.irecv, buffer, rank, group=self.pp_group))
+				work = None
+			else:
+				logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
+				work = dist.irecv(buffer, rank, group=self.pp_group)
 
-		else:
-			for i in range(len(self.metadata)):
-				logger.debug(
-					f"{self} - Starting to receive activations with shape {self.metadata} from layer {self.id - 1} on rank {src} (shape = {buffers[i][1].shape})"
-				)
-				work = dist.irecv(buffers[i][1], src, group=self.pp_group)
-				buffers[i][0] = work
+			var.waiting.append((work, buffer))
+
+		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
 	def recv_backward(self, mb_size, **options):
 		"""
@@ -273,39 +334,33 @@ class PipelineBlock:
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
 		:param **options: options to modify the send behaviour
-		:return: If the communications needs to be batched, returns them
+		:return: If the communications need to be batched, returns them
 		:rtype: List[dist.P2POp] or None
 		"""
-		src = options.get("src") or self.next
+		src = options.get("src")
 
-		if options.get("offload"):
-			# Start moving activations back to gpu
-			activations_offloading().prefetch()
-
-		if src is None or src == self.rank:
+		if src is None or self.placement[src] == self.rank:
 			return
 
-		buffers = []
-		for i in range(len(self.out_metadata)):
-			buffers.append([None, self.out_metadata[i].get_buffer(mb_size)])
+		recvs = []
+		for var in self.outputs:
+			for target in var:
+				if target.peer != src:
+					continue
 
-		self.grads_to_backward.append(buffers)
+				buffer = target.metadata.get_buffer(mb_size)
 
-		if options.get("batched_comm"):
-			# This communication needs to be batched ;
-			# instead of executing it, we instanciate an object with the right setup and return it
-			recvs = []
-			for i in range(len(self.out_metadata)):
-				recvs.append(dist.P2POp(dist.irecv, buffers[i][1], src, group=self.pp_group))
-			return recvs
+				rank = self.placement[src]
+				if options.get(OpOptions.BATCHED_COMM):
+					recvs.append(dist.P2POp(dist.irecv, buffer, rank, group=self.pp_group))
+					work = None
+				else:
+					logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
+					work = dist.irecv(buffer, rank, group=self.pp_group)
 
-		else:
-			logger.debug(
-				f"{self} - Starting to receive gradients with shape {self.out_metadata} from layer {self.id + 1} on rank {src}"
-			)
-			for i in range(len(self.out_metadata)):
-				work = dist.irecv(buffers[i][1], src, group=self.pp_group)
-				buffers[i][0] = work
+				target.waiting.append((work, buffer))
+
+		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
 	def all_reduce_param_grads(self, **options):
 		"""
@@ -336,23 +391,21 @@ class PipelineBlock:
 		:param src: rank of the previous block
 		:type src: int
 		"""
-		if src is None or src == self.rank:
-			x = self.inputs_to_forward[0]
-			n = len(x)
-			for i in range(len(x)):
-				_, tensor = x[i]
-				self.metadata.append(TensorMetadata(tensor[0]))
-		else:
-			x = torch.empty(1, device=self.device, dtype=torch.int32)
-			dist.recv(x, src=src, group=self.pp_group)
-			n = int(x.item())
-			for _ in range(n):
-				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=src, group=self.pp_group)
-				self.metadata.append(TensorMetadata.from_tensor(metadata))
 
-		logger.debug(f"{self} - Registered metadata {self.metadata}")
-		logger.debug(f"{self} - has {n} inputs")
+		for var in self.inputs:
+			if src is None or self.placement[src] == self.rank:
+				continue
+			else:
+				if var.peer != src:
+					continue
+
+				rank = self.placement[src]  # we resolve the actual rank now
+				logger.debug(f"{self} - Receiving metadata from {rank}")
+				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
+				dist.recv(metadata, src=rank, group=self.pp_group)
+				var.metadata = TensorMetadata.from_tensor(metadata)
+
+		logger.debug(f"{self} - Registered metadata {[var for var in self.inputs]} from {src}")
 
 	def _send_metadata(self, dst):
 		"""
@@ -361,29 +414,27 @@ class PipelineBlock:
 		:param dst: rank of the next block
 		:type dst: int
 		"""
-		if dst is None or dst == self.rank:
+		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		# Send number of outputs
-		n = torch.empty(1, device=self.device, dtype=torch.int32)
-		n[0] = len(self.out_metadata)
-		dist.send(n, dst=dst, group=self.pp_group)
-		logger.debug(f"{self} - sent number of outputs ({n.item()}) to {dst}")
+		for var in self.outputs:
+			for target in var:
+				if target.peer != dst:
+					continue
 
-		# Send metadata
-		for i in range(len(self.out_metadata)):
-			dist.send(self.out_metadata[i].to_tensor(), dst=dst, group=self.pp_group)
-			logger.debug(f"{self} - sent metadata {self.out_metadata[i]}")
+				rank = self.placement[dst]  # we resolve the actual rank now
+				logger.debug(f"{self} - Sending metadata of {target.name} = {target.metadata} to {rank}")
+				dist.send(target.metadata.to_tensor(), dst=rank, group=self.pp_group)
+				target.was_metadata_sent = True
 
 	def _register_out_metadata(self, output):
 		"""
-		Register output metadata from the result of the forward pass. Then sends it to the next block.
+		Register output metadata from the result of the forward pass.
 
 		:param output: output of the forward pass
 		:type output: Tuple[Tensor]
 		"""
-		for o in output:
-			self.out_metadata.append(TensorMetadata(o[0]))
-			logger.debug(f"{self} - registered output metadata {self.out_metadata[-1]}")
-
-		self._send_metadata(self.next)  # not very elegant to do this here as we don't have dst
+		for var, value in zip(self.outputs, output):
+			for target in var:
+				target.metadata = TensorMetadata(value[0])
+			logger.debug(f"{self} - registered output metadata {var[0].metadata} for {var[0].name}")

@@ -8,7 +8,7 @@ from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
 from .dagP import split_graph_dagP
-from .utils import remove_inplace_leaves
+from .utils import remove_inplace_leaves, Signature
 import logging
 
 logger = logging.getLogger("partition")
@@ -22,11 +22,15 @@ def check_partition(graph, parts, inputs, outputs):
 			f"Inputs of the first part do not match original inputs: {original_inputs} != {inputs[0]}"
 		)
 
-	for i in range(len(parts) - 1):
-		if outputs[i] != inputs[i + 1]:
-			raise Exception(
-				f"Outputs of part {i} do not match inputs of part {i + 1}: {outputs[i]} != {inputs[i + 1]}"
-			)
+	for i in range(1, len(parts)):
+		for input in inputs[i]:
+			is_in_prev_part = False
+			for j in reversed(range(i)):
+				if input in outputs[j]:
+					is_in_prev_part = True
+					break
+			if not is_in_prev_part:
+				raise Exception(f"Input {input} of part {i} is not an output of any previous part")
 
 
 def create_subgraph(graph_module, nodes, inputs, outputs):
@@ -102,11 +106,20 @@ def get_inputs_outputs(parts):
 					else:
 						inputs[i].append(dep.name)
 					if i != 0:
-						if dep not in parts[i - 1] and dep.name not in outputs[i - 1]:
-							raise Exception(
-								f"Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}."
-							)
-						outputs[i - 1].append(dep.name)
+						prev = i - 1
+						while prev >= 0:
+							if dep in parts[prev]:
+								break
+							prev -= 1
+							# if dep.name not in outputs[prev]:
+							# raise Exception(
+							# 	f"Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}."
+							# )
+						if prev == -1:
+							continue
+						# Return each tensor only once ; sending it to multiple targets is managed later
+						if dep.name not in outputs[prev]:
+							outputs[prev].append(dep.name)
 
 		for node in to_remove:
 			part.remove(node)
@@ -130,40 +143,56 @@ def get_inputs_outputs(parts):
 	return inputs, outputs
 
 
-def duplicate_symsizes(graph):
+def get_sources_targets(inputs, outputs):
 	"""
-	Duplicates symbolic size nodes in the graph to avoid sharing between different parts of the model. Having a unique ``sym_size`` node creates dependencies from the entire graph, making it impossible to partition it without long-range connections.
+	:return:
 
-	:param graph: The computational graph to modify
-	:type graph: torch.fx.Graph
-	:param times: A dictionary mapping node names to their execution times
-	:type times: Dict[str, float]
-	:param memories: A dictionary mapping node names to their memory usage
-	:type memories: Dict[str, int]
+	        - ``sources``: a list of lists, containing the indices of the source of each input of each part
+	        - ``targets``: a list of lists of lists, containing the indices of each target for each output of each part
 
-	.. warning::
-		This function is not safe to use and can break the module if the batch dimension is modified during the computation.
-
-	:return: None. The function modifies the graph in-place.
+	:rtype: List[List[int]], List[List[List[int]]]
 	"""
-	i = 0
-	for node in graph.nodes:
-		if node.name == "sym_size_int":
-			to_replace = {}
-			for user in node.users:
-				i += 1
-				with graph.inserting_before(user):
-					new_sym_size = node.graph.create_node(
-						"call_function", torch.ops.aten.sym_size, (user.args[0], node.args[1]), {}
-					)
-				to_replace[user] = new_sym_size
+	n = len(inputs)
+	assert n == len(outputs)
+	sources = [[] for _ in range(n)]
+	targets = [[] for _ in range(n)]
 
-			for user, new_sym_size in to_replace.items():
-				user.replace_input_with(node, new_sym_size)
+	# Only one source
+	def find_source(inp, imax):
+		for i in range(imax):
+			if inp in outputs[i]:
+				return i
+		return None
 
-			graph.erase_node(node)
-			i -= 1
-	logger.info(f"Symsize duplication created {i} nodes.")
+	# Multiple targets
+	def find_targets(out, imin):
+		tgts = []
+		for i in range(imin + 1, n):
+			if out in inputs[i]:
+				tgts.append(i)
+		# If no target is found, it means the output is the final output
+		if not tgts:
+			tgts.append(None)
+		return tgts
+
+	for i in range(n):
+		for inp in inputs[i]:
+			src = find_source(inp, i)
+			sources[i].append(src)
+
+			# If we do that, we get the target indices in the order of who needs them
+			# We want them in the order of the actual output
+			# if the model does `return x,y,z` we want targets to be [tgt of x, tgt of y, tgt of z] even if z is needed before x
+
+			# Actually, the way we constructed the graph is that the output nodes are ordered from first to last used (see get_inputs_outputs), so that could work ? TODO: check
+
+			# targets[src].append(i)
+
+		for out in outputs[i]:
+			tgts = find_targets(out, i)
+			targets[i].append(tgts)
+
+	return sources, targets
 
 
 def extract_graph_fx(model):
@@ -171,13 +200,11 @@ def extract_graph_fx(model):
 
 
 def extract_graph_export(model, sample, use_dynamic_batch_size=False):
-	# Should not be used for now, until duplicate_symsizes is fixed (see notes)
 	if use_dynamic_batch_size:
 		dim = torch.export.Dim("batch")
 		dynamic_shapes = ({0: dim},)
 		exported = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes)
 		module = exported.module()
-		duplicate_symsizes(module.graph)
 		return module
 	else:
 		exported = torch.export.export(model, args=(sample,))
@@ -263,17 +290,26 @@ def partition_graph(model, n, sample, partitioner="naive"):
 		parts.append([])
 
 	inputs, outputs = get_inputs_outputs(parts)
+	# Make sure the order is consistent
+	for i in range(n):
+		if i != 0:
+			inputs[i].sort()
+		if i != n - 1:
+			outputs[i].sort()
+
 	check_partition(graph.graph, parts, inputs, outputs)
+	sources, targets = get_sources_targets(inputs, outputs)
+	signatures = [Signature(inputs[i], outputs[i], sources[i], targets[i]) for i in range(n)]
 
 	blocks = []
 	for i, p in enumerate(parts):
 		subgraph = create_subgraph(graph, p, inputs[i], outputs[i])
 		remove_inplace_leaves(subgraph)
 		blocks.append(subgraph)
-		logger.info(f"Part {i} - signature = {inputs[i]} -> {outputs[i]}")
+		logger.info(f"Part {i} - signature = {signatures[i]}")
 
 	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
 	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
 	logger.info(f'Estimated times : {["%.3fs" % t for t in estimated_times]}')
 	logger.info(f'Estimated memory transfers : {["%.1fMB" % t for t in estimated_mems]}')
-	return blocks
+	return blocks, signatures

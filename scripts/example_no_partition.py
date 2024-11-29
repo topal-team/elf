@@ -3,6 +3,7 @@ import sys
 
 sys.path.append(".")
 
+from pipeline.pipeline import get_sources_targets_sequential
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -32,7 +33,9 @@ if __name__ == "__main__":
 	part = get_part(model, rank)
 
 	# We don't need a sample here
-	pipe = Pipeline(part, None, partition=False)
+	placement = [0, 1, 2, 3]
+	sources, targets = get_sources_targets_sequential(placement)
+	pipe = Pipeline(part, None, partitioner=False, placement=placement, sources=sources, targets=targets)
 
 	loss_fn = nn.functional.cross_entropy
 	optimizer = torch.optim.Adam(pipe.parameters())
