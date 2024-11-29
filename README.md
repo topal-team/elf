@@ -16,13 +16,13 @@ A full example can be found in ``example.py``.
 Note that ``sample`` is only necessary if you use automatic partitioning, as it is used for profiling. Also, it is not used on processes other than the first one of the pipeline.\
 There are several arguments to modify its behaviour :
 - ``placement`` specifies the rank of each model block.
-- ``partition`` can be set to ``None`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device.
+- ``partitioner`` can be set to ``None`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device.
 - ``schedule`` modifies the schedule algorithm to use. Currently, AFAB from Gpipe, 1F1B and Hanayo are supported.
 - ``dp`` is the data parallelism degree.
 
 ### Write your own schedule
 
-You can define your own schedule if you want to perform tests or use an unimplemented one. In order to do that, you simply have to write a function that takes as argument a ``placement`` and a number of micro batches ``n_micro_batches``, and returns the right sequence of operations (see the ``Operation`` class in ``graph.py``). Then, register it in the ``Pipeline`` class in ``pipeline.py`` (``_get_scheduler``).
+You can define your own schedule if you want to perform tests or use an unimplemented one. In order to do that, you simply have to write a function that takes as argument a ``placement``, a number of micro batches ``n_micro_batches``, and the signature of each block, to return the right sequence of operations (see the ``Operation`` class in ``scheduling.py``). Then, register it in the ``Pipeline`` class in ``pipeline.py`` (``_get_scheduler``).
 
 ### Change the pipeline behaviour
 
@@ -56,11 +56,3 @@ Run all tests:
 ./scripts/test.sh
 ```
 Some of them require at least 2 GPUs.
-
-### Benchmarks
-
-Run all benchmarks:
-```bash
-./benchmarks/run_all.sh
-```
-
