@@ -23,7 +23,7 @@ Create it in scratch:
 python -m venv $SCRATCH/venv
 source $SCRATCH/venv/bin/activate
 pip install --no-cache torch==2.5.0.cyf2-cu124.post2 torchvision==0.19.0+cu124
-cd ~/topal-internship/
+cd ~/elf-dev/
 pip install --no-cache -r requirements.txt
 ```
 
