@@ -148,13 +148,13 @@ class Engine:
 				torch.cuda.synchronize()
 				warmup_start = time.time()
 
-			# This will synchronize ! We want to enqueue all possible communications
+			# A computation will synchronize! We want to enqueue all possible communications before that
 			if op.op in [OperationType.FORWARD, OperationType.BACKWARD]:
 				self._run_comms()
 
 			match op.op:
 				case OperationType.FORWARD:
-					y = block.forward(**op.options)
+					y = block.forward(op.mb_id, **op.options)
 					# If the block as multiple outputs, this flattens them
 					# TODO: correctly handle that in multiple result lists
 					if y is not None:
@@ -166,37 +166,37 @@ class Engine:
 								result.append(output)
 
 				case OperationType.BACKWARD:
-					block.backward(**op.options)
+					block.backward(op.mb_id, **op.options)
 
 				case OperationType.SEND_FORWARD:
 					if op.options.get("dst") in self.id_to_block:
 						# The destination block is on the same device ; we bypass p2p comms
 						dst_block = self.id_to_block.get(op.options.get("dst"))
-						_transfer_forward(block, dst_block)
+						_transfer_forward(block, dst_block, op.mb_id)
 
-					comm = block.send_forward(**op.options)
+					comm = block.send_forward(op.mb_id, **op.options)
 					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.SEND_BACKWARD:
 					if op.options.get("dst") in self.id_to_block:
 						# The destination block is on the same device ; we bypass p2p comms
 						dst_block = self.id_to_block.get(op.options.get("dst"))
-						_transfer_backward(block, dst_block)
+						_transfer_backward(block, dst_block, op.mb_id)
 
-					comm = block.send_backward(**op.options)
+					comm = block.send_backward(op.mb_id, **op.options)
 					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.RECV_FORWARD:
 					if block.is_first:
 						microbatch = next(microbatches)
 						for mb, var in zip(microbatch, block.inputs):
-							var.waiting.append(_fake_p2p(mb))
+							var.set(var.waiting, op.mb_id, _fake_p2p(mb))
 
-					comm = block.recv_forward(mb_sizes[op.mb_id], **op.options)
+					comm = block.recv_forward(op.mb_id, mb_sizes[op.mb_id], **op.options)
 					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.RECV_BACKWARD:
-					comm = block.recv_backward(mb_sizes[op.mb_id], **op.options)
+					comm = block.recv_backward(op.mb_id, mb_sizes[op.mb_id], **op.options)
 					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
 
 				case OperationType.LOSS_FORWARD:
@@ -223,7 +223,7 @@ class Engine:
 						block.compute_time.append(timer.time)
 						for grad, var in zip(grads, block.outputs):
 							for dst in var:  # should be only one destination
-								dst.waiting.append(_fake_p2p(grad))
+								dst.set(dst.waiting, op.mb_id, _fake_p2p(grad))
 					else:
 						logger.warning(f"Tried to compute loss backward on a non-last block {block}")
 						continue
@@ -298,7 +298,7 @@ def compute_loss(block, output, target, loss_fn):
 	return loss.detach().requires_grad_(False), grad_fn
 
 
-def _transfer_forward(block, dst_block):
+def _transfer_forward(block, dst_block, mb_id):
 	"""
 	P2P communications bypass for same-rank blocks that need to communicate
 
@@ -311,10 +311,11 @@ def _transfer_forward(block, dst_block):
 	all_to_send = [dst for var in block.outputs for dst in var if dst.peer == dst_block.id]
 	all_to_recv = [var for var in dst_block.inputs if var.peer == block.id]
 	for src, dst in zip(all_to_send, all_to_recv):
-		dst.waiting.append(_fake_p2p(src.finished.popleft()))
+		inputs = src.get(src.finished, mb_id)
+		dst.set(dst.waiting, mb_id, _fake_p2p(inputs))
 
 
-def _transfer_backward(block, dst_block):
+def _transfer_backward(block, dst_block, mb_id):
 	"""
 	P2P communications bypass for same-rank blocks that need to communicate
 
@@ -326,4 +327,5 @@ def _transfer_backward(block, dst_block):
 	all_to_send = [var for var in block.inputs if var.peer == dst_block.id]
 	all_to_recv = [src for var in dst_block.outputs for src in var if src.peer == block.id]
 	for src, dst in zip(all_to_send, all_to_recv):
-		dst.waiting.append(_fake_p2p(src.finished.popleft()))
+		grads = src.get(src.finished, mb_id)
+		dst.set(dst.waiting, mb_id, _fake_p2p(grads))

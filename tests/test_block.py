@@ -10,7 +10,6 @@ from pipeline.partitioners.utils import Signature
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from collections import deque
 
 
 @pytest.fixture(scope="session")
@@ -41,9 +40,9 @@ def test_variable_init():
 	assert var.group is None
 	assert var.metadata is None
 	assert var.was_metadata_sent is False
-	assert isinstance(var.waiting, deque)
-	assert isinstance(var.kept, deque)
-	assert isinstance(var.finished, deque)
+	assert isinstance(var.waiting, list)
+	assert isinstance(var.kept, list)
+	assert isinstance(var.finished, list)
 
 
 @pytest.mark.single
@@ -52,9 +51,9 @@ def test_variable_wait_and_pop():
 	tensor = torch.randn(2, 3)
 	var.waiting.append((None, tensor))
 
-	result = var.wait_and_pop()
+	result = var.wait_and_pop(0)
 	assert torch.equal(result, tensor)
-	assert len(var.waiting) == 0
+	assert all(value is None for value in var.waiting)
 
 
 @pytest.mark.single
@@ -104,11 +103,11 @@ def test_pipeline_block_forward():
 	)
 
 	input_tensor = torch.tensor([[1.0, 2.0]], device=device)
-	block.inputs[0].waiting.append((None, input_tensor))
-	block.forward()
+	block.inputs[0].set(block.inputs[0].waiting, 0, (None, input_tensor))
+	block.forward(0)
 
 	expected = torch.tensor([[5.1, 11.2]], device=device)
-	actual = block.outputs[0][0].finished[0]
+	actual = block.outputs[0][0].get(block.outputs[0][0].finished, 0)
 	assert torch.allclose(actual, expected)
 
 
@@ -129,17 +128,17 @@ def test_pipeline_block_backward():
 
 	# Forward pass first
 	input_tensor = torch.tensor([[1.0, 2.0]], requires_grad=True, device=device)
-	block.inputs[0].waiting.append((None, input_tensor))
-	block.forward()
+	block.inputs[0].set(block.inputs[0].waiting, 0, (None, input_tensor))
+	block.forward(0)
 
 	# Backward pass
 	grad_tensor = torch.tensor([[1.0, 1.0]], device=device)
-	block.outputs[0][0].waiting.append((None, grad_tensor))
-	block.backward()
+	block.outputs[0][0].set(block.outputs[0][0].waiting, 0, (None, grad_tensor))
+	block.backward(0)
 
 	# Check input gradients
 	expected_input_grad = torch.tensor([[4.0, 6.0]], device=device)
-	actual_input_grad = block.inputs[0].finished[0]
+	actual_input_grad = block.inputs[0].get(block.inputs[0].finished, 0)
 	assert torch.allclose(actual_input_grad, expected_input_grad)
 
 	# Check weight gradients
@@ -169,15 +168,15 @@ def test_block_communication(init_dist):
 
 		# Forward pass
 		input_tensor = torch.tensor([[1.0, 2.0]], device=local_rank)
-		block.inputs[0].waiting.append((None, input_tensor))
-		block.forward()
+		block.inputs[0].set(block.inputs[0].waiting, 0, (None, input_tensor))
+		block.forward(0)
 
 		# Send output to rank 1
-		block.send_forward(dst=1)
+		block.send_forward(0, dst=1)
 
 		# Receive gradients from rank 1 for backward
-		block.recv_backward(mb_size=1, src=1)
-		block.backward()
+		block.recv_backward(0, mb_size=1, src=1)
+		block.backward(0)
 
 	elif rank == 1:
 		model = nn.Linear(2, 2)
@@ -191,13 +190,13 @@ def test_block_communication(init_dist):
 		)
 
 		# Receive input from rank 0
-		block.recv_forward(mb_size=1, src=0)
-		block.forward()
+		block.recv_forward(0, mb_size=1, src=0)
+		block.forward(0)
 
 		# Create gradients and send back
 		grad_tensor = torch.tensor([[1.0, 1.0]], device=local_rank)
-		block.outputs[0][0].waiting.append((None, grad_tensor))
-		block.backward()
-		block.send_backward(dst=0)
+		block.outputs[0][0].set(block.outputs[0][0].waiting, 0, (None, grad_tensor))
+		block.backward(0)
+		block.send_backward(0, dst=0)
 
 	dist.barrier()  # Ensure both processes complete

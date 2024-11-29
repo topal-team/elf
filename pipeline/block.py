@@ -4,7 +4,6 @@ Individual stage computation and communication management
 
 import torch
 import torch.distributed as dist
-from collections import deque
 from .scheduling import OpOptions
 from .utils import Timer, TensorMetadata
 import logging
@@ -27,15 +26,32 @@ class Variable:
 		self.metadata = None  # shape, dtype
 		self.was_metadata_sent = False  # flag to avoid sending metadata twice
 
-		self.waiting = deque()  # (work, tensor) : received object waiting to be processed
-		self.kept = deque()  # tensor : object kept for backward (only used for inputs)
-		self.finished = deque()  # tensor : object ready to be sent to the peer
+		self.waiting = []  # (work, tensor) : received object waiting to be processed
+		self.kept = []  # tensor : object kept for backward (only used for inputs)
+		self.finished = []  # tensor : object ready to be sent to the peer
 
-	def wait_and_pop(self):
+	def get(self, queue, mb_id):
+		if len(queue) <= mb_id:
+			raise Exception(f"Variable {self.name} - Data queue shorter than mb_id {mb_id}")
+		if queue[mb_id] is None:
+			raise Exception(f"Variable {self.name} - Trying to pop data at mb_id {mb_id}, but it's empty")
+
+		data = queue[mb_id]
+		queue[mb_id] = None
+		return data
+	
+	def set(self, queue, mb_id, value):
+		if len(queue) <= mb_id:
+			queue.extend([None] * (mb_id - len(queue) + 1))
+		if queue[mb_id] is not None:
+			raise Exception(f"Variable {self.name} - Trying to set data at mb_id {mb_id}, but it's already set")
+		queue[mb_id] = value
+
+	def wait_and_pop(self, mb_id):
 		"""
 		Get one element from the waiting queue. Waits for the corresponding communication to complete if needed.
 		"""
-		work, tensor = self.waiting.popleft()
+		work, tensor = self.get(self.waiting, mb_id)
 		if work is not None:
 			work.wait()
 		return tensor
@@ -106,7 +122,7 @@ class PipelineBlock:
 	def __str__(self) -> str:
 		return f"[Layer {self.id} : GPU {self.rank}]"
 
-	def forward(self, **options):
+	def forward(self, mb_id, **options):
 		"""
 		Perform the forward pass for one tensor of activations and register it as computed
 
@@ -119,7 +135,7 @@ class PipelineBlock:
 		# Gather all variables needed for forward
 		inputs = []
 		for var in self.inputs:
-			x = var.wait_and_pop()
+			x = var.wait_and_pop(mb_id)
 
 			if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
 				x.requires_grad = True
@@ -140,7 +156,7 @@ class PipelineBlock:
 				y = (y,) if not isinstance(y, tuple) else y
 				for var, value in zip(self.outputs, y):
 					for dst in var:
-						dst.kept.append(value)
+						dst.set(dst.kept, mb_id, value)
 
 		self.compute_time.append(timer.time)
 
@@ -153,20 +169,20 @@ class PipelineBlock:
 		# Send to next
 		for var, value in zip(self.outputs, y):
 			for dst in var:
-				dst.finished.append(value)
+				dst.set(dst.finished, mb_id, value)
 
 		# Keep inputs for backward
 		for var, value in zip(self.inputs, inputs):
-			var.kept.append(value)
+			var.set(var.kept, mb_id, value)
 
 		if self.is_last:
 			output = []
 			for var in self.outputs:
 				assert len(var) == 1, "Output of the pipeline has multiple destinations"
-				output.append(var[0].finished.popleft())
+				output.append(var[0].get(var[0].finished, mb_id))
 			return output
 
-	def backward(self, **options):
+	def backward(self, mb_id, **options):
 		"""
 		Perform the backward pass for one tensor of gradients and register it as computed
 		Backward assumes activations AND grads to be on top of the queue
@@ -177,7 +193,7 @@ class PipelineBlock:
 
 		inputs = []
 		for var in self.inputs:
-			inputs.append(var.kept.popleft())
+			inputs.append(var.get(var.kept, mb_id))
 
 		if options.get(OpOptions.REMAT):
 			with Timer() as timer:
@@ -187,16 +203,16 @@ class PipelineBlock:
 			act = []
 			for var in self.outputs:
 				# Even if there are multiple destinations, it's the same tensor for everyone of them
-				act.append(var[0].kept.popleft())
+				act.append(var[0].get(var[0].kept, mb_id))
 				for target in var[1:]:
-					target.kept.popleft()
+					target.get(target.kept, mb_id)
 
 		grads = []
 		for var in self.outputs:
 			# For one tensor, the gradients are the sum of the gradients from every destination
-			g = var[0].wait_and_pop()
+			g = var[0].wait_and_pop(mb_id)
 			for dst in var[1:]:
-				g += dst.wait_and_pop()
+				g += dst.wait_and_pop(mb_id)
 			grads.append(g)
 
 		if torch.cuda.is_available():
@@ -225,9 +241,9 @@ class PipelineBlock:
 				if var.peer is not None:
 					logger.warning(f"{self} - No gradient computed for var {var}")
 				continue
-			var.finished.append(value.grad.data)
+			var.set(var.finished, mb_id, value.grad.data)
 
-	def send_forward(self, **options):
+	def send_forward(self, mb_id, **options):
 		"""
 		Send one activation to the next layer in the model
 
@@ -249,7 +265,7 @@ class PipelineBlock:
 
 				if not target.was_metadata_sent:
 					self._send_metadata(dst)
-				outputs = target.finished.popleft().contiguous()
+				outputs = target.get(target.finished, mb_id).contiguous()
 
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
 				if options.get(OpOptions.BATCHED_COMM):
@@ -260,7 +276,7 @@ class PipelineBlock:
 
 		return sends  # if not batched, sends is still empty and therefore Falsy
 
-	def send_backward(self, **options):
+	def send_backward(self, mb_id, **options):
 		"""
 		Send one gradient tensor to the previous layer in the model
 
@@ -277,7 +293,7 @@ class PipelineBlock:
 			if var.peer != dst:
 				continue
 
-			grads = var.finished.popleft().contiguous()
+			grads = var.get(var.finished, mb_id).contiguous()
 
 			rank = self.placement[dst]
 			if options.get(OpOptions.BATCHED_COMM):
@@ -288,7 +304,7 @@ class PipelineBlock:
 
 		return sends  # if not batched, sends is still empty and therefore Falsy
 
-	def recv_forward(self, mb_size, **options):
+	def recv_forward(self, mb_id, mb_size, **options):
 		"""
 		Receive and store one activation to forward
 
@@ -323,11 +339,11 @@ class PipelineBlock:
 				logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
 				work = dist.irecv(buffer, rank, group=self.pp_group)
 
-			var.waiting.append((work, buffer))
+			var.set(var.waiting, mb_id, (work, buffer))
 
 		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
-	def recv_backward(self, mb_size, **options):
+	def recv_backward(self, mb_id, mb_size, **options):
 		"""
 		Receive and store one gradient to backward
 
@@ -358,7 +374,7 @@ class PipelineBlock:
 					logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
 					work = dist.irecv(buffer, rank, group=self.pp_group)
 
-				target.waiting.append((work, buffer))
+				target.set(target.waiting, mb_id, (work, buffer))
 
 		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
