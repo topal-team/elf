@@ -1,4 +1,4 @@
-from ..partitioners.profile import *
+from pipeline.partitioners.profile import *
 import pytest
 
 import copy

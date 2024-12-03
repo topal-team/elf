@@ -1,6 +1,6 @@
 import pytest
 import torch
-from ..utils import TensorMetadata, dtypes
+from pipeline.utils import TensorMetadata, dtypes
 
 
 @pytest.mark.single

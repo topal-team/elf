@@ -1,8 +1,10 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from ..pipeline import *
+from pipeline.pipeline import *
 
 from datetime import timedelta
 

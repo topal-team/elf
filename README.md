@@ -29,7 +29,6 @@ You can define your own schedule if you want to perform tests or use an unimplem
 The options can be anything that modifies the behaviour of the operation, as long as the corresponding function in ``pipeline.py`` is modified to take it into account. See remat for an example. Currently supported :
 
 - Rematerialization (``{"remat": True}``)
-<!-- - Offloading (``{"offload": True}``) -->
 
 ### Model partitioning
 
@@ -47,12 +46,12 @@ You can run multiple pipelines at once with different data by specifying the arg
 ## Running tests and benchmarks
 
 Environment setup on some clusters is described in `config`.
-- [Helios](config/helios.md)
+- [Helios](docs/helios.md)
 
 ### Tests
 
 Run all tests:
 ```bash
-./scripts/test.sh
+./tests/test.sh
 ```
 Some of them require at least 2 GPUs.

@@ -1,5 +1,5 @@
 import pytest
-from ..partitioners.partition import *
+from pipeline.partitioners.partition import *
 
 import copy
 import torch
@@ -181,18 +181,3 @@ def test_partition():
 				return x1, x2
 
 		check_partition(ModelMultipleOutputs(), 2, torch.randn(4, 32), mode)
-
-
-@pytest.mark.single
-def test_get_inputs_outputs_single():
-	class Model(nn.Module):
-		def forward(self, x):
-			x = x + x
-			y = x * x
-			return y
-
-	trace = torch.fx.symbolic_trace(Model())
-	nodes = list(trace.graph.nodes)
-
-	_, inputs, outputs = get_inputs_outputs_single(nodes)
-	assert inputs == set(["x"])

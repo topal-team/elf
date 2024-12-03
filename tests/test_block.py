@@ -3,9 +3,9 @@ from datetime import timedelta
 
 import pytest
 
-from ..block import PipelineBlock, Variable
-from ..utils import TensorMetadata
-from ..partitioners.utils import Signature
+from pipeline.block import PipelineBlock, Variable
+from pipeline.utils import TensorMetadata
+from pipeline.partitioners.utils import Signature
 
 import torch
 import torch.nn as nn

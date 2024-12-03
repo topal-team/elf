@@ -6,4 +6,4 @@ from .engine import *
 from .utils import *
 from .block import *
 
-__all__ = ["Pipeline"]
+__all__ = ["Pipeline", "get_sources_targets_sequential"]

@@ -26,15 +26,6 @@ def _add_forward_pass(schedule, placement, block_id, mb_id, rank, signature, opt
 	if block_id == len(placement) - 1:
 		schedule.append(Operation(block_id, mb_id, OperationType.LOSS_FORWARD, rank, **options))
 
-	if block_id == len(placement) - 1:
-		schedule.append(Operation(block_id, mb_id, OperationType.LOSS_FORWARD, rank, **options))
-
-
-def _add_backward_pass(schedule, placement, block_id, mb_id, rank, options):
-	if block_id == len(placement) - 1:
-		schedule.append(Operation(block_id, mb_id, OperationType.LOSS_BACKWARD, rank, **options))
-
-
 def _add_backward_pass(schedule, placement, block_id, mb_id, rank, signature, options):
 	# Reverse order, see above
 	sources = sorted(signature.get_all_sources(), reverse=True)
@@ -52,7 +43,6 @@ def _add_backward_pass(schedule, placement, block_id, mb_id, rank, signature, op
 		schedule.append(
 			Operation(block_id, mb_id, OperationType.SEND_BACKWARD, rank, dst=dst, **options)
 		)
-
 
 def generate_afab_schedule(placement, n_micro_batches, signatures, **options):
 	"""

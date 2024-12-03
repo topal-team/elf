@@ -1,5 +1,5 @@
 from pipeline.partitioners.utils import Signature
-from ..schedules import *
+from pipeline.schedules import *
 import pytest
 
 
