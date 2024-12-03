@@ -24,8 +24,8 @@ from models.GPT import (
 )
 from pipeline import Pipeline
 
-import json
 import logging
+import json
 
 logger = logging.getLogger("train_llama")
 logging.basicConfig(level=logging.INFO)
@@ -55,7 +55,7 @@ def parse_args():
 
 	# Data
 	parser.add_argument(
-		"--data.load_dataset", action=argparse.BooleanOptionalAction, help="Dateset loading"
+		"--data.load_dataset", action=argparse.BooleanOptionalAction, help="Dataset loading"
 	)
 	parser.add_argument(
 		"--data.dataset_dir", type=str, help="Data: path to the folder with the dataset"
@@ -202,13 +202,8 @@ def get_gpt_config(args, vocab_size):
 
 
 def main(args):
-	# config_dict = {k: v for k,v in iter_nested_dict_flat(args)} # args.dict() is a nested dict
-	# config_columns = list(config_dict.keys())
-	# config_values = [config_dict[c] for c in config_columns]
-	# print(config_columns)
-
 	rank = dist.get_rank()
-	# print(args.tokenizer_dir, args.gpt.arch)
+
 	tokenizer = AutoTokenizer.from_pretrained(f"{args.tokenizer_dir}")
 	tokenizer.pad_token = tokenizer.eos_token
 	tokenized_dataset = datasets.load_from_disk(
@@ -229,9 +224,9 @@ def main(args):
 	)
 
 	sample = torch.randint(0, 10, (args.train.batch_size // args.pipeline.pp, args.train.max_seq_len))
-	# model = DummyGPT(32)
+
 	model = GPT(get_gpt_config(args, tokenizer.vocab_size))
-	# model = Llama(model_args)
+
 	if rank == 0:
 		print(
 			"# of trainable parameters : ",
