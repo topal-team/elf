@@ -158,12 +158,13 @@ class SimpleAttention(nn.Module):
 
 
 class SimpleTransformer(nn.Module):
-	def __init__(self, input_dim, hidden_dim, n_blocks=4):
+	def __init__(self, input_dim, hidden_dim, n_blocks=4, seq_len=64):
 		super(SimpleTransformer, self).__init__()
 
 		self.input_dim = input_dim
 		self.hidden_dim = hidden_dim
-
+		self.seq_len = seq_len
+		
 		self.embed = nn.Embedding(input_dim, hidden_dim)
 		self.head = nn.Linear(hidden_dim, input_dim)
 		self.blocks = []
@@ -185,7 +186,7 @@ class SimpleTransformer(nn.Module):
 		return x
 
 	def get_sample(self, batch_size):
-		return torch.randint(0, self.input_dim, (batch_size, 64))
+		return torch.randint(0, self.input_dim, (batch_size, self.seq_len))
 
 	def get_target(self, batch_size):
 		return self.get_sample(batch_size)

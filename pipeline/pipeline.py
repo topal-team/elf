@@ -151,10 +151,10 @@ class Pipeline:
 		# First and last block have some remaining tensors
 		for block in self.blocks:
 			for var in block.inputs:
-				var.finished.clear()
+				var.clear()
 			for var in block.outputs:
 				for dst in var:
-					dst.finished.clear()
+					dst.clear()
 
 		self.times = times
 
@@ -320,8 +320,10 @@ class Pipeline:
 				return generate_1f1b_schedule
 			case "hanayo":
 				return generate_hanayo_schedule
+			case "full_remat":
+				return generate_full_remat_schedule
 			case _:
-				raise Exception(f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo]")
+				raise Exception(f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat]")
 
 	def _generate_schedule(self, n_micro_batches):
 		"""
@@ -425,7 +427,7 @@ class Pipeline:
 		for pp in range(self.dp):
 			members = [r for r in range(world_size) if r // self.pp == pp]
 			if rank == members[0]:
-				logger.info(f"Creating PP group with members {members}")
+				logger.debug(f"Creating PP group with members {members}")
 			pp_group = dist.new_group(members)
 			if pp == dp_rank:
 				self.pp_group = pp_group

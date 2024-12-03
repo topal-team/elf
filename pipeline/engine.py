@@ -138,7 +138,7 @@ class Engine:
 			if block is None:
 				continue  # not my job
 
-			logger.debug(f"Computing {op} on block {block} with options {op.options}")
+			logger.debug(f"Computing {op} on block {block}")
 
 			if profile:
 				torch.cuda.nvtx.range_push(f"{block}:{op}")

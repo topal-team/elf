@@ -82,14 +82,13 @@ class Operation:
 
 def complementary(op_type):
 	"""
-	The complementary is the opposite communication, in the opposite direction, meaning that they have the same peer.
-	For instance, a recv(forward) is complementary to a send(backward), and vice versa.
+	The complementary is the opposite communication, that has the same peer.
 	"""
 	return {
-		OperationType.RECV_FORWARD: OperationType.SEND_BACKWARD,
-		OperationType.RECV_BACKWARD: OperationType.SEND_FORWARD,
-		OperationType.SEND_FORWARD: OperationType.RECV_BACKWARD,
-		OperationType.SEND_BACKWARD: OperationType.RECV_FORWARD,
+		OperationType.RECV_FORWARD: (OperationType.SEND_BACKWARD, OperationType.SEND_FORWARD),
+		OperationType.RECV_BACKWARD: (OperationType.SEND_FORWARD, OperationType.SEND_BACKWARD),
+		OperationType.SEND_FORWARD: (OperationType.RECV_BACKWARD, OperationType.RECV_FORWARD),
+		OperationType.SEND_BACKWARD: (OperationType.RECV_FORWARD, OperationType.RECV_BACKWARD),
 	}[op_type]
 
 
@@ -122,7 +121,7 @@ def resolve_one_pair(ops1, ops2):
 		return
 	rank1 = ops1[0].rank
 	rank2 = ops2[0].rank
-	assert rank1 > rank2, f"rank1 should be greater than rank2, got {rank1} and {rank2}"
+	# assert rank1 > rank2, f"rank1 should be greater than rank2, got {rank1} and {rank2}"
 
 	def find_matching_op(op):
 		"""
@@ -152,7 +151,7 @@ def resolve_one_pair(ops1, ops2):
 			continue
 
 		# Check if operations are complementary
-		if op2.op == complementary(op1.op):
+		if op2.op in complementary(op1.op):
 			op3 = find_matching_op(op2)
 			op4 = find_matching_op(op1)
 
@@ -199,7 +198,12 @@ def mark_batched_comms(schedule, placement):
 	Finds all operations that need to be batched and marks them for execution
 	"""
 
-	ranks = sorted(list(set(op.rank for op in schedule)), reverse=True)
+	ranks = []
+	# Unique, reverse order
+	for p in reversed(placement):
+		if p not in ranks:
+			ranks.append(p)
+
 	visited = set()
 	for i in ranks:
 		for j in ranks:

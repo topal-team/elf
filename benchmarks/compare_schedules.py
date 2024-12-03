@@ -2,11 +2,13 @@ import torch
 import torch.distributed as dist
 import os
 import sys
+import gc
 
 sys.path.append("./")
 from pipeline.pipeline import Pipeline
 from argparse import ArgumentParser
-from settings import *
+from models.simple import SimpleTransformer
+from pipeline.utils import pretty_print_params
 
 import logging
 
@@ -23,7 +25,7 @@ def medians(times):
 
 
 if __name__ == "__main__":
-	parser = ArgumentParser(description="Benchmark of pipelined model with custom engine")
+	parser = ArgumentParser(description="Benchmark different schedules")
 	parser.add_argument(
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
 	)
@@ -46,64 +48,87 @@ if __name__ == "__main__":
 	dist.init_process_group(backend="nccl")
 
 	if global_rank == 0:
+		if os.path.exists(fileout):
+			os.remove(fileout)
 		with open(fileout, "w") as f:
-			f.write(
-				"name,mb_size,total_time_0,idle_time_0,start_time_0,end_time_0,bubble_time_0,total_time_1,idle_time_1,start_time_1,end_time_1,bubble_time_1,total_time_2,idle_time_2,start_time_2,end_time_2,bubble_time_2,total_time_3,idle_time_3,start_time_3,end_time_3,bubble_time_3,mem_0,mem_1,mem_2,mem_3\n"
-			)
+			f.write("name")
+			for i in range(4):
+				f.write(f",total_time_{i},idle_time_{i},start_time_{i},end_time_{i},bubble_time_{i}")
+			for i in range(4):
+				f.write(f",mem_{i}")
+			f.write("\n")
 
-	torch.cuda.cudart().cudaProfilerStart()
+	# torch.cuda.cudart().cudaProfilerStart()
 
-	inputs = inputs.cuda()
+	model = SimpleTransformer(8000, 2048, 32, 512)
+	if rank == 0:
+		logger.info(f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters")
+	loss_fn = model.loss_fn
+
+	setups = [
+		("GPipe", list(range(world_size)), "afab"),
+		("1f1b", list(range(world_size)), "1f1b"),
+		("Megatron", list(range(world_size)) * 2, "1f1b"),
+		("Hanayo", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
+		("Full Remat", list(range(world_size)), "full_remat"),
+	]
 
 	for s, placement, schedule in setups:
+		if global_rank == 0:
+			logger.info(f"Beginning benchmark for {s}")
+		# logger.info(f"Rank {rank} - Memory allocated : {torch.cuda.memory_allocated() / 2**30:.3f} GB")
+
+		inputs = model.get_sample(32)
+		targets = model.get_target(32)
+
 		pipe = Pipeline(model, inputs, placement, schedule=schedule)
-		for size in split_sizes:
-			# if global_rank == 0: print(f'Memory allocated : {torch.cuda.memory_allocated() / 2**30:.3f} GB')
+		# Warmup
+		if global_rank == 0:
+			logger.info(f"{s} - Warming up")
+		for i in range(3):
+			y = pipe(inputs.clone(), targets.clone(), loss_fn)
+		torch.cuda.reset_peak_memory_stats()
 
-			if global_rank == 0:
-				logger.info(f"{s} - Beginning bench for micro batches of size {size}")
+		if global_rank == 0:
+			logger.info(f"{s} - Benchmark")
+		times = []
+		for i in range(10):
+			model.zero_grad()
+			inputs = model.get_sample(32)
+			targets = model.get_target(32)
+			y = pipe(inputs, targets, loss_fn)
+			times.append(pipe.times)
 
-			# Warmup
-			if global_rank == 0:
-				logger.info(f"{s} - Warming up")
-			for i in range(warmups):
-				_ = pipe(inputs.clone(), torch.empty(0), lambda x, _: x.sum(), size, **options)
-			torch.cuda.reset_peak_memory_stats()
+		mems = (
+			[torch.tensor(0.0, device=rank) for _ in range(world_size)] if global_rank == 0 else None
+		)
+		dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=rank), mems, 0)
 
-			if global_rank == 0:
-				logger.info(f"{s} - Benchmark")
-			times = []
-			for i in range(iters):
-				_ = pipe(inputs.detach(), torch.empty(0), lambda x, _: x.sum(), size, **options)
-				model.zero_grad()
-				times.append(pipe.times)
+		median_times = medians(times)
+		itimes = [{} for _ in range(world_size)] if global_rank == 0 else None
+		dist.gather_object(median_times, itimes, 0)
 
-			mems = (
-				[torch.tensor(0.0, device=rank) for _ in range(world_size)] if global_rank == 0 else None
+		if global_rank == 0:
+			print(
+				f'{s} :\n\tMedian time : {median_times["total"]:.3f}s\n\tIdle time : {median_times["idle"]:.2f}s, or {100 * median_times["idle"] / median_times["total"]:.1f}% of total time.\n\tMems : {[m.item() for m in mems]} GB'
 			)
-			dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=rank), mems, 0)
-
-			median_times = medians(times)
-			itimes = [{} for _ in range(world_size)] if global_rank == 0 else None
-			dist.gather_object(median_times, itimes, 0)
-
-			if global_rank == 0:
-				print(
-					f'{s} - Size {size} :\n\tMedian time : {median_times["total"]:.3f}s\n\tIdle time : {median_times["idle"]:.2f}s, or {100 * median_times["idle"] / median_times["total"]:.1f}% of total time.'
-				)
-				with open(fileout, "a") as f:
-					f.write(f"{s},{size}")
-					for d in itimes:
-						for t in d.values():
-							f.write(f",{t}")
-					for m in mems:
-						f.write(f",{m}")
-					f.write("\n")
-					f.flush()
+			with open(fileout, "a") as f:
+				f.write(f"{s}")
+				for d in itimes:
+					for t in d.values():
+						f.write(f",{t}")
+				for m in mems:
+					f.write(f",{m}")
+				f.write("\n")
+				f.flush()
 
 		pipe.clear()
+		model.zero_grad(set_to_none=True)
+		del pipe, y, inputs, targets, median_times, mems, itimes
+		gc.collect()
+		torch.cuda.empty_cache()
 
-	torch.cuda.cudart().cudaProfilerStop()
+	# torch.cuda.cudart().cudaProfilerStop()
 
 	dist.barrier()
 	if dist.is_initialized():

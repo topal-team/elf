@@ -4,13 +4,13 @@ A schedule is a list of operations (see Operation) that will be executed in orde
 Every rank should generate the entire schedule for all ranks, in order to detect and fix cycles/deadlocks.
 """
 
-from .scheduling import OperationType, Operation
+from .scheduling import OpOptions, OperationType, Operation
 import logging
 
 logger = logging.getLogger("schedules")
 
 
-def _add_forward_pass(schedule, placement, block_id, mb_id, rank, signature, options):
+def _add_forward_pass(schedule, placement, block_id, mb_id, rank, signature, **options):
 	sources = sorted(signature.get_all_sources(), reverse=True)
 	destinations = sorted(signature.get_all_targets())
 	for src in sources:
@@ -27,7 +27,7 @@ def _add_forward_pass(schedule, placement, block_id, mb_id, rank, signature, opt
 		schedule.append(Operation(block_id, mb_id, OperationType.LOSS_FORWARD, rank, **options))
 
 
-def _add_backward_pass(schedule, placement, block_id, mb_id, rank, signature, options):
+def _add_backward_pass(schedule, placement, block_id, mb_id, rank, signature, **options):
 	# Reverse order, see above
 	sources = sorted(signature.get_all_sources(), reverse=True)
 	destinations = sorted(signature.get_all_targets())
@@ -46,7 +46,7 @@ def _add_backward_pass(schedule, placement, block_id, mb_id, rank, signature, op
 		)
 
 
-def generate_afab_schedule(placement, n_micro_batches, signatures, **options):
+def generate_afab_schedule(placement, n_micro_batches, signatures):
 	"""
 	All Forward All Backward as in GPipe https://arxiv.org/abs/1811.06965
 
@@ -67,19 +67,19 @@ def generate_afab_schedule(placement, n_micro_batches, signatures, **options):
 		# All forward
 		for i in range(n_micro_batches):
 			for id_ in ids:
-				_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_], options)
+				_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_])
 		# All backward
 		for i in range(n_micro_batches):
 			for id_ in reversed(ids):
-				_add_backward_pass(schedule, placement, id_, i, rank, signatures[id_], options)
+				_add_backward_pass(schedule, placement, id_, i, rank, signatures[id_])
 
 		for id_ in ids:
-			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank, **options))
+			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
 
 	return schedule
 
 
-def generate_1f1b_schedule(placement, n_micro_batches, signatures, **options):
+def generate_1f1b_schedule(placement, n_micro_batches, signatures):
 	"""
 	One Forward One Backward as in PipeDream https://arxiv.org/abs/1806.03377
 
@@ -107,7 +107,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, signatures, **options):
 		while i < (stages_per_device * n_micro_batches) and i < (n_stages - rank):
 			i += 1
 			id_ = b_f * n_devices + rank
-			_add_forward_pass(schedule, placement, id_, fwds[b_f], rank, signatures[id_], options)
+			_add_forward_pass(schedule, placement, id_, fwds[b_f], rank, signatures[id_])
 			fwds[b_f] += 1
 
 			# each layer has time to compute n_devices micro batches before work arrives for the next layer
@@ -124,7 +124,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, signatures, **options):
 		while i < (stages_per_device * n_micro_batches):
 			i += 1
 			id_ = b_b * n_devices + rank
-			_add_backward_pass(schedule, placement, id_, bwds[b_b], rank, signatures[id_], options)
+			_add_backward_pass(schedule, placement, id_, bwds[b_b], rank, signatures[id_])
 			bwds[b_b] += 1
 
 			# Same as before, except that we can compute 2x less micro batches because half of the time is spent doing forwards
@@ -132,7 +132,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, signatures, **options):
 				b_b = (b_b - 1) % stages_per_device
 
 			id_ = b_f * n_devices + rank
-			_add_forward_pass(schedule, placement, id_, fwds[b_f], rank, signatures[id_], options)
+			_add_forward_pass(schedule, placement, id_, fwds[b_f], rank, signatures[id_])
 			fwds[b_f] += 1
 
 			if (i >= n_stages and i % (n_devices // 2) == 0) or (i % n_micro_batches) == 0:
@@ -143,7 +143,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, signatures, **options):
 		):
 			i += 1
 			id_ = b_b * n_devices + rank
-			_add_backward_pass(schedule, placement, id_, bwds[b_b], rank, signatures[id_], options)
+			_add_backward_pass(schedule, placement, id_, bwds[b_b], rank, signatures[id_])
 			bwds[b_b] += 1
 
 			# Finish all backwards
@@ -154,13 +154,13 @@ def generate_1f1b_schedule(placement, n_micro_batches, signatures, **options):
 
 	for i in range(n_stages):
 		schedule.append(
-			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i], **options)
+			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i])
 		)
 
 	return schedule
 
 
-def generate_hanayo_schedule(placement, n_micro_batches, signatures, **options):
+def generate_hanayo_schedule(placement, n_micro_batches, signatures):
 	"""
 	Hanayo schedule as in https://dl.acm.org/doi/10.1145/3581784.3607073
 
@@ -188,24 +188,24 @@ def generate_hanayo_schedule(placement, n_micro_batches, signatures, **options):
 		done[rank] = min(n_devices - rank, n_micro_batches)
 		for i in range(done[rank]):
 			id_ = ids[rank][0]
-			_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_], options)
+			_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_])
 
 	for w in range(n_waves):
 		for mb in range(n_micro_batches):
 			for rank in reversed(range(n_devices)):
 				id_ = ids[rank][2 * w + 1]
-				_add_forward_pass(schedule, placement, id_, mb, rank, signatures[id_], options)
+				_add_forward_pass(schedule, placement, id_, mb, rank, signatures[id_])
 
 				if done[rank] < n_micro_batches * n_waves:
 					id_ = ids[rank][2 * (done[rank] // n_micro_batches)]
 					_add_forward_pass(
-						schedule, placement, id_, done[rank] % n_micro_batches, rank, signatures[id_], options
+						schedule, placement, id_, done[rank] % n_micro_batches, rank, signatures[id_]
 					)
 					done[rank] += 1
 				else:
 					id_ = ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)]
 					_add_backward_pass(
-						schedule, placement, id_, enod[rank] % n_micro_batches, rank, signatures[id_], options
+						schedule, placement, id_, enod[rank] % n_micro_batches, rank, signatures[id_]
 					)
 					enod[rank] += 1
 
@@ -213,18 +213,53 @@ def generate_hanayo_schedule(placement, n_micro_batches, signatures, **options):
 		for mb in range(n_micro_batches):
 			for rank in reversed(range(n_devices)):
 				id_ = ids[rank][-2 * (w + 1)]
-				_add_backward_pass(schedule, placement, id_, mb, rank, signatures[id_], options)
+				_add_backward_pass(schedule, placement, id_, mb, rank, signatures[id_])
 
 				if enod[rank] < n_micro_batches * n_waves:
 					id_ = ids[rank][-1 - 2 * (enod[rank] // n_micro_batches)]
 					_add_backward_pass(
-						schedule, placement, id_, enod[rank] % n_micro_batches, rank, signatures[id_], options
+						schedule, placement, id_, enod[rank] % n_micro_batches, rank, signatures[id_]
 					)
 					enod[rank] += 1
 
 	for i in range(n_stages):
 		schedule.append(
-			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i], **options)
+			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i])
 		)
+
+	return schedule
+
+def generate_full_remat_schedule(placement, n_micro_batches, signatures):
+	schedule = []
+	n_devices = max(placement) + 1
+
+	# All ranks do afab
+	for rank in range(n_devices - 1):
+		ids = [i for i in range(len(placement)) if placement[i] == rank]
+		# All forward
+		for i in range(n_micro_batches):
+			for id_ in ids:
+				_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.REMAT: True})
+		# All backward
+		for i in range(n_micro_batches):
+			for id_ in reversed(ids):
+				schedule.append(Operation(id_, i, OperationType.FORWARD, rank)) # recomputation happens here
+				_add_backward_pass(schedule, placement, id_, i, rank, signatures[id_])
+
+		for id_ in ids:
+			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
+
+	# Last rank does 1f1b
+	rank = n_devices - 1
+	ids = [i for i in range(len(placement)) if placement[i] == rank]
+	for i in range(n_micro_batches):
+		for id_ in ids:
+			_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_])
+
+		for id_ in reversed(ids):
+			_add_backward_pass(schedule, placement, id_, i, rank, signatures[id_])
+
+	for id_ in ids:
+		schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
 
 	return schedule

@@ -306,7 +306,7 @@ def partition_graph(model, n, sample, partitioner="naive"):
 		subgraph = create_subgraph(graph, p, inputs[i], outputs[i])
 		remove_inplace_leaves(subgraph)
 		blocks.append(subgraph)
-		logger.info(f"Part {i} - signature = {signatures[i]}")
+		logger.debug(f"Part {i} - signature = {signatures[i]}")
 
 	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
 	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]

@@ -68,9 +68,17 @@ class Variable:
 	def __repr__(self):
 		return str(self)
 
+	def clear(self):
+		self.waiting.clear()
+		self.kept.clear()
+		self.finished.clear()
+
 	# Debug utility
 	def _state(self):
-		return f"{str(self)} - waiting: {len(self.waiting)}, kept: {len(self.kept)}, finished: {len(self.finished)}"
+		w = len([x for x in self.waiting if x is not None])
+		k = len([x for x in self.kept if x is not None])
+		f = len([x for x in self.finished if x is not None])
+		return f"{str(self)} - waiting: {w}, kept: {k}, finished: {f}"
 
 
 class PipelineBlock:
@@ -151,12 +159,20 @@ class PipelineBlock:
 				with torch.no_grad():
 					y = self.model(*inputs)
 					y = (y,) if not isinstance(y, tuple) else y
+
+					# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
+					for var, value in zip(self.inputs, inputs):
+						var.set(var.waiting, mb_id, (None, value))
 			else:
 				y = self.model(*inputs)
 				y = (y,) if not isinstance(y, tuple) else y
 				for var, value in zip(self.outputs, y):
 					for dst in var:
 						dst.set(dst.kept, mb_id, value)
+
+				# Keep inputs for backward
+				for var, value in zip(self.inputs, inputs):
+					var.set(var.kept, mb_id, value)
 
 		self.compute_time.append(timer.time)
 
@@ -169,11 +185,8 @@ class PipelineBlock:
 		# Send to next
 		for var, value in zip(self.outputs, y):
 			for dst in var:
+				value = value.detach() # non-tensor comms are not handled anyway
 				dst.set(dst.finished, mb_id, value)
-
-		# Keep inputs for backward
-		for var, value in zip(self.inputs, inputs):
-			var.set(var.kept, mb_id, value)
 
 		if self.is_last:
 			output = []
@@ -195,17 +208,12 @@ class PipelineBlock:
 		for var in self.inputs:
 			inputs.append(var.get(var.kept, mb_id))
 
-		if options.get(OpOptions.REMAT):
-			with Timer() as timer:
-				act = self.model(*inputs)
-			self.compute_time += timer.time
-		else:
-			act = []
-			for var in self.outputs:
-				# Even if there are multiple destinations, it's the same tensor for everyone of them
-				act.append(var[0].get(var[0].kept, mb_id))
-				for target in var[1:]:
-					target.get(target.kept, mb_id)
+		act = []
+		for var in self.outputs:
+			# Even if there are multiple destinations, it's the same tensor for everyone of them
+			act.append(var[0].get(var[0].kept, mb_id))
+			for target in var[1:]:
+				target.get(target.kept, mb_id)
 
 		grads = []
 		for var in self.outputs:
