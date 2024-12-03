@@ -40,7 +40,6 @@ def run_collective(local_rank, rank, ws):
 
 	dist.destroy_process_group()
 
-
 # With a tensor, crashes with any world size at communication (before process group destroy)
 # With something else, works fine with any world size
 def run_gather_object(local_rank, rank, ws):
@@ -54,7 +53,6 @@ def run_gather_object(local_rank, rank, ws):
 		print(object_list)
 
 	dist.destroy_process_group()
-
 
 # With a tensor, crashes with any world size at communication (before process group destroy)
 # With something else, crashes when world size > 2 at process group destroy
@@ -70,7 +68,6 @@ def run_p2p_object(local_rank, rank, ws):
 	print(f"Rank {rank} - {object_list}")
 
 	dist.destroy_process_group()
-
 
 def run_multinode_test(local_rank, rank, ws):
 	print(f"Global rank {rank} - local rank {local_rank}, world size {ws}")

@@ -1,7 +1,5 @@
 import os
 import sys
-import time
-from datetime import timedelta
 
 sys.path.append("./")
 
@@ -14,6 +12,7 @@ from torch.utils.data.distributed import DistributedSampler
 import datasets
 from transformers import AutoTokenizer
 
+# from models.llama3 import Llama, ModelArgs
 from models.GPT import GPT, GPTLargeConfig
 from pipeline import Pipeline
 
@@ -33,18 +32,6 @@ def pretty_print_params(n):
 		return f"{int(n)}"
 
 
-def pretty_print_step(times):
-	total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / (
-		2**30
-	)
-	memory = torch.cuda.max_memory_allocated() / (2**30)
-	info = f"Rank {rank} -\n"
-	for k, v in times.items():
-		info += f"\t{k} : {v:.2f}s\n"
-	info += f"\tPeak memory : {memory:.2f}GB ({100 * memory / total_memory:.2f}%)"
-	print(info)
-
-
 def parse_args():
 	parser = argparse.ArgumentParser(description="Train Llama3 model")
 	parser.add_argument(
@@ -61,22 +48,7 @@ def parse_args():
 		"--dataset_path", "-d", type=str, default="/data", required=False, help="Path to dataset"
 	)
 	parser.add_argument(
-		"--tokenizer",
-		type=str,
-		default="mistralai/Mistral-7B-v0.1",
-		required=False,
-		help="Path to tokenizer",
-	)
-	parser.add_argument(
-		"--dataset_size",
-		"-ds",
-		type=int,
-		default=None,
-		required=False,
-		help="Max size of dataset, in number of sequences",
-	)
-	parser.add_argument(
-		"--save_path", "-sp", type=str, default=None, required=False, help="Path to save checkpoints"
+		"--tokenizer_path", "-tk", type=str, default="/data", required=False, help="Path to tokenizer"
 	)
 	parser.add_argument(
 		"-dp", type=int, default=1, required=False, help="Number of data parallel processes"
@@ -87,7 +59,7 @@ def parse_args():
 	parser.add_argument(
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
 	)
-	args = parser.parse_args()
+	args = parser.parse_arg()
 	match args.log:
 		case "debug":
 			logging.getLogger().setLevel(logging.DEBUG)
@@ -95,22 +67,22 @@ def parse_args():
 			logging.getLogger().setLevel(logging.INFO)
 		case "none":
 			logging.getLogger().setLevel(100)
-
 	return args
 
 
 def main():
 	args = parse_args()
 
+	# Load dataset
+	# dataset = datasets.load_from_disk("/data/wikitext-2-v1/train")
 	# Initialize tokenizer
-	tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+	# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+	tokenizer = AutoTokenizer.from_pretrained(f"{args.tokenizer_path}")
+
 	tokenizer.pad_token = tokenizer.eos_token
 
-	# Load dataset
 	if os.path.exists(args.dataset_path + "/tokenized/train"):
 		tokenized_dataset = datasets.load_from_disk(args.dataset_path + "/tokenized/train")
-		if args.dataset_size is not None:
-			tokenized_dataset = tokenized_dataset.select(range(args.dataset_size))
 	else:
 		print(f"No tokenized dataset found at {args.dataset_path}/tokenized/train.")
 		exit(1)
@@ -119,85 +91,69 @@ def main():
 		print(f"Loaded {pretty_print_params(len(tokenized_dataset))} samples")
 		print(f"Vocab size: {tokenizer.vocab_size}")
 
-	sampler = DistributedSampler(tokenized_dataset, num_replicas=args.dp, rank=rank // args.pp)
-	dataloader = DataLoader(tokenized_dataset, batch_size=args.batch_size, sampler=sampler)
+	# Create DataLoader
+	dataloader = DataLoader(
+		tokenized_dataset,
+		batch_size=args.batch_size // args.dp,
+		sampler=DistributedSampler(tokenized_dataset, num_replicas=args.dp, rank=rank // args.pp),
+	)
 
 	# Initialize model
-	model_args = GPTLargeConfig(tokenizer.vocab_size + 2, args.max_seq_len)
-	model = GPT(model_args)
+	# model_args = ModelArgs(
+	# 	dim=128,
+	# 	n_layers=64,
+	# 	n_heads=4,
+	# 	vocab_size=tokenizer.vocab_size + 2,
+	# 	max_seq_len=args.max_seq_len,
+	# )
 
+	sample = torch.randint(0, 10, (args.batch_size // args.pp, args.max_seq_len))
+	model = GPT(GPTLargeConfig(tokenizer.vocab_size + 2, args.max_seq_len))
+	# model = Llama(model_args)
 	if rank == 0:
 		print(
 			"# of trainable parameters : ",
 			pretty_print_params(sum(p.numel() for p in model.parameters() if p.requires_grad)),
 		)
-	# placement = list(range(args.pp)) + list(reversed(range(args.pp)))
-	placement = list(range(args.pp))
-	mb_size = args.batch_size // args.pp
-	sample = torch.randint(0, 10, (mb_size, args.max_seq_len))
-	pipe = Pipeline(
-		model, sample, placement, partitioner="metis", schedule="1f1b", dp=args.dp, worker=1
-	)
+	placement = list(range(args.pp)) * 2
+	pipe = Pipeline(model, sample, placement, partition="metis", schedule="afab", dp=args.dp)
 
 	# Initialize optimizer
 	optimizer = torch.optim.AdamW(pipe.parameters(), lr=args.lr)
 
-	def loss_fn(logits, targets, *args, **kwargs):
-		logits = logits.view(-1, logits.size(-1))
-		targets = torch.roll(targets, shifts=-1)
-		targets[:, -1] = -100
-		targets = targets.view(-1)
-		return nn.functional.cross_entropy(logits, targets, ignore_index=-100, *args, **kwargs)
-
-	model.train()
-
-	start = time.time()
 	torch.cuda.cudart().cudaProfilerStart()
 
-	log_step = len(dataloader) // (5 * args.dp)  # print 5x per epoch
+	def loss_fn(logits, targets):
+		logits = logits.view(-1, logits.size(-1))
+		targets = targets.view(-1)
+		return nn.functional.cross_entropy(logits, targets)
 
 	# Training loop
+	model.train()
 	for epoch in range(args.epochs):
-		sampler.set_epoch(epoch)
 		total_loss = 0
 		i = 0
-		start = time.time()
 		for i, batch in enumerate(dataloader):
 			# Transform batch["input_ids"] into a single tensor
 			input_ids = torch.stack(batch["input_ids"], -1).cuda()
 
 			optimizer.zero_grad()
 
-			_, loss = pipe(input_ids, input_ids, loss_fn, split_size=mb_size, profile=True)
-			if loss:
-				total_loss += loss.item()
+			_, loss = pipe(
+				input_ids, input_ids, loss_fn, split_size=args.batch_size // args.pp, profile=True
+			)
 
 			optimizer.step()
 
-			if (i + 1) % log_step == 0:
-				if rank == ws - 1:
-					print(
-						f"[Epoch {epoch + 1} | {(i*args.dp) + 1} / {len(dataloader)}] : {total_loss / (i + 1):.4f}"
-					)
-				if rank < args.pp:
-					pretty_print_step(pipe.times)
-					torch.cuda.reset_peak_memory_stats()
+			if rank == ws - 1:
+				total_loss += loss.item()
+				if i % 100 == 99:
+					print(f"[{epoch + 1} | {i}] : {total_loss / i:.4f}")
 
 		if rank == ws - 1:
 			avg_loss = total_loss / len(dataloader)
-			print(
-				f"Epoch {epoch + 1}/{args.epochs}, Average Loss: {avg_loss:.4f} (Time taken: {time.time() - start:.4f}s)"
-			)
+			print(f"Epoch {epoch + 1}/{args.epochs}, Average Loss: {avg_loss:.4f}")
 
-		if args.save_path is not None:
-			if not os.path.exists(args.save_path):
-				os.makedirs(args.save_path)
-			pipe.save(f"{args.save_path}/checkpoint_{epoch + 1}.pt", worker=1)
-
-	torch.cuda.synchronize()
-	end = time.time()
-	if rank == 0:
-		print(f"Total time: {end - start:.4f}s")
 	torch.cuda.cudart().cudaProfilerStop()
 	pipe.clear()
 
@@ -207,7 +163,7 @@ if __name__ == "__main__":
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	ws = int(os.getenv("WORLD_SIZE"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl", timeout=timedelta(minutes=60))
+	dist.init_process_group(backend="nccl")
 
 	main()
 

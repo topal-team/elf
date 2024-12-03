@@ -68,7 +68,15 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 
 	sources, targets = get_sources_targets_sequential(placement)
 
-	pipe = Pipeline(copy.deepcopy(blocks), batch, placement, partitioner=False, schedule=scheduler, sources=sources, targets=targets)
+	pipe = Pipeline(
+		copy.deepcopy(blocks),
+		batch,
+		placement,
+		partitioner=False,
+		schedule=scheduler,
+		sources=sources,
+		targets=targets,
+	)
 	output, pipeloss = pipe(batch, target, F.mse_loss, split_size)
 	# we shouldn't access directly the internal modules but it's for the purpose of testing
 	blocks = pipe.blocks

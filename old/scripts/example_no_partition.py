@@ -35,7 +35,9 @@ if __name__ == "__main__":
 	# We don't need a sample here
 	placement = [0, 1, 2, 3]
 	sources, targets = get_sources_targets_sequential(placement)
-	pipe = Pipeline(part, None, partitioner=False, placement=placement, sources=sources, targets=targets)
+	pipe = Pipeline(
+		part, None, partitioner=False, placement=placement, sources=sources, targets=targets
+	)
 
 	loss_fn = nn.functional.cross_entropy
 	optimizer = torch.optim.Adam(pipe.parameters())

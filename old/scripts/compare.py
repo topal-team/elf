@@ -20,18 +20,26 @@ targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
 mb_size = batch_size // (max(placement) + 1)
 
+
 def get_part(rank):
 	blocks_per_stage = len(model.blocks) // len(placement)
 	if rank == 0:
 		return nn.Sequential(model.embed, *model.blocks[:blocks_per_stage]), inputs.clone()[:mb_size]
 	elif rank == placement[-1]:
-		return nn.Sequential(*model.blocks[-blocks_per_stage:], model.head), torch.randn(mb_size, 64, model.hidden_dim).cuda()
+		return nn.Sequential(*model.blocks[-blocks_per_stage:], model.head), torch.randn(
+			mb_size, 64, model.hidden_dim
+		).cuda()
 	else:
-		return nn.Sequential(*model.blocks[blocks_per_stage * rank:blocks_per_stage * (rank + 1)]), torch.randn(mb_size, 64, model.hidden_dim).cuda()
+		return nn.Sequential(
+			*model.blocks[blocks_per_stage * rank : blocks_per_stage * (rank + 1)]
+		), torch.randn(mb_size, 64, model.hidden_dim).cuda()
+
 
 def pippy():
 	part, sample = get_part(rank)
-	stage = PiPPy.PipelineStage(part, rank, len(placement), torch.cuda.current_device(), input_args=sample)
+	stage = PiPPy.PipelineStage(
+		part, rank, len(placement), torch.cuda.current_device(), input_args=sample
+	)
 	schedule = PiPPy.Schedule1F1B(stage, len(placement), loss_fn=loss_fn)
 	# Warmup
 	for _ in range(5):

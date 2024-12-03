@@ -30,7 +30,7 @@ class OperationType(Enum):
 		return self.name.lower()
 
 
-class OpOptions(StrEnum): # will be used as a key in a dict, needs to be a string
+class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a string
 	"""
 	Options that can be passed to operations to modify their behaviour
 	"""

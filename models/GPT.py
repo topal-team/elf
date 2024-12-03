@@ -29,6 +29,17 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class MyGPTConfig:
+	def __init__(self, vocab_size, block_size, **kwargs):
+		self.vocab_size = vocab_size
+		self.block_size = block_size
+		self.embd_pdrop = 0.1
+		self.resid_pdrop = 0.1
+		self.attn_pdrop = 0.1
+		for k, v in kwargs.items():
+			setattr(self, k, v)
+
+
 class GPTConfig:
 	"""base GPT config, params common to all GPT versions"""
 

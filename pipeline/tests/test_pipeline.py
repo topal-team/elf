@@ -105,13 +105,14 @@ def test_pipe_correctness_multi(init_dist):
 		pytest.skip("This test needs at least 4 gpus (and processes) to run.")
 		return
 
-
 	sample = torch.randn((4, 3), device=local_rank)
 	model = nn.Linear(3, 3, bias=False).cuda()
 	placement = [0, 1, 2, 3]
 	sources, targets = get_sources_targets_sequential(placement)
 
-	pipe = Pipeline([model], sample, placement=placement, partitioner=False, sources=sources, targets=targets)
+	pipe = Pipeline(
+		[model], sample, placement=placement, partitioner=False, sources=sources, targets=targets
+	)
 	last = 3
 
 	inputs = torch.randn((4, 3), device=local_rank)

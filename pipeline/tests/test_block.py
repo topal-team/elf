@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from collections import deque
 
+
 @pytest.fixture(scope="session")
 def init_dist():
 	assert "RANK" in os.environ, "Cannot run multi-process tests without torchrun"
@@ -30,7 +31,6 @@ def init_dist():
 	finally:
 		if dist.is_initialized():
 			dist.destroy_process_group()
-
 
 
 @pytest.mark.single

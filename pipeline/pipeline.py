@@ -13,10 +13,27 @@ from .engine import Engine
 from .utils import *
 from .scheduling import mark_batched_comms
 from .partitioners import partition_graph
+from collections import OrderedDict
 
 import logging
 
 logger = logging.getLogger("pipeline")
+
+
+def to_cpu(nested_dict):
+	"""
+	Recursively moves all tensors in a nested dictionary to the CPU.
+	"""
+	if isinstance(nested_dict, dict):
+		return {key: to_cpu(value) for key, value in nested_dict.items()}
+	elif isinstance(nested_dict, list):
+		return [to_cpu(item) for item in nested_dict]
+	elif isinstance(nested_dict, tuple):
+		return tuple(to_cpu(item) for item in nested_dict)
+	elif isinstance(nested_dict, torch.Tensor):
+		return nested_dict.cpu()
+	else:
+		return nested_dict
 
 
 class Pipeline:
@@ -25,7 +42,16 @@ class Pipeline:
 	"""
 
 	def __init__(
-		self, model, sample, placement="auto", partitioner="metis", schedule="1f1b", dp=1, worker=0, sources = None, targets = None
+		self,
+		model,
+		sample,
+		placement="auto",
+		partitioner="metis",
+		schedule="1f1b",
+		dp=1,
+		worker=0,
+		sources=None,
+		targets=None,
 	):
 		"""
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
@@ -157,11 +183,10 @@ class Pipeline:
 		:return: An iterator yielding tuples of (name, parameter) for all parameters in the pipeline.
 		:rtype: Iterator[Tuple[str, torch.nn.Parameter]]
 		"""
-		full_params = {}
+		rank_named_parameters = OrderedDict()
 		for block in self.blocks:
-			for p_name, p in block.model.named_parameters():
-				full_params[p_name] = p
-		return full_params
+			rank_named_parameters.update(block.model.named_parameters())
+		return rank_named_parameters
 
 	def zero_grad(self, set_to_none=True):
 		"""
@@ -190,6 +215,24 @@ class Pipeline:
 			f"Destroying PP group with members {dist.get_process_group_ranks(self.blocks[0].pp_group)}"
 		)
 		dist.destroy_process_group(self.blocks[0].pp_group)
+
+	def checkpoint(self, epoch="init", dir_path="./"):
+		"""
+		Save the model's state dictionaries to disk.
+		One file will be created per rank
+		"""
+		rank = dist.get_rank()
+		rank_state_dict = {"rank": rank, "pp": self.pp, "dp": self.dp, "epoch": epoch}
+
+		for block in self.blocks:
+			rank_state_dict[f"state_dict_{block.id}"] = {
+				k: v.data for k, v in block.model.state_dict().items()
+			}
+
+		dir_path = f"{dir_path}/{epoch}/"
+		if not os.path.exists(dir_path):
+			os.makedirs(dir_path)
+		torch.save(rank_state_dict, f"{dir_path}/dp{self.dp}_pp{self.pp}.pt")
 
 	def save(self, path, worker=0):
 		"""
@@ -316,12 +359,18 @@ class Pipeline:
 			else:
 				parts = model
 
-			assert sources is not None and targets is not None, "Sources and targets must be provided when using pre-partitioned model"
+			assert (
+				sources is not None and targets is not None
+			), "Sources and targets must be provided when using pre-partitioned model"
 			signatures = []
 			for i in range(len(self.placement)):
 				inputs = sorted(list(sources[i].keys()))
 				outputs = sorted(list(targets[i].keys()))
-				signatures.append(Signature(inputs, outputs, [sources[i][j] for j in inputs], [targets[i][j] for j in outputs]))
+				signatures.append(
+					Signature(
+						inputs, outputs, [sources[i][j] for j in inputs], [targets[i][j] for j in outputs]
+					)
+				)
 
 		else:
 			raise Exception(
@@ -464,6 +513,7 @@ class Pipeline:
 				return self._check_for_partitioner("metis")
 
 		return partitioner
+
 
 def get_sources_targets_sequential(placement):
 	"""

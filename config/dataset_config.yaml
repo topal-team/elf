@@ -1,0 +1,11 @@
+default: &DEFAULT
+  verbose: True
+  data:
+    dataset_size: 6000
+    dataset_name: 'c4realnewslike'
+    cifar10:
+      dataset_dir: "/net/storage/pr3/project/tutorial/elf/data/cifar10"
+      load_dataset: false  
+    c4realnewslike:
+      dataset_dir: "/net/storage/pr3/project/tutorial/elf/data/c4-realnewslike"
+      load_dataset: false

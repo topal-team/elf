@@ -129,6 +129,6 @@ if rank == 0:
 	print("Finished Training")
 	print("Model saved to vision.pt")
 
-# pipe.clear()
-# if dist.is_initialized():
-# 	dist.destroy_process_group()
+pipe.clear()
+if dist.is_initialized():
+	dist.destroy_process_group()
