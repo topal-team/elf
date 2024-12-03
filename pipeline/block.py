@@ -26,9 +26,9 @@ class Variable:
 		self.metadata = None  # shape, dtype
 		self.was_metadata_sent = False  # flag to avoid sending metadata twice
 
-		self.waiting = []  # (work, tensor) : received object waiting to be processed
-		self.kept = []  # tensor : object kept for backward (only used for inputs)
-		self.finished = []  # tensor : object ready to be sent to the peer
+		self.to_process = []  # (work, tensor) : received object waiting to be processed
+		self.saved = []  # tensor : object kept for backward
+		self.to_send = []  # tensor : object ready to be sent to the peer
 
 	def get(self, queue, mb_id):
 		if len(queue) <= mb_id:
@@ -51,7 +51,7 @@ class Variable:
 		"""
 		Get one element from the waiting queue. Waits for the corresponding communication to complete if needed.
 		"""
-		work, tensor = self.get(self.waiting, mb_id)
+		work, tensor = self.get(self.to_process, mb_id)
 		if work is not None:
 			work.wait()
 		return tensor
@@ -69,15 +69,15 @@ class Variable:
 		return str(self)
 
 	def clear(self):
-		self.waiting.clear()
-		self.kept.clear()
-		self.finished.clear()
+		self.to_process.clear()
+		self.saved.clear()
+		self.to_send.clear()
 
 	# Debug utility
 	def _state(self):
-		w = len([x for x in self.waiting if x is not None])
-		k = len([x for x in self.kept if x is not None])
-		f = len([x for x in self.finished if x is not None])
+		w = len([x for x in self.to_process if x is not None])
+		k = len([x for x in self.saved if x is not None])
+		f = len([x for x in self.to_send if x is not None])
 		return f"{str(self)} - waiting: {w}, kept: {k}, finished: {f}"
 
 
@@ -162,17 +162,17 @@ class PipelineBlock:
 
 					# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
 					for var, value in zip(self.inputs, inputs):
-						var.set(var.waiting, mb_id, (None, value))
+						var.set(var.to_process, mb_id, (None, value))
 			else:
 				y = self.model(*inputs)
 				y = (y,) if not isinstance(y, tuple) else y
 				for var, value in zip(self.outputs, y):
 					for dst in var:
-						dst.set(dst.kept, mb_id, value)
+						dst.set(dst.saved, mb_id, value)
 
 				# Keep inputs for backward
 				for var, value in zip(self.inputs, inputs):
-					var.set(var.kept, mb_id, value)
+					var.set(var.saved, mb_id, value)
 
 		self.compute_time.append(timer.time)
 
@@ -186,13 +186,13 @@ class PipelineBlock:
 		for var, value in zip(self.outputs, y):
 			for dst in var:
 				value = value.detach() # non-tensor comms are not handled anyway
-				dst.set(dst.finished, mb_id, value)
+				dst.set(dst.to_send, mb_id, value)
 
 		if self.is_last:
 			output = []
 			for var in self.outputs:
 				assert len(var) == 1, "Output of the pipeline has multiple destinations"
-				output.append(var[0].get(var[0].finished, mb_id))
+				output.append(var[0].get(var[0].to_send, mb_id))
 			return output
 
 	def backward(self, mb_id, **options):
@@ -206,14 +206,14 @@ class PipelineBlock:
 
 		inputs = []
 		for var in self.inputs:
-			inputs.append(var.get(var.kept, mb_id))
+			inputs.append(var.get(var.saved, mb_id))
 
 		act = []
 		for var in self.outputs:
 			# Even if there are multiple destinations, it's the same tensor for everyone of them
-			act.append(var[0].get(var[0].kept, mb_id))
+			act.append(var[0].get(var[0].saved, mb_id))
 			for target in var[1:]:
-				target.get(target.kept, mb_id)
+				target.get(target.saved, mb_id)
 
 		grads = []
 		for var in self.outputs:
@@ -249,7 +249,7 @@ class PipelineBlock:
 				if var.peer is not None:
 					logger.warning(f"{self} - No gradient computed for var {var}")
 				continue
-			var.set(var.finished, mb_id, value.grad.data)
+			var.set(var.to_send, mb_id, value.grad.data)
 
 	def send_forward(self, mb_id, **options):
 		"""
@@ -273,7 +273,7 @@ class PipelineBlock:
 
 				if not target.was_metadata_sent:
 					self._send_metadata(dst)
-				outputs = target.get(target.finished, mb_id).contiguous()
+				outputs = target.get(target.to_send, mb_id).contiguous()
 
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
 				if options.get(OpOptions.BATCHED_COMM):
@@ -301,7 +301,7 @@ class PipelineBlock:
 			if var.peer != dst:
 				continue
 
-			grads = var.get(var.finished, mb_id).contiguous()
+			grads = var.get(var.to_send, mb_id).contiguous()
 
 			rank = self.placement[dst]
 			if options.get(OpOptions.BATCHED_COMM):
@@ -347,7 +347,7 @@ class PipelineBlock:
 				logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
 				work = dist.irecv(buffer, rank, group=self.pp_group)
 
-			var.set(var.waiting, mb_id, (work, buffer))
+			var.set(var.to_process, mb_id, (work, buffer))
 
 		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
@@ -382,7 +382,7 @@ class PipelineBlock:
 					logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
 					work = dist.irecv(buffer, rank, group=self.pp_group)
 
-				target.set(target.waiting, mb_id, (work, buffer))
+				target.set(target.to_process, mb_id, (work, buffer))
 
 		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
