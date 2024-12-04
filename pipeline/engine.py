@@ -190,7 +190,7 @@ class Engine:
 					if block.is_first:
 						microbatch = next(microbatches)
 						for mb, var in zip(microbatch, block.inputs):
-							var.set(var.waiting, op.mb_id, _fake_p2p(mb))
+							var.set(var.to_process, op.mb_id, _fake_p2p(mb))
 
 					comm = block.recv_forward(op.mb_id, mb_sizes[op.mb_id], **op.options)
 					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
@@ -223,7 +223,7 @@ class Engine:
 						block.compute_time.append(timer.time)
 						for grad, var in zip(grads, block.outputs):
 							for dst in var:  # should be only one destination
-								dst.set(dst.waiting, op.mb_id, _fake_p2p(grad))
+								dst.set(dst.to_process, op.mb_id, _fake_p2p(grad))
 					else:
 						logger.warning(f"Tried to compute loss backward on a non-last block {block}")
 						continue
@@ -311,8 +311,8 @@ def _transfer_forward(block, dst_block, mb_id):
 	all_to_send = [dst for var in block.outputs for dst in var if dst.peer == dst_block.id]
 	all_to_recv = [var for var in dst_block.inputs if var.peer == block.id]
 	for src, dst in zip(all_to_send, all_to_recv):
-		inputs = src.get(src.finished, mb_id)
-		dst.set(dst.waiting, mb_id, _fake_p2p(inputs))
+		inputs = src.get(src.to_send, mb_id)
+		dst.set(dst.to_process, mb_id, _fake_p2p(inputs))
 
 
 def _transfer_backward(block, dst_block, mb_id):
@@ -327,5 +327,5 @@ def _transfer_backward(block, dst_block, mb_id):
 	all_to_send = [var for var in block.inputs if var.peer == dst_block.id]
 	all_to_recv = [src for var in dst_block.outputs for src in var if src.peer == block.id]
 	for src, dst in zip(all_to_send, all_to_recv):
-		grads = src.get(src.finished, mb_id)
-		dst.set(dst.waiting, mb_id, _fake_p2p(grads))
+		grads = src.get(src.to_send, mb_id)
+		dst.set(dst.to_process, mb_id, _fake_p2p(grads))

@@ -134,14 +134,14 @@ def test_pipe_correctness_multi(init_dist):
 	# Everything should be cleared after a full pass
 	for b in pipe.blocks:
 		for var in b.inputs:
-			assert len([w for w in var.waiting if w is not None]) == 0
-			assert len([k for k in var.kept if k is not None]) == 0
-			assert len([f for f in var.finished if f is not None]) == 0
+			assert len([w for w in var.to_process if w is not None]) == 0
+			assert len([k for k in var.saved if k is not None]) == 0
+			assert len([f for f in var.to_send if f is not None]) == 0
 		for var in b.outputs:
 			for target in var:
-				assert len([w for w in target.waiting if w is not None]) == 0
-				assert len([k for k in target.kept if k is not None]) == 0
-				assert len([f for f in target.finished if f is not None]) == 0
+				assert len([w for w in target.to_process if w is not None]) == 0
+				assert len([k for k in target.saved if k is not None]) == 0
+				assert len([f for f in target.to_send if f is not None]) == 0
 
 	all_weights = [torch.empty_like(model.weight) for _ in range(world_size)] if rank == 0 else None
 	all_grads = [torch.empty_like(model.weight) for _ in range(world_size)] if rank == 0 else None
