@@ -62,7 +62,9 @@ if __name__ == "__main__":
 
 	model = SimpleTransformer(8000, 2048, 32, 512)
 	if rank == 0:
-		logger.info(f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters")
+		logger.info(
+			f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters"
+		)
 	loss_fn = model.loss_fn
 
 	setups = [
@@ -99,9 +101,7 @@ if __name__ == "__main__":
 			y = pipe(inputs, targets, loss_fn)
 			times.append(pipe.times)
 
-		mems = (
-			[torch.tensor(0.0, device=rank) for _ in range(world_size)] if global_rank == 0 else None
-		)
+		mems = [torch.tensor(0.0, device=rank) for _ in range(world_size)] if global_rank == 0 else None
 		dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=rank), mems, 0)
 
 		median_times = medians(times)

@@ -27,9 +27,14 @@ def get_part(rank):
 	if rank == 0:
 		return nn.Sequential(model.embed, *model.blocks[:blocks_per_stage]), inputs.clone()[:mb_size]
 	elif rank == n_procs - 1:
-		return nn.Sequential(*model.blocks[-blocks_per_stage:], model.head), torch.randn(mb_size, seq_len, model.hidden_dim).cuda()
+		return nn.Sequential(*model.blocks[-blocks_per_stage:], model.head), torch.randn(
+			mb_size, seq_len, model.hidden_dim
+		).cuda()
 	else:
-		return nn.Sequential(*model.blocks[blocks_per_stage * rank:blocks_per_stage * (rank + 1)]), torch.randn(mb_size, seq_len, model.hidden_dim).cuda()
+		return nn.Sequential(
+			*model.blocks[blocks_per_stage * rank : blocks_per_stage * (rank + 1)]
+		), torch.randn(mb_size, seq_len, model.hidden_dim).cuda()
+
 
 def pippy():
 	part, sample = get_part(rank)
@@ -57,7 +62,9 @@ def pippy():
 				_ = schedule.step()
 	if rank == 0:
 		torch.cuda.synchronize()
-		print(f"Time taken by torch.distributed.pipelining : {timer.time():.3f}s\nPeak memory : {torch.cuda.max_memory_allocated() / 2**30:.3f} GB\n")
+		print(
+			f"Time taken by torch.distributed.pipelining : {timer.time():.3f}s\nPeak memory : {torch.cuda.max_memory_allocated() / 2**30:.3f} GB\n"
+		)
 
 
 def elf():
@@ -72,7 +79,9 @@ def elf():
 			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn)
 	if rank == 0:
 		torch.cuda.synchronize()
-		print(f"Time taken by our framework : {timer.time():.3f}s\nPeak memory : {torch.cuda.max_memory_allocated() / 2**30:.3f} GB\n")
+		print(
+			f"Time taken by our framework : {timer.time():.3f}s\nPeak memory : {torch.cuda.max_memory_allocated() / 2**30:.3f} GB\n"
+		)
 
 
 if __name__ == "__main__":

@@ -164,7 +164,7 @@ class SimpleTransformer(nn.Module):
 		self.input_dim = input_dim
 		self.hidden_dim = hidden_dim
 		self.seq_len = seq_len
-		
+
 		self.embed = nn.Embedding(input_dim, hidden_dim)
 		self.head = nn.Linear(hidden_dim, input_dim)
 		self.blocks = []

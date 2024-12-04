@@ -39,12 +39,14 @@ class Variable:
 		data = queue[mb_id]
 		queue[mb_id] = None
 		return data
-	
+
 	def set(self, queue, mb_id, value):
 		if len(queue) <= mb_id:
 			queue.extend([None] * (mb_id - len(queue) + 1))
 		if queue[mb_id] is not None:
-			raise Exception(f"Variable {self.name} - Trying to set data at mb_id {mb_id}, but it's already set")
+			raise Exception(
+				f"Variable {self.name} - Trying to set data at mb_id {mb_id}, but it's already set"
+			)
 		queue[mb_id] = value
 
 	def wait_and_pop(self, mb_id):
@@ -185,7 +187,7 @@ class PipelineBlock:
 		# Send to next
 		for var, value in zip(self.outputs, y):
 			for dst in var:
-				value = value.detach() # non-tensor comms are not handled anyway
+				value = value.detach()  # non-tensor comms are not handled anyway
 				dst.set(dst.to_send, mb_id, value)
 
 		if self.is_last:

@@ -11,20 +11,13 @@ GPT model:
 import os
 import math
 import logging
-from functools import partial
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from torch.distributed.fsdp.wrap import wrap
 
 rank = int(os.getenv("RANK", "0"))
-
-try:
-	from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
-except ImportError:
-	from fairscale.nn.checkpoint import checkpoint_wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -138,20 +131,6 @@ class GPT1TConfig(GPTConfig):
 	n_layer = 128
 	n_head = 128
 	n_embd = 25600
-
-
-def module_wrapper(module, fsdp=False, activation="noop"):
-	if not fsdp:
-		return module
-
-	if activation == "noop":
-		return wrap(module)
-	elif activation == "checkpoint":
-		return wrap(checkpoint_wrapper(module))
-	elif activation == "offload":
-		return wrap(checkpoint_wrapper(module, offload_to_cpu=True))
-	else:
-		raise ValueError(f"Unrecognized activation mode {activation}")
 
 
 class Conv1D(nn.Module):
@@ -343,204 +322,7 @@ class GPT(nn.Module):
 		x = self.head(x)
 		return x
 
-
-def configure_optimizers(model, train_config):
-	"""
-	This long function is unfortunately doing something very simple and is being very defensive:
-	We are separating out all parameters of the model into two buckets: those that will experience
-	weight decay for regularization and those that won't (biases, and layernorm/embedding weights).
-	We are then returning the PyTorch optimizer object.
-	"""
-
-	# separate out all parameters to those that will and won't experience regularizing weight decay
-	decay = set()
-	no_decay = set()
-	whitelist_weight_modules = (torch.nn.Linear,)
-	blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
-	for mn, m in model.named_modules():
-		for pn, p in m.named_parameters():
-			fpn = "%s.%s" % (mn, pn) if mn else pn  # full param name
-
-			if pn.endswith("bias"):
-				# all biases will not be decayed
-				no_decay.add(fpn)
-			elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
-				# weights of whitelist modules will be weight decayed
-				decay.add(fpn)
-			elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
-				# weights of blacklist modules will NOT be weight decayed
-				no_decay.add(fpn)
-			elif pn.endswith("pos_emb") and isinstance(m, EmbeddingStem):
-				no_decay.add(fpn)
-
-	# validate that we considered every parameter
-	param_dict = {pn: p for pn, p in model.named_parameters() if "_fsdp_wrapped_module" not in pn}
-	inter_params = decay & no_decay
-	union_params = decay | no_decay
-	assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (
-		str(inter_params),
-	)
-	assert len(param_dict.keys() - union_params) == 0, (
-		"parameters %s were not separated into either decay/no_decay set!"
-		% (str(param_dict.keys() - union_params),)
-	)
-
-	# create the pytorch optimizer object
-	optim_groups = [
-		{
-			"params": [param_dict[pn] for pn in sorted(list(decay))],
-			"weight_decay": train_config.weight_decay,
-		},
-		{"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
-	]
-	optimizer = torch.optim.AdamW(
-		optim_groups, lr=train_config.learning_rate, betas=train_config.betas
-	)
-	return optimizer
-
-
-def sequential_gpt(config, devices, dtype=torch.float32):
-	"""
-	Returns an ``nn.Sequential`` of GPT model balanced across the given devices.
-	N.B.: this function does not dedup devices.
-	"""
-	# put all layers into a list
-	emb_stem = EmbeddingStem(config, device="meta", dtype=dtype)
-	blocks = [Block(config, device="meta", dtype=dtype) for _ in range(config.n_layer)]
-	ln_f = nn.LayerNorm(config.n_embd, device="meta", dtype=dtype)
-	head = nn.Linear(config.n_embd, config.vocab_size, bias=False, device="meta", dtype=dtype)
-
-	layers = [emb_stem, *blocks, ln_f, head]
-
-	# partition layers into the given devices
-	def numel(layer):
-		return sum([p.numel() for p in layer.parameters()])
-
-	total_numel = sum([numel(layer) for layer in layers])
-	phase_numel = total_numel // len(devices)
-	delim_numel = phase_numel
-	accum_numel = 0
-
-	# seal one pipeline phase when its numel is larger than phase_numel
-	phases = [[]]
-	for layer in layers:
-		phases[-1].append(layer)
-		accum_numel += numel(layer)
-		if accum_numel > delim_numel:
-			delim_numel += phase_numel
-			phases.append([])
-
-	# pack all remaining layers into the last phase
-	while len(phases) > len(devices):
-		phases[-2].extend(phases[-1])
-		phases.pop()
-
-	for i, phase in enumerate(phases):
-		for layer in phase:
-			layer.to_empty(device=torch.device(devices[i])).reset_parameters()
-
-	# create nn.Sequential
-	return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
-
-
-def sequential_gpt_2(model, devices, dtype=torch.float32):
-	"""
-	Returns an ``nn.Sequential`` of GPT model balanced across the given devices.
-	N.B.: this function does not dedup devices.
-	"""
-	layers = []
-	for module in model.children():
-		if isinstance(module, nn.ModuleList) or isinstance(module, nn.Sequential):
-			layers.extend(module)
-		else:
-			layers.append(module)
-
-	# partition layers into the given devices
-	def numel(layer):
-		return sum([p.numel() for p in layer.parameters()])
-
-	total_numel = sum([numel(layer) for layer in layers])
-	phase_numel = total_numel // len(devices)
-	delim_numel = phase_numel
-	accum_numel = 0
-
-	# seal one pipeline phase when its numel is larger than phase_numel
-	phases = [[]]
-	for layer in layers:
-		phases[-1].append(layer)
-		accum_numel += numel(layer)
-		if accum_numel > delim_numel:
-			delim_numel += phase_numel
-			phases.append([])
-
-	# pack all remaining layers into the last phase
-	while len(phases) > len(devices):
-		phases[-2].extend(phases[-1])
-		phases.pop()
-
-	for i, phase in enumerate(phases):
-		for layer in phase:
-			layer.to_empty(device=torch.device(devices[i]))
-	# create nn.Sequential
-	return nn.Sequential(*[nn.Sequential(*phase) for phase in phases])
-
-
-class ShardedGPT(nn.Module):
-	def __init__(
-		self,
-		config,
-		device="cpu",
-		dtype=torch.float32,
-		activation="noop",
-		version="pytorch",
-		cpu_offload=False,
-	):
-		super().__init__()
-
-		if version == "pytorch" or not cpu_offload:
-			wrapper = partial(module_wrapper, fsdp=True, activation=activation)
-
-			# input embedding stem
-			self.emb_stem = wrap(EmbeddingStem(config, device=device, dtype=dtype))
-			# transformer
-			self.blocks = nn.Sequential(
-				*[
-					wrapper(Block(config, device=device, dtype=dtype, wrapper=wrap))
-					for _ in range(config.n_layer)
-				]
-			)
-			# decoder head
-			self.ln_f = wrap(nn.LayerNorm(config.n_embd, device=device, dtype=dtype))
-			self.head = wrap(
-				nn.Linear(config.n_embd, config.vocab_size, bias=False, device=device, dtype=dtype)
-			)
-
-			if rank == 0:
-				print("number of parameters:", sum(p.numel() for p in self.parameters()))
-		else:
-			print("fariscale fsdp for shardedGPT")
-			wrapper = partial(module_wrapper, fsdp=True, activation=activation)
-			# input embedding stem
-			self.emb_stem = wrap(EmbeddingStem(config, device=device, dtype=dtype).cpu())
-			# transformer
-			self.blocks = nn.Sequential(
-				*[
-					wrapper(
-						Block(
-							config, device=device, dtype=dtype, wrapper=wrap, version=version, cpu_offload=True
-						).cpu()
-					)
-					for _ in range(config.n_layer)
-				]
-			)
-			# decoder head
-			self.ln_f = wrap(nn.LayerNorm(config.n_embd, device=device, dtype=dtype).cpu())
-			self.head = wrap(
-				nn.Linear(config.n_embd, config.vocab_size, bias=False, device=device, dtype=dtype).cpu()
-			)
-
-	def forward(self, idx):
-		x = self.emb_stem(idx)
-		x = self.blocks(x)
-		x = self.ln_f(x)
-		return self.head(x)
+	def loss_fn(self, logits, targets):
+		logits = logits.view(-1, logits.size(-1))
+		targets = targets.view(-1)
+		return nn.functional.cross_entropy(logits, targets)

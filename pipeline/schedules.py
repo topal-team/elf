@@ -153,9 +153,7 @@ def generate_1f1b_schedule(placement, n_micro_batches, signatures):
 				b_b = (b_b - 1) % stages_per_device
 
 	for i in range(n_stages):
-		schedule.append(
-			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i])
-		)
+		schedule.append(Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i]))
 
 	return schedule
 
@@ -223,11 +221,10 @@ def generate_hanayo_schedule(placement, n_micro_batches, signatures):
 					enod[rank] += 1
 
 	for i in range(n_stages):
-		schedule.append(
-			Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i])
-		)
+		schedule.append(Operation(i, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[i]))
 
 	return schedule
+
 
 def generate_full_remat_schedule(placement, n_micro_batches, signatures):
 	schedule = []
@@ -239,11 +236,15 @@ def generate_full_remat_schedule(placement, n_micro_batches, signatures):
 		# All forward
 		for i in range(n_micro_batches):
 			for id_ in ids:
-				_add_forward_pass(schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.REMAT: True})
+				_add_forward_pass(
+					schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.REMAT: True}
+				)
 		# All backward
 		for i in range(n_micro_batches):
 			for id_ in reversed(ids):
-				schedule.append(Operation(id_, i, OperationType.FORWARD, rank)) # recomputation happens here
+				schedule.append(
+					Operation(id_, i, OperationType.FORWARD, rank)
+				)  # recomputation happens here
 				_add_backward_pass(schedule, placement, id_, i, rank, signatures[id_])
 
 		for id_ in ids:

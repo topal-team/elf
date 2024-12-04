@@ -4,7 +4,6 @@ import sys
 sys.path.append("./")
 
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -128,11 +127,6 @@ def main():
 	if config.profile:
 		torch.cuda.cudart().cudaProfilerStart()
 
-	def loss_fn(logits, targets):
-		logits = logits.view(-1, logits.size(-1))
-		targets = targets.view(-1)
-		return nn.functional.cross_entropy(logits, targets)
-
 	# Training loop
 	model.train()
 	for epoch in range(config.train.epochs):
@@ -144,7 +138,7 @@ def main():
 
 			optimizer.zero_grad()
 
-			_, loss = pipe(input_ids, input_ids, loss_fn, profile=config.profile)
+			_, loss = pipe(input_ids, input_ids, model.loss_fn, profile=config.profile)
 
 			optimizer.step()
 

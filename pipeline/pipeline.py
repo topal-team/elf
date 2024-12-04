@@ -323,7 +323,9 @@ class Pipeline:
 			case "full_remat":
 				return generate_full_remat_schedule
 			case _:
-				raise Exception(f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat]")
+				raise Exception(
+					f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat]"
+				)
 
 	def _generate_schedule(self, n_micro_batches):
 		"""
