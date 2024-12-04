@@ -32,7 +32,7 @@ Quick Start
 
 .. code-block:: python
 
-   from pipeline import Pipeline
+   from elf import Pipeline
    
    model = YourLargeModel()
    pipe = Pipeline(model, sample)

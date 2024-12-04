@@ -7,7 +7,7 @@ import sys
 import copy
 
 sys.path.append("./")
-from pipeline import Pipeline, get_sources_targets_sequential
+from elf import Pipeline, get_sources_targets_sequential
 from argparse import ArgumentParser
 
 import logging

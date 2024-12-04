@@ -1,5 +1,5 @@
-from pipeline.partitioners.utils import Signature
-from pipeline.schedules import *
+from elf.partitioners.utils import Signature
+from elf.schedules import *
 import pytest
 
 

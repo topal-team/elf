@@ -5,8 +5,8 @@ import torch.distributed as dist
 import sys
 
 sys.path.append("./")
-import pipeline.pipeline as MyPipe
-from pipeline.utils import Timer
+import elf.pipeline as MyPipe
+from elf.utils import Timer
 from models.simple import SimpleTransformer
 
 import torch.distributed.pipelining as PiPPy

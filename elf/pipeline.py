@@ -3,7 +3,7 @@ Pipeline API and setup
 """
 
 import os
-from pipeline.partitioners.utils import Signature
+from elf.partitioners.utils import Signature
 import torch
 import shutil
 import torch.distributed as dist
@@ -58,7 +58,7 @@ class Pipeline:
 		:type model: nn.Module
 		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model.
 		:type sample: torch.Tensor or List[torch.Tensor]
-		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement, which is ``[0, 1, .., world size - 1]``
+		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement.``
 		:type placement: List[int] or str
 		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
 		:type partitioner: boolean or str

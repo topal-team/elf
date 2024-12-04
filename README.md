@@ -4,7 +4,7 @@
 
 The object ``Pipeline`` from ``pipeline`` provides a simple API to automatically take care of everything.
 ```py
-from pipeline import Pipeline
+from elf import Pipeline
 sample = torch.randn(..., device = 'cuda')
 pipe = Pipeline(model, sample)
 y, loss = pipe(inputs, targets, loss_fn)

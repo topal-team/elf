@@ -1,5 +1,5 @@
 import pytest
-from pipeline.partitioners.partition import *
+from elf.partitioners.partition import *
 
 import copy
 import torch

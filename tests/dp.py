@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 sys.path.append("./")
-from pipeline.pipeline import Pipeline
+from elf.pipeline import Pipeline
 from models.simple import SimpleTransformer, SimpleCNN, SimpleResNet
 
 from argparse import ArgumentParser

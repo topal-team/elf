@@ -5,10 +5,10 @@ import sys
 import gc
 
 sys.path.append("./")
-from pipeline.pipeline import Pipeline
+from elf.pipeline import Pipeline
 from argparse import ArgumentParser
 from models.simple import SimpleTransformer
-from pipeline.utils import pretty_print_params
+from elf.utils import pretty_print_params
 
 import logging
 

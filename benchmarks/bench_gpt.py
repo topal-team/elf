@@ -2,7 +2,7 @@ import sys
 import subprocess
 
 sys.path.append(".")
-from pipeline.pipeline import Pipeline
+from elf.pipeline import Pipeline
 
 
 import os
@@ -13,7 +13,7 @@ from argparse import ArgumentParser
 import wandb
 
 from models.GPT import GPTTinyConfig, GPTSmallConfig, GPTMediumConfig, GPTLargeConfig, GPT
-from pipeline.utils import pretty_print_params
+from elf.utils import pretty_print_params
 
 logger = logging.getLogger("benchmark")
 logging.basicConfig(level=logging.INFO)

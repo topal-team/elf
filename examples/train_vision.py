@@ -10,8 +10,8 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, DistributedSampler
 import timm
 
-from pipeline import Pipeline
-from pipeline.utils import pretty_print_params, pretty_print_step
+from elf import Pipeline
+from elf.utils import pretty_print_params, pretty_print_step
 from configmypy import YamlConfig, ArgparseConfig
 
 import logging

@@ -5,7 +5,7 @@ Utils for operation profiling
 import copy
 import torch
 import numpy as np
-from pipeline.utils import Timer
+from elf.utils import Timer
 
 DONT_CUT_HERE = 2 << 24
 

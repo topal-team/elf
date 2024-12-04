@@ -6,7 +6,7 @@ import os
 import sys
 
 sys.path.append(".")
-from pipeline import Pipeline
+from elf import Pipeline
 
 import logging
 

@@ -20,7 +20,7 @@ from models.GPT import (
 	GPT175BConfig,
 )
 
-from pipeline import Pipeline
+from elf import Pipeline
 
 from configmypy import YamlConfig, ArgparseConfig
 import logging

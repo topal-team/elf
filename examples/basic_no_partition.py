@@ -3,13 +3,13 @@ import sys
 
 sys.path.append(".")
 
-from pipeline.pipeline import get_sources_targets_sequential
+from elf.pipeline import get_sources_targets_sequential
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torchvision.models import resnet50
 
-from pipeline import Pipeline
+from elf import Pipeline
 
 
 def get_part(model, rank):

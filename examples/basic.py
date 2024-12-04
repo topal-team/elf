@@ -6,7 +6,7 @@ import torch.distributed as dist
 from torchvision.models import resnet50
 
 sys.path.append(".")
-from pipeline import Pipeline
+from elf import Pipeline
 
 """
 Start this file with torchrun

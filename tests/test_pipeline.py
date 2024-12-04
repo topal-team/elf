@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from pipeline.pipeline import *
+from elf.pipeline import *
 
 from datetime import timedelta
 
