@@ -10,7 +10,6 @@ import torch
 import torch.distributed as dist
 import logging
 from argparse import ArgumentParser
-import gc
 import wandb
 
 from models.GPT import GPTTinyConfig, GPTSmallConfig, GPTMediumConfig, GPTLargeConfig, GPT
@@ -31,7 +30,10 @@ def medians(times):
 if __name__ == "__main__":
 	parser = ArgumentParser(description="Benchmark GPT training")
 	parser.add_argument(
-		"--model", choices=["tiny", "small", "medium", "large"], default="tiny", help="Model size to benchmark"
+		"--model",
+		choices=["tiny", "small", "medium", "large"],
+		default="tiny",
+		help="Model size to benchmark",
 	)
 	parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
 	parser.add_argument("--seq_len", type=int, default=512, help="Sequence length")
@@ -39,9 +41,17 @@ if __name__ == "__main__":
 		"--log", choices=["debug", "info", "none"], default="info", help="Logging level"
 	)
 	parser.add_argument(
-		"--schedule", choices=["afab", "1f1b", "hanayo", "full_remat"], default="1f1b", help="Schedule to use"
+		"--schedule",
+		choices=["afab", "1f1b", "hanayo", "full_remat"],
+		default="1f1b",
+		help="Schedule to use",
 	)
-	parser.add_argument("--partitioner", choices=["naive", "constrained", "metis", "dagP"], default="metis", help="Partitioner to use")
+	parser.add_argument(
+		"--partitioner",
+		choices=["naive", "constrained", "metis", "dagP"],
+		default="metis",
+		help="Partitioner to use",
+	)
 	args = parser.parse_args()
 
 	match args.log:
@@ -138,7 +148,7 @@ if __name__ == "__main__":
 
 		# Log metrics
 		metrics = {
-			"total_time": median_times["total"], # total time is the same for all GPUs
+			"total_time": median_times["total"]  # total time is the same for all GPUs
 		}
 		for i, (times, mem) in enumerate(zip(itimes, mems)):
 			metrics[f"gpu_{i}_memory_gb"] = mem.item()
