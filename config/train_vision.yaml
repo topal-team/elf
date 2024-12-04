@@ -1,0 +1,22 @@
+default: &DEFAULT
+  log: 'info'
+  data:
+    dataset: "cifar100"
+    dataset_dir: "/lustre/fsn1/projects/rech/hyb/uak69sb/data/"
+
+  model:
+    arch: 'convnextv2_huge'
+    num_classes: 100
+    pretrained: false
+
+  train:
+    batch_size: 32
+    epochs: 10
+    learning_rate: 0.0005
+
+  pipeline:
+    dp: 1
+    pp: 4
+    schedule_type: '1f1b'
+    placement: 'auto'
+    partitioner: 'metis'

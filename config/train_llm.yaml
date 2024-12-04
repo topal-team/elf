@@ -1,0 +1,25 @@
+default: &DEFAULT
+  log: 'info'
+  profile: false
+  data:
+    size: 1000000
+    dataset_dir: "/lustre/fsn1/projects/rech/hyb/uak69sb/data/c4-realnewslike"
+    tokenizer_dir: "/lustre/fsn1/projects/rech/hyb/uak69sb/tokenizers/mistral"
+
+  model:
+    arch: 'GPTSmall'
+    checkpoint_dir: './checkpoints'
+
+  train:
+    learning_rate: 1e-2
+    weight_decay: 1e-5
+    max_seq_len: 512
+    batch_size: 32
+    epochs: 3
+
+  pipeline:
+    pp: 4
+    dp: 1
+    schedule_type: '1f1b'
+    placement: '0,1,2,3'
+    partitioner: 'metis'

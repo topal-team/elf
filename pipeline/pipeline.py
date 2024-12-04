@@ -84,6 +84,8 @@ class Pipeline:
 		if placement == "auto":
 			pp = ws // dp
 			placement = self._get_default_placement(schedule, pp)
+		elif isinstance(placement, str):
+			placement = list(map(int, placement.split(",")))
 
 		assert max(placement) < ws, "Placement is out of bounds"
 		pp = max(placement) + 1
@@ -222,7 +224,9 @@ class Pipeline:
 		One file will be created per rank
 		"""
 		rank = dist.get_rank()
-		rank_state_dict = {"rank": rank, "pp": self.pp, "dp": self.dp, "epoch": epoch}
+		dp = rank // self.pp
+		pp = rank % self.dp
+		rank_state_dict = {"rank": rank, "pp": pp, "dp": dp, "epoch": epoch}
 
 		for block in self.blocks:
 			rank_state_dict[f"state_dict_{block.id}"] = {
@@ -232,7 +236,7 @@ class Pipeline:
 		dir_path = f"{dir_path}/{epoch}/"
 		if not os.path.exists(dir_path):
 			os.makedirs(dir_path)
-		torch.save(rank_state_dict, f"{dir_path}/dp{self.dp}_pp{self.pp}.pt")
+		torch.save(rank_state_dict, f"{dir_path}/dp{dp}_pp{pp}.pt")
 
 	def save(self, path, worker=0):
 		"""
