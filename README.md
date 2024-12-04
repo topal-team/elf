@@ -11,14 +11,14 @@ y, loss = pipe(inputs, targets, loss_fn)
 pipe.clear()
 ```
 
-A full example can be found in ``example.py``.
+A full example can be found in ``examples/basic.py``.
 
 Note that ``sample`` is only necessary if you use automatic partitioning, as it is used for profiling. Also, it is not used on processes other than the first one of the pipeline.\
 There are several arguments to modify its behaviour :
-- ``placement`` specifies the rank of each model block.
-- ``partitioner`` can be set to ``None`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device.
-- ``schedule`` modifies the schedule algorithm to use. Currently, AFAB from Gpipe, 1F1B and Hanayo are supported.
-- ``dp`` is the data parallelism degree.
+- ``placement`` specifies the rank of each pipeline stage.
+- ``partitioner`` can be set to ``False`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device. Otherwise, you can choose between partitioners described below.
+- ``schedule`` modifies the schedule algorithm to use. Currently, Gpipe (`"afab"`), 1F1B (`"1f1b"`) and Hanayo (`"hanayo"`) are supported.
+- ``dp`` is the data parallelism degree. One pipeline will be replicated ``dp`` times.
 
 ### Write your own schedule
 
@@ -26,9 +26,9 @@ You can define your own schedule if you want to perform tests or use an unimplem
 
 ### Change the pipeline behaviour
 
-The options can be anything that modifies the behaviour of the operation, as long as the corresponding function in ``pipeline.py`` is modified to take it into account. See remat for an example. Currently supported :
+The options can be anything that modifies the behaviour of an operation (forward, send, recv, ..). The corresponding function in ``block.py`` needs to be modified to take it into account. See remat for an example.
 
-- Rematerialization (``{"remat": True}``)
+Each supported option is in the enumeration ``OpOptions`` in ``scheduling.py``.
 
 ### Model partitioning
 
@@ -45,7 +45,7 @@ You can run multiple pipelines at once with different data by specifying the arg
 
 ## Running tests and benchmarks
 
-Environment setup on some clusters is described in `config`.
+Environment setup on some clusters is described in `docs`.
 - [Helios](docs/helios.md)
 
 ### Tests
@@ -55,3 +55,7 @@ Run all tests:
 ./tests/test.sh
 ```
 Some of them require at least 2 GPUs.
+
+### Benchmarks
+
+Some benchmarks are available in ``benchmarks/``. They are used to measure and compare the performance of the pipeline.
