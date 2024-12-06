@@ -350,4 +350,16 @@ def generate_zbh2_schedule(placement, n_micro_batches, signatures):
 
 		schedule.append(Operation(rank, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
 
+		return schedule
+
+
+def generate_inference_schedule(placement, n_micro_batches, signatures):
+	schedule = []
+
+	for id_ in range(len(placement)):
+		for mb in range(n_micro_batches):
+			_add_forward_pass(schedule, placement, id_, mb, placement[id_], signatures[id_])
+			if id_ == len(placement) - 1:
+				schedule.pop(-1)  # remove loss forward
+
 	return schedule

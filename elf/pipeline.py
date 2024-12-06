@@ -327,9 +327,11 @@ class Pipeline:
 				return generate_zbh1_schedule
 			case "zbh2":
 				return generate_zbh2_schedule
+			case "inference":
+				return generate_inference_schedule
 			case _:
 				raise Exception(
-					f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat, zbh1, zbh2]"
+					f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat, zbh1, zbh2, inference]"
 				)
 
 	def _generate_schedule(self, n_micro_batches):
