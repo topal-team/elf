@@ -255,37 +255,17 @@ class EmbeddingStem(nn.Module):
 class Block(nn.Module):
 	"""an unassuming Transformer block"""
 
-	def __init__(
-		self,
-		config,
-		device=None,
-		dtype=torch.float32,
-		wrapper=lambda m: m,
-		version="pytorch",
-		cpu_offload=False,
-	):
+	def __init__(self, config, device=None, dtype=torch.float32, wrapper=lambda m: m):
 		super(Block, self).__init__()
-		if version == "pytorch" or not cpu_offload:
-			self.ln1 = wrapper(nn.LayerNorm(config.n_embd, device=device, dtype=dtype))
-			self.ln2 = wrapper(nn.LayerNorm(config.n_embd, device=device, dtype=dtype))
-			self.attn = wrapper(Attention(config, device=device, dtype=dtype))
-			self.mlp = nn.Sequential(
-				wrapper(nn.Linear(config.n_embd, 4 * config.n_embd, device=device, dtype=dtype)),
-				nn.GELU(),
-				wrapper(nn.Linear(4 * config.n_embd, config.n_embd, device=device, dtype=dtype)),
-				nn.Dropout(config.resid_pdrop),
-			)
-		else:
-			print("fairscale fsdp for block")
-			self.ln1 = wrapper(nn.LayerNorm(config.n_embd, device=device, dtype=dtype).cpu())
-			self.ln2 = wrapper(nn.LayerNorm(config.n_embd, device=device, dtype=dtype).cpu())
-			self.attn = wrapper(Attention(config, device=device, dtype=dtype).cpu())
-			self.mlp = nn.Sequential(
-				wrapper(nn.Linear(config.n_embd, 4 * config.n_embd, device=device, dtype=dtype).cpu()),
-				nn.GELU(),
-				wrapper(nn.Linear(4 * config.n_embd, config.n_embd, device=device, dtype=dtype).cpu()),
-				nn.Dropout(config.resid_pdrop),
-			)
+		self.ln1 = wrapper(nn.LayerNorm(config.n_embd, device=device, dtype=dtype))
+		self.ln2 = wrapper(nn.LayerNorm(config.n_embd, device=device, dtype=dtype))
+		self.attn = wrapper(Attention(config, device=device, dtype=dtype))
+		self.mlp = nn.Sequential(
+			wrapper(nn.Linear(config.n_embd, 4 * config.n_embd, device=device, dtype=dtype)),
+			nn.GELU(),
+			wrapper(nn.Linear(4 * config.n_embd, config.n_embd, device=device, dtype=dtype)),
+			nn.Dropout(config.resid_pdrop),
+		)
 
 	def reset_parameters(self):
 		self.attn.reset_parameters()

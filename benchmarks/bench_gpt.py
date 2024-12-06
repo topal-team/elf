@@ -12,7 +12,14 @@ import logging
 from argparse import ArgumentParser
 import wandb
 
-from models.GPT import GPTTinyConfig, GPTSmallConfig, GPTMediumConfig, GPTLargeConfig, GPT
+from models.GPT import (
+	GPTTinyConfig,
+	GPTSmallConfig,
+	GPTMediumConfig,
+	GPTLargeConfig,
+	GPTXXLConfig,
+	GPT,
+)
 from elf.utils import pretty_print_params
 
 logger = logging.getLogger("benchmark")
@@ -31,7 +38,7 @@ if __name__ == "__main__":
 	parser = ArgumentParser(description="Benchmark GPT training")
 	parser.add_argument(
 		"--model",
-		choices=["tiny", "small", "medium", "large"],
+		choices=["tiny", "small", "medium", "large", "xxl"],
 		default="tiny",
 		help="Model size to benchmark",
 	)
@@ -52,6 +59,8 @@ if __name__ == "__main__":
 		default="metis",
 		help="Partitioner to use",
 	)
+	parser.add_argument("--dp", type=int, default=1, help="Data parallelism")
+	parser.add_argument("--pp", type=int, default=4, help="Pipeline parallelism")
 	args = parser.parse_args()
 
 	match args.log:
@@ -63,10 +72,14 @@ if __name__ == "__main__":
 			logging.getLogger().setLevel(100)
 
 	world_size = int(os.environ["WORLD_SIZE"])
-	rank = int(os.environ["LOCAL_RANK"])
-	global_rank = int(os.environ["RANK"])
+	local_rank = int(os.environ["LOCAL_RANK"])
+	rank = int(os.environ["RANK"])
 
-	torch.cuda.set_device(rank)
+	assert (
+		args.dp * args.pp == world_size
+	), "Data parallelism * pipeline parallelism must equal world size"
+
+	torch.cuda.set_device(local_rank)
 	dist.init_process_group(backend="nccl")
 
 	# Select model config
@@ -79,6 +92,8 @@ if __name__ == "__main__":
 			config = GPTMediumConfig(vocab_size=50257, block_size=args.seq_len)
 		case "large":
 			config = GPTLargeConfig(vocab_size=50257, block_size=args.seq_len)
+		case "xxl":
+			config = GPTXXLConfig(vocab_size=50257, block_size=args.seq_len)
 
 	# Create model
 	model = GPT(config)
@@ -88,21 +103,21 @@ if __name__ == "__main__":
 		)
 
 	# Create sample inputs
-	inputs = torch.randint(0, config.vocab_size, (args.batch_size, args.seq_len), device=rank)
-	targets = torch.randint(0, config.vocab_size, (args.batch_size, args.seq_len), device=rank)
+	inputs = torch.randint(0, config.vocab_size, (args.batch_size, args.seq_len), device=local_rank)
+	targets = torch.randint(0, config.vocab_size, (args.batch_size, args.seq_len), device=local_rank)
 
 	# Create pipeline
-	pipe = Pipeline(model, inputs, schedule=args.schedule, partitioner=args.partitioner)
+	pipe = Pipeline(model, inputs, schedule=args.schedule, partitioner=args.partitioner, dp=args.dp)
 
 	# Warmup
-	if global_rank == 0:
+	if rank == 0:
 		logger.info("Warming up")
 	for i in range(3):
 		y = pipe(inputs.clone(), targets.clone(), model.loss_fn)
 	torch.cuda.reset_peak_memory_stats()
 
 	# Benchmark
-	if global_rank == 0:
+	if rank == 0:
 		logger.info("Starting benchmark")
 	times = []
 	for i in range(10):
@@ -111,15 +126,15 @@ if __name__ == "__main__":
 		times.append(pipe.times)
 
 	# Gather memory stats
-	mems = [torch.tensor(0.0, device=rank) for _ in range(world_size)] if global_rank == 0 else None
-	dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=rank), mems, 0)
+	mems = [torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
+	dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=local_rank), mems, 0)
 
 	# Calculate median times
 	median_times = medians(times)
-	itimes = [{} for _ in range(world_size)] if global_rank == 0 else None
+	itimes = [{} for _ in range(world_size)] if rank == 0 else None
 	dist.gather_object(median_times, itimes, 0)
 
-	if global_rank == 0:
+	if rank == 0:
 		# Log config
 		config_dict = {
 			"model": args.model,
@@ -158,8 +173,8 @@ if __name__ == "__main__":
 		wandb.log(metrics)
 		wandb.finish()
 
-	pipe.clear()
+	# pipe.clear()
 
-	dist.barrier()
-	if dist.is_initialized():
-		dist.destroy_process_group()
+	# dist.barrier()
+	# if dist.is_initialized():
+	# 	dist.destroy_process_group()

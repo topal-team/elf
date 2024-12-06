@@ -247,8 +247,8 @@ if __name__ == "__main__":
 
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
-	dist.init_process_group(backend="nccl")
 	torch.cuda.set_device(local_rank)
+	dist.init_process_group(backend="nccl")
 
 	match args.model:
 		case "cnn":
@@ -316,3 +316,5 @@ if __name__ == "__main__":
 		dist.send(y, 0)
 
 	pipe.clear()
+
+	dist.destroy_process_group()
