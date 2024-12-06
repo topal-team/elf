@@ -129,6 +129,10 @@ class PipelineBlock:
 
 		self.compute_time = []  # used to measure idle time
 
+		self.compute_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+		self.recv_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+		self.send_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+
 	def __str__(self) -> str:
 		return f"[Layer {self.id} : GPU {self.rank}]"
 
@@ -153,38 +157,36 @@ class PipelineBlock:
 			inputs.append(x)
 
 		if torch.cuda.is_available():
-			torch.cuda.synchronize()
+			self.recv_stream.synchronize()
 		# Should we synchronize here to make sure all inputs are received?
 
-		with Timer() as timer:
-			if options.get(OpOptions.REMAT):
-				with torch.no_grad():
+		with torch.cuda.stream(self.compute_stream):
+			with Timer() as timer:
+				if options.get(OpOptions.REMAT):
+					with torch.no_grad():
+						y = self.model(*inputs)
+						y = (y,) if not isinstance(y, tuple) else y
+
+						# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
+						for var, value in zip(self.inputs, inputs):
+							var.set(var.to_process, mb_id, (None, value))
+				else:
 					y = self.model(*inputs)
 					y = (y,) if not isinstance(y, tuple) else y
+					for var, value in zip(self.outputs, y):
+						for dst in var:
+							dst.set(dst.saved, mb_id, value)
 
-					# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
+					# Keep inputs for backward
 					for var, value in zip(self.inputs, inputs):
-						var.set(var.to_process, mb_id, (None, value))
-			else:
-				y = self.model(*inputs)
-				y = (y,) if not isinstance(y, tuple) else y
-				for var, value in zip(self.outputs, y):
-					for dst in var:
-						dst.set(dst.saved, mb_id, value)
-
-				# Keep inputs for backward
-				for var, value in zip(self.inputs, inputs):
-					var.set(var.saved, mb_id, value)
+						var.set(var.saved, mb_id, value)
 
 		self.compute_time.append(timer.time)
-
-		if torch.cuda.is_available():
-			torch.cuda.synchronize()  # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
 
 		if any(not dst.metadata for var in self.outputs for dst in var):
 			self._register_out_metadata(y)
 
-		# Send to next
+		# Register what will be sent to next
 		for var, value in zip(self.outputs, y):
 			for dst in var:
 				value = value.detach()  # non-tensor comms are not handled anyway
@@ -226,21 +228,19 @@ class PipelineBlock:
 			grads.append(g)
 
 		if torch.cuda.is_available():
-			torch.cuda.synchronize()
+			self.recv_stream.synchronize()
 		# Should we synchronize here to make sure all gradients are received?
 
-		with Timer() as timer:
-			for i in range(len(self.outputs)):
-				if not isinstance(act[i], torch.Tensor):
-					continue
-				assert (
-					act[i].shape == grads[i].shape
-				), f"Expected same shape for activations and gradients, got {act[i].shape} and {grads[i].shape}"
-				# We may need to keep the graph for multiple backwards, if an intermediate value is needed by next blocks
-				act[i].backward(grads[i], retain_graph=(i != len(self.outputs) - 1))
-
-		if torch.cuda.is_available():
-			torch.cuda.synchronize()  # Breaks the comp/comm overlap, but without it the results are wrong; TODO: investigate why
+		with torch.cuda.stream(self.compute_stream):
+			with Timer() as timer:
+				for i in range(len(self.outputs)):
+					if not isinstance(act[i], torch.Tensor):
+						continue
+					assert (
+						act[i].shape == grads[i].shape
+					), f"Expected same shape for activations and gradients, got {act[i].shape} and {grads[i].shape}"
+					# We may need to keep the graph for multiple backwards, if an intermediate value is needed by next blocks
+					act[i].backward(grads[i], retain_graph=(i != len(self.outputs) - 1))
 
 		self.compute_time.append(timer.time)
 
@@ -266,6 +266,9 @@ class PipelineBlock:
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
+		if torch.cuda.is_available():
+			self.compute_stream.synchronize()
+
 		sends = []
 		for var in self.outputs:
 			for target in var:
@@ -282,7 +285,8 @@ class PipelineBlock:
 					sends.append(dist.P2POp(dist.isend, outputs, rank, group=self.pp_group))
 				else:
 					logger.debug(f"{self} - Sending outputs to rank {rank}")
-					dist.isend(outputs, rank, group=self.pp_group)
+					with torch.cuda.stream(self.send_stream):
+						dist.isend(outputs, rank, group=self.pp_group)
 
 		return sends  # if not batched, sends is still empty and therefore Falsy
 
@@ -298,6 +302,9 @@ class PipelineBlock:
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
+		if torch.cuda.is_available():
+			self.compute_stream.synchronize()
+
 		sends = []
 		for var in self.inputs:
 			if var.peer != dst:
@@ -310,7 +317,8 @@ class PipelineBlock:
 				sends.append(dist.P2POp(dist.isend, grads, rank, group=self.pp_group))
 			else:
 				logger.debug(f"{self} - Sending gradients to rank {rank}")
-				dist.isend(grads, rank, group=self.pp_group)
+				with torch.cuda.stream(self.send_stream):
+					dist.isend(grads, rank, group=self.pp_group)
 
 		return sends  # if not batched, sends is still empty and therefore Falsy
 
@@ -347,7 +355,8 @@ class PipelineBlock:
 				work = None
 			else:
 				logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
-				work = dist.irecv(buffer, rank, group=self.pp_group)
+				with torch.cuda.stream(self.recv_stream):
+					work = dist.irecv(buffer, rank, group=self.pp_group)
 
 			var.set(var.to_process, mb_id, (work, buffer))
 
@@ -382,7 +391,8 @@ class PipelineBlock:
 					work = None
 				else:
 					logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
-					work = dist.irecv(buffer, rank, group=self.pp_group)
+					with torch.cuda.stream(self.recv_stream):
+						work = dist.irecv(buffer, rank, group=self.pp_group)
 
 				target.set(target.to_process, mb_id, (work, buffer))
 

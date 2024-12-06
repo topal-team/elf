@@ -14,11 +14,12 @@ if __name__ == "__main__":
 	# Initialize distributed training
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
+	ws = int(os.getenv("WORLD_SIZE"))
 	torch.cuda.set_device(local_rank)
 	dist.init_process_group(backend="nccl")
 
 	# Create model and sample data
-	model = SimpleTransformer(4000, 2048, 8, 512)
+	model = SimpleTransformer(4000, 2048, 8 * ws, 512)
 	sample = model.get_sample(32).cuda()
 	target = model.get_target(32).cuda()
 	loss_fn = model.loss_fn
