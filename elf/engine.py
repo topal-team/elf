@@ -62,7 +62,7 @@ class Engine:
 		if len(self.comms) == 0:
 			return
 		
-		streams = []
+		works = []
 
 		# Enqueue everything
 		for id_, comms in self.comms.items():
@@ -70,22 +70,16 @@ class Engine:
 			if any(c.op.__name__ == "isend" for c in comms) and any(
 				c.op.__name__ == "irecv" for c in comms
 			):
-				stream = torch.cuda.Stream()
-				streams.append(stream)
-				with torch.cuda.stream(stream):
-					if len(comms) > 1:
-						logger.debug(
-							f"Rank {self.rank} - Running batched communications with id {id_}: {[op_to_str(c) for c in comms]}"
-						)
-					works = dist.batch_isend_irecv(comms)
-					for w in works:
-						w.wait()
-						
+				if len(comms) > 1:
+					logger.debug(
+						f"Rank {self.rank} - Running batched communications with id {id_}: {[op_to_str(c) for c in comms]}"
+					)
+				works.extend(dist.batch_isend_irecv(comms))
+
 				self.comms[id_] = []
 
-		# Synchronize everything
-		for stream in streams:
-			stream.synchronize()
+		for w in works:
+			w.wait()
 
 		logger.debug(f"Rank {self.rank} - Finished batched communications")
 

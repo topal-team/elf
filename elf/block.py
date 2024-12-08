@@ -129,10 +129,6 @@ class PipelineBlock:
 
 		self.compute_time = []  # used to measure idle time
 
-		self.compute_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-		self.recv_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-		self.send_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-
 	def __str__(self) -> str:
 		return f"[Layer {self.id} : GPU {self.rank}]"
 
@@ -156,30 +152,25 @@ class PipelineBlock:
 
 			inputs.append(x)
 
-		if torch.cuda.is_available():
-			self.recv_stream.synchronize()
-		# Should we synchronize here to make sure all inputs are received?
-
-		with torch.cuda.stream(self.compute_stream):
-			with Timer() as timer:
-				if options.get(OpOptions.REMAT):
-					with torch.no_grad():
-						y = self.model(*inputs)
-						y = (y,) if not isinstance(y, tuple) else y
-
-						# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
-						for var, value in zip(self.inputs, inputs):
-							var.set(var.to_process, mb_id, (None, value))
-				else:
+		with Timer() as timer:
+			if options.get(OpOptions.REMAT):
+				with torch.no_grad():
 					y = self.model(*inputs)
 					y = (y,) if not isinstance(y, tuple) else y
-					for var, value in zip(self.outputs, y):
-						for dst in var:
-							dst.set(dst.saved, mb_id, value)
 
-					# Keep inputs for backward
+					# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
 					for var, value in zip(self.inputs, inputs):
-						var.set(var.saved, mb_id, value)
+						var.set(var.to_process, mb_id, (None, value))
+			else:
+				y = self.model(*inputs)
+				y = (y,) if not isinstance(y, tuple) else y
+				for var, value in zip(self.outputs, y):
+					for dst in var:
+						dst.set(dst.saved, mb_id, value)
+
+				# Keep inputs for backward
+				for var, value in zip(self.inputs, inputs):
+					var.set(var.saved, mb_id, value)
 
 		self.compute_time.append(timer.time)
 
@@ -220,19 +211,22 @@ class PipelineBlock:
 				target.get(target.saved, mb_id)
 
 		grads = []
+		# wait for all recv to be enqueued without sync
 		for var in self.outputs:
-			# For one tensor, the gradients are the sum of the gradients from every destination
-			g = var[0].wait_and_pop(mb_id)
-			for dst in var[1:]:
-				g += dst.wait_and_pop(mb_id)
+			g = []
+			for dst in var:
+				g.append(dst.wait_and_pop(mb_id))
 			grads.append(g)
 
-		if torch.cuda.is_available():
-			self.recv_stream.synchronize()
-		# Should we synchronize here to make sure all gradients are received?
-
-		with torch.cuda.stream(self.compute_stream):
+			
 			with Timer() as timer:
+				# sum up all the gradients from all destinations
+				for i in range(len(grads)):
+					g = grads[i][0]
+					for dst_grads in grads[i][1:]:
+						g += dst_grads
+					grads[i] = g
+				
 				for i in range(len(self.outputs)):
 					if not isinstance(act[i], torch.Tensor):
 						continue
@@ -266,9 +260,6 @@ class PipelineBlock:
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		if torch.cuda.is_available():
-			self.compute_stream.synchronize()
-
 		sends = []
 		for var in self.outputs:
 			for target in var:
@@ -285,8 +276,7 @@ class PipelineBlock:
 					sends.append(dist.P2POp(dist.isend, outputs, rank, group=self.pp_group))
 				else:
 					logger.debug(f"{self} - Sending outputs to rank {rank}")
-					with torch.cuda.stream(self.send_stream):
-						dist.isend(outputs, rank, group=self.pp_group)
+					dist.isend(outputs, rank, group=self.pp_group)
 
 		return sends  # if not batched, sends is still empty and therefore Falsy
 
@@ -302,9 +292,6 @@ class PipelineBlock:
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		if torch.cuda.is_available():
-			self.compute_stream.synchronize()
-
 		sends = []
 		for var in self.inputs:
 			if var.peer != dst:
@@ -317,8 +304,7 @@ class PipelineBlock:
 				sends.append(dist.P2POp(dist.isend, grads, rank, group=self.pp_group))
 			else:
 				logger.debug(f"{self} - Sending gradients to rank {rank}")
-				with torch.cuda.stream(self.send_stream):
-					dist.isend(grads, rank, group=self.pp_group)
+				dist.isend(grads, rank, group=self.pp_group)
 
 		return sends  # if not batched, sends is still empty and therefore Falsy
 
@@ -355,13 +341,12 @@ class PipelineBlock:
 				work = None
 			else:
 				logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
-				with torch.cuda.stream(self.recv_stream):
-					work = dist.irecv(buffer, rank, group=self.pp_group)
+				work = dist.irecv(buffer, rank, group=self.pp_group)
 
 			var.set(var.to_process, mb_id, (work, buffer))
 
 		return recvs  # if not batched, recvs is still empty and therefore Falsy
-
+	
 	def recv_backward(self, mb_id, mb_size, **options):
 		"""
 		Receive and store one gradient to backward
@@ -391,8 +376,7 @@ class PipelineBlock:
 					work = None
 				else:
 					logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
-					with torch.cuda.stream(self.recv_stream):
-						work = dist.irecv(buffer, rank, group=self.pp_group)
+					work = dist.irecv(buffer, rank, group=self.pp_group)
 
 				target.set(target.to_process, mb_id, (work, buffer))
 

@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 import sys
-import subprocess
 import wandb
 
 sys.path.append("./")
@@ -17,6 +16,7 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--pp", type=int, default=4, help="Pipeline parallelism degree")
+parser.add_argument("--run_id", type=str, default="", help="Run ID")
 args = parser.parse_args()
 
 n_stages = args.pp
@@ -116,13 +116,6 @@ if __name__ == "__main__":
 		# Log config
 		config_dict = {"pp_size": args.pp, "batch_size": batch_size, "seq_len": seq_len}
 
-		# Get git commit hash
-		try:
-			git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
-			config_dict["git_commit"] = git_commit
-		except (subprocess.CalledProcessError, FileNotFoundError):
-			config_dict["git_commit"] = "unknown"
-
 		wandb.init(
 			project="compare-frameworks",
 			entity="topal-inria",
@@ -133,6 +126,7 @@ if __name__ == "__main__":
 
 		# Log metrics
 		metrics = {
+			"run_id": args.run_id,
 			"pp_size": args.pp,
 			"parameters": sum(p.numel() for p in model.parameters()),
 			"torch_time": torch_time,

@@ -1,5 +1,4 @@
 import sys
-import subprocess
 
 sys.path.append(".")
 from elf.pipeline import Pipeline
@@ -145,13 +144,6 @@ if __name__ == "__main__":
 			"schedule": args.schedule,
 			"partitioner": args.partitioner,
 		}
-
-		# Get git commit hash
-		try:
-			git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
-			config_dict["git_commit"] = git_commit
-		except (subprocess.CalledProcessError, FileNotFoundError):
-			config_dict["git_commit"] = "unknown"
 
 		wandb.init(
 			project="elf",
