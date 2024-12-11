@@ -61,7 +61,7 @@ class Engine:
 		"""
 		if len(self.comms) == 0:
 			return
-		
+
 		works = []
 
 		# Enqueue everything

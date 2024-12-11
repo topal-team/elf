@@ -218,7 +218,6 @@ class PipelineBlock:
 				g.append(dst.wait_and_pop(mb_id))
 			grads.append(g)
 
-			
 			with Timer() as timer:
 				# sum up all the gradients from all destinations
 				for i in range(len(grads)):
@@ -226,7 +225,7 @@ class PipelineBlock:
 					for dst_grads in grads[i][1:]:
 						g += dst_grads
 					grads[i] = g
-				
+
 				for i in range(len(self.outputs)):
 					if not isinstance(act[i], torch.Tensor):
 						continue
@@ -346,7 +345,7 @@ class PipelineBlock:
 			var.set(var.to_process, mb_id, (work, buffer))
 
 		return recvs  # if not batched, recvs is still empty and therefore Falsy
-	
+
 	def recv_backward(self, mb_id, mb_size, **options):
 		"""
 		Receive and store one gradient to backward
