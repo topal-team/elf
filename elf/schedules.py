@@ -39,11 +39,12 @@ def _add_backward_pass(schedule, placement, block_id, mb_id, rank, signature, **
 		schedule.append(
 			Operation(block_id, mb_id, OperationType.RECV_BACKWARD, rank, src=src, **options)
 		)
-	schedule.append(Operation(block_id, mb_id, OperationType.BACKWARD, rank, **options))
+	schedule.append(Operation(block_id, mb_id, OperationType.BACKWARD_INPUTS, rank, **options))
 	for dst in sources:
 		schedule.append(
 			Operation(block_id, mb_id, OperationType.SEND_BACKWARD, rank, dst=dst, **options)
 		)
+	schedule.append(Operation(block_id, mb_id, OperationType.BACKWARD_PARAMS, rank, **options))
 
 
 def generate_afab_schedule(placement, n_micro_batches, signatures):
@@ -262,5 +263,91 @@ def generate_full_remat_schedule(placement, n_micro_batches, signatures):
 
 	for id_ in ids:
 		schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
+
+	return schedule
+
+
+def generate_zbh1_schedule(placement, n_micro_batches, signatures):
+	schedule = []
+	n_devices = max(placement) + 1
+
+	for rank in range(n_devices):
+		n_warmups = min(n_devices - rank, n_micro_batches)
+		f = 0
+		b = 0
+		w = 0
+
+		for _ in range(n_warmups):
+			_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+			f += 1
+
+		_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+		schedule.pop(-1)  # hack: remove the backward wrt weights
+		b += 1
+
+		for _ in range(rank):
+			_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+			f += 1
+			_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+			schedule.pop(-1)  # hack: remove the backward wrt weights
+			b += 1
+
+		while f < n_micro_batches or b < n_micro_batches or w < n_micro_batches:
+			if w < n_micro_batches:
+				schedule.append(Operation(rank, w, OperationType.BACKWARD_PARAMS, rank))
+				w += 1
+			if f < n_micro_batches:
+				_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+				f += 1
+			if b < n_micro_batches:
+				_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+				schedule.pop(-1)  # hack: remove the backward wrt weights
+				b += 1
+
+		schedule.append(Operation(rank, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
+
+	return schedule
+
+
+def generate_zbh2_schedule(placement, n_micro_batches, signatures):
+	schedule = []
+	n_devices = max(placement) + 1
+
+	for rank in range(n_devices):
+		# We don't support interleaving yet, only consider one block per rank
+		# ids = [i for i in range(len(placement)) if placement[i] == rank]
+		n_warmups = min(n_micro_batches, 2 * (n_devices - rank) - 1)
+		f = 0
+		b = 0
+		w = 0
+		for i in range(n_warmups):
+			_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+			f += 1
+
+		_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+		schedule.pop(-1)  # hack: remove the backward wrt weights
+		b += 1
+
+		for i in range(n_micro_batches - 1 - n_warmups):
+			_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+			f += 1
+
+			_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+			schedule.pop(-1)  # hack: remove the backward wrt weights
+			b += 1
+
+		while f < n_micro_batches or b < n_micro_batches or w < n_micro_batches:
+			if w < n_micro_batches:
+				schedule.append(Operation(rank, w, OperationType.BACKWARD_PARAMS, rank))
+				w += 1
+			if f < n_micro_batches:
+				_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+				f += 1
+			if b < n_micro_batches:
+				_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+				schedule.pop(-1)  # hack: remove the backward wrt weights
+				b += 1
+
+		schedule.append(Operation(rank, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
 
 	return schedule

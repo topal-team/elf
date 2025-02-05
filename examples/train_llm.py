@@ -31,9 +31,9 @@ logging.basicConfig(level=logging.INFO)
 
 def pretty_print_params(n):
 	if n > 1e9:
-		return f"{n/1e9:.1f}B"
+		return f"{n / 1e9:.1f}B"
 	elif n > 1e6:
-		return f"{n/1e6:.1f}M"
+		return f"{n / 1e6:.1f}M"
 	else:
 		return f"{int(n)}"
 

@@ -20,13 +20,17 @@ class OperationType(Enum):
 	FORWARD = 1
 	SEND_FORWARD = 2
 	RECV_BACKWARD = 3
-	BACKWARD = 4
-	SEND_BACKWARD = 5
-	LOSS_FORWARD = 6
-	LOSS_BACKWARD = 7
-	ALL_REDUCE_PARAM_GRADS = 8
+	BACKWARD_INPUTS = 4
+	BACKWARD_PARAMS = 5
+	SEND_BACKWARD = 6
+	LOSS_FORWARD = 7
+	LOSS_BACKWARD = 8
+	ALL_REDUCE_PARAM_GRADS = 9
 
 	def __repr__(self) -> str:
+		return self.name.lower()
+
+	def __str__(self) -> str:
 		return self.name.lower()
 
 
@@ -132,9 +136,9 @@ def resolve_one_pair(ops1, ops2):
 				return other
 		return None
 
-	assert len(ops1) == len(
-		ops2
-	), f"ops1 and ops2 should have the same length, got {len(ops1)} and {len(ops2)}"
+	assert len(ops1) == len(ops2), (
+		f"ops1 and ops2 should have the same length, got {len(ops1)} and {len(ops2)}"
+	)
 
 	# Find consecutive complementary operations in ops1
 	for i in range(len(ops1) - 1):
@@ -213,3 +217,25 @@ def mark_batched_comms(schedule, placement):
 			ops2 = [op for op in schedule if op.rank == j and get_peer_rank(op, placement) == i]
 			resolve_one_pair(ops1, ops2)
 		visited.add(i)
+
+
+def schedule_to_str(schedule):
+	reprs = {
+		OperationType.RECV_FORWARD: "",
+		OperationType.FORWARD: "f",
+		OperationType.SEND_FORWARD: "",
+		OperationType.RECV_BACKWARD: "",
+		OperationType.BACKWARD_INPUTS: "b",
+		OperationType.BACKWARD_PARAMS: "w",
+		OperationType.SEND_BACKWARD: "",
+		OperationType.LOSS_FORWARD: "",
+		OperationType.LOSS_BACKWARD: "",
+		OperationType.ALL_REDUCE_PARAM_GRADS: "(AR)",
+	}
+	ranks = sorted(set(op.rank for op in schedule))
+	lines = []
+	for rank in ranks:
+		rank_ops = [op for op in schedule if op.rank == rank]
+		ops_str = " ".join(filter(lambda s: s != "", [f"{reprs[op.op]}" for op in rank_ops]))
+		lines.append(f"Rank {rank}: {ops_str}")
+	return "\n".join(lines)

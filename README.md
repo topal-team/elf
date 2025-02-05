@@ -1,10 +1,13 @@
-## How it works
+## ELF - Efficient Deep Learning Framework
 
-### Create the pipeline
+ELF is a deep learning framework that aims to allow distributed training of large models using state-of-the-art algorithms. It is build on top of PyTorch.
+
+### Use the framework
 
 The object ``Pipeline`` from ``pipeline`` provides a simple API to automatically take care of everything.
 ```py
 from elf import Pipeline
+model = ... # create your model
 sample = torch.randn(..., device = 'cuda')
 pipe = Pipeline(model, sample)
 y, loss = pipe(inputs, targets, loss_fn)
@@ -15,9 +18,15 @@ A full example can be found in ``examples/basic.py``.
 
 Note that ``sample`` is only necessary if you use automatic partitioning, as it is used for profiling. Also, it is not used on processes other than the first one of the pipeline.\
 There are several arguments to modify its behaviour :
-- ``placement`` specifies the rank of each pipeline stage.
+- ``placement`` specifies the gpu used for each pipeline stage.
 - ``partitioner`` can be set to ``False`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device. Otherwise, you can choose between partitioners described below.
-- ``schedule`` modifies the schedule algorithm to use. Currently, Gpipe (`"afab"`), 1F1B (`"1f1b"`) and Hanayo (`"hanayo"`) are supported.
+- ``schedule`` modifies the schedule algorithm to use. Currently supported:
+  - ``"afab"``: [GPipe](https://arxiv.org/pdf/1811.06965v5)
+  - ``"1f1b"``: [1F1B](https://arxiv.org/pdf/1806.03377)
+  - ``"hanayo"``: [Hanayo](https://arxiv.org/pdf/2308.15762)
+  - ``"zbh1"``: [ZBH1](https://arxiv.org/pdf/2401.10241)
+  - ``"zbh2"``: [ZBH2](https://arxiv.org/pdf/2401.10241)
+  - ``"full_remat"``: Full Remat : GPipe with rematerialization of every micro-batch / 1f1b on the last rank
 - ``dp`` is the data parallelism degree. One pipeline will be replicated ``dp`` times.
 
 ### Write your own schedule
@@ -36,7 +45,7 @@ Different partition scheme are available. All of them rely on ``torch.fx.symboli
 The different partition modes are:
 - ``naive``: Naive graph partition that tries to balance computation times for each part
 - ``constrained``: Same as default, but with a hard constraint on each part to have exactly 1 input tensor and 1 output tensor
-- ``metis``: Call [METIS](http://glaros.dtc.umn.edu/gkhome/metis/metis/overview) to optimize the partition. Needs ``gpmetis`` to be installed. Currently has some known issues of cycles.
+- ``metis``: Call [METIS](http://glaros.dtc.umn.edu/gkhome/metis/metis/overview) to optimize the partition. Needs ``gpmetis`` to be installed.
 - ``dagP``: Call [dagP](https://github.com/GT-TDAlab/dagP/) to partition. Needs ``rMLGP`` installed. 
 
 ### Data parallelism

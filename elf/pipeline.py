@@ -3,7 +3,6 @@ Pipeline API and setup
 """
 
 import os
-from elf.partitioners.utils import Signature
 import torch
 import shutil
 import torch.distributed as dist
@@ -11,8 +10,9 @@ from .block import PipelineBlock
 from .schedules import *
 from .engine import Engine
 from .utils import *
-from .scheduling import mark_batched_comms
+from .scheduling import mark_batched_comms, schedule_to_str
 from .partitioners import partition_graph
+from .partitioners.utils import Signature
 from collections import OrderedDict
 
 import logging
@@ -38,7 +38,7 @@ def to_cpu(nested_dict):
 
 class Pipeline:
 	"""
-	Model wrapper for pipelining that manages the pipeline setup
+	Model wrapper for pipelining that manages the pipeline setup and API
 	"""
 
 	def __init__(
@@ -144,24 +144,25 @@ class Pipeline:
 			self.last_nmb = n_micro_batches
 
 		# Execute the schedule
-		result, losses, times = self.engine.train_step(
+		result, losses, stats, detailed_stats = self.engine.train_step(
 			batch, target, loss_fn, self.schedule, mb_sizes, profile
 		)
 
 		# First and last block have some remaining tensors
 		for block in self.blocks:
-			for var in block.inputs:
+			for var in block.input_variables:
 				var.clear()
-			for var in block.outputs:
+			for var in block.output_variables:
 				for dst in var:
 					dst.clear()
 
-		self.times = times
+		self.stats = stats
+		self.detailed_stats = detailed_stats
 
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:
-			result = torch.cat(result, dim=0)
-			losses = torch.tensor(losses, device=result.device)
+			result = torch.cat(result, dim=0).detach()
+			losses = torch.tensor(losses, device=result.device).detach()
 			losses = losses.sum() / sum(mb_sizes)
 			if self.dp > 1:
 				dist.all_reduce(losses, group=self.blocks[-1].dp_group, op=dist.ReduceOp.AVG)
@@ -322,9 +323,13 @@ class Pipeline:
 				return generate_hanayo_schedule
 			case "full_remat":
 				return generate_full_remat_schedule
+			case "zbh1":
+				return generate_zbh1_schedule
+			case "zbh2":
+				return generate_zbh2_schedule
 			case _:
 				raise Exception(
-					f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat]"
+					f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat, zbh1, zbh2]"
 				)
 
 	def _generate_schedule(self, n_micro_batches):
@@ -339,6 +344,8 @@ class Pipeline:
 		:rtype: List[Operation]
 		"""
 		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
+		if dist.get_rank() == 0:
+			logger.info(schedule_to_str(schedule))
 
 		mark_batched_comms(schedule, self.placement)
 
@@ -367,9 +374,9 @@ class Pipeline:
 			else:
 				parts = model
 
-			assert (
-				sources is not None and targets is not None
-			), "Sources and targets must be provided when using pre-partitioned model"
+			assert sources is not None and targets is not None, (
+				"Sources and targets must be provided when using pre-partitioned model"
+			)
 			signatures = []
 			for i in range(len(self.placement)):
 				inputs = sorted(list(sources[i].keys()))
@@ -504,12 +511,9 @@ class Pipeline:
 		return blocks, signatures
 
 	def _check_for_partitioner(self, partitioner):
-		assert partitioner in [
-			"naive",
-			"constrained",
-			"dagP",
-			"metis",
-		], "Partition strategies available are : [naive, constrained, dagP, metis]"
+		assert partitioner in ["naive", "constrained", "dagP", "metis"], (
+			"Partition strategies available are : [naive, constrained, dagP, metis]"
+		)
 
 		if partitioner == "metis":
 			if not shutil.which("gpmetis"):
@@ -526,6 +530,7 @@ class Pipeline:
 def get_sources_targets_sequential(placement):
 	"""
 	Generates sources and targets for a fully sequential model (no skip connections), with one input and one output per stage.
+	This is intended to be used with the ``partitioner=False`` option.
 
 	:param placement: placement of the model blocks on gpus
 	:type placement: List[int]

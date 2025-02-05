@@ -81,10 +81,10 @@ def test_pipeline_block_init():
 	assert block.rank == 0
 	assert block.is_first
 	assert not block.is_last
-	assert len(block.inputs) == 1
-	assert len(block.outputs) == 1
-	assert block.inputs[0].name == "input"
-	assert block.outputs[0][0].name == "output"
+	assert len(block.input_variables) == 1
+	assert len(block.output_variables) == 1
+	assert block.input_variables[0].name == "input"
+	assert block.output_variables[0][0].name == "output"
 
 
 @pytest.mark.single
@@ -103,11 +103,11 @@ def test_pipeline_block_forward():
 	)
 
 	input_tensor = torch.tensor([[1.0, 2.0]], device=device)
-	block.inputs[0].set(block.inputs[0].to_process, 0, (None, input_tensor))
+	block.input_variables[0].set(block.input_variables[0].to_process, 0, (None, input_tensor))
 	block.forward(0)
 
 	expected = torch.tensor([[5.1, 11.2]], device=device)
-	actual = block.outputs[0][0].get(block.outputs[0][0].to_send, 0)
+	actual = block.output_variables[0][0].get(block.output_variables[0][0].to_send, 0)
 	assert torch.allclose(actual, expected)
 
 
@@ -128,17 +128,18 @@ def test_pipeline_block_backward():
 
 	# Forward pass first
 	input_tensor = torch.tensor([[1.0, 2.0]], requires_grad=True, device=device)
-	block.inputs[0].set(block.inputs[0].to_process, 0, (None, input_tensor))
+	block.input_variables[0].set(block.input_variables[0].to_process, 0, (None, input_tensor))
 	block.forward(0)
 
 	# Backward pass
 	grad_tensor = torch.tensor([[1.0, 1.0]], device=device)
-	block.outputs[0][0].set(block.outputs[0][0].to_process, 0, (None, grad_tensor))
-	block.backward(0)
+	block.output_variables[0][0].set(block.output_variables[0][0].to_process, 0, (None, grad_tensor))
+	block.backward_inputs(0)
+	block.backward_params(0)
 
 	# Check input gradients
 	expected_input_grad = torch.tensor([[4.0, 6.0]], device=device)
-	actual_input_grad = block.inputs[0].get(block.inputs[0].to_send, 0)
+	actual_input_grad = block.input_variables[0].get(block.input_variables[0].to_send, 0)
 	assert torch.allclose(actual_input_grad, expected_input_grad)
 
 	# Check weight gradients
@@ -168,7 +169,7 @@ def test_block_communication(init_dist):
 
 		# Forward pass
 		input_tensor = torch.tensor([[1.0, 2.0]], device=local_rank)
-		block.inputs[0].set(block.inputs[0].to_process, 0, (None, input_tensor))
+		block.input_variables[0].set(block.input_variables[0].to_process, 0, (None, input_tensor))
 		block.forward(0)
 
 		# Send output to rank 1
@@ -176,7 +177,8 @@ def test_block_communication(init_dist):
 
 		# Receive gradients from rank 1 for backward
 		block.recv_backward(0, mb_size=1, src=1)
-		block.backward(0)
+		block.backward_inputs(0)
+		block.backward_params(0)
 
 	elif rank == 1:
 		model = nn.Linear(2, 2)
@@ -195,8 +197,11 @@ def test_block_communication(init_dist):
 
 		# Create gradients and send back
 		grad_tensor = torch.tensor([[1.0, 1.0]], device=local_rank)
-		block.outputs[0][0].set(block.outputs[0][0].to_process, 0, (None, grad_tensor))
-		block.backward(0)
+		block.output_variables[0][0].set(
+			block.output_variables[0][0].to_process, 0, (None, grad_tensor)
+		)
+		block.backward_inputs(0)
+		block.backward_params(0)
 		block.send_backward(0, dst=0)
 
 	dist.barrier()  # Ensure both processes complete

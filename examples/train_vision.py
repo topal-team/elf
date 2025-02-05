@@ -116,7 +116,7 @@ if __name__ == "__main__":
 				running_loss += loss.item()
 
 			if step == 10:
-				pretty_print_step(rank, pipe.times)
+				pretty_print_step(rank, pipe.stats)
 				torch.cuda.reset_peak_memory_stats()
 				if rank == pipe.placement[-1]:
 					running_loss /= step

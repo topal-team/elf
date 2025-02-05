@@ -74,9 +74,9 @@ if __name__ == "__main__":
 	local_rank = int(os.environ["LOCAL_RANK"])
 	rank = int(os.environ["RANK"])
 
-	assert (
-		args.dp * args.pp == world_size
-	), "Data parallelism * pipeline parallelism must equal world size"
+	assert args.dp * args.pp == world_size, (
+		"Data parallelism * pipeline parallelism must equal world size"
+	)
 
 	torch.cuda.set_device(local_rank)
 	dist.init_process_group(backend="nccl")
@@ -122,7 +122,7 @@ if __name__ == "__main__":
 	for i in range(10):
 		model.zero_grad()
 		y = pipe(inputs.clone(), targets.clone(), model.loss_fn)
-		times.append(pipe.times)
+		times.append(pipe.stats)
 
 	# Gather memory stats
 	mems = [torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None

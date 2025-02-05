@@ -4,16 +4,44 @@ import os
 import sys
 import gc
 
+
 sys.path.append("./")
-from elf.pipeline import Pipeline
+from elf.pipeline import Pipeline, get_sources_targets_sequential
 from argparse import ArgumentParser
-from models.simple import SimpleTransformer
-from elf.utils import pretty_print_params
+from models.simple import FullTransformer
+from elf.utils import Timer, pretty_print_params
+from elf.zb_utils import replace_linear_with_linear_dw
 
 import logging
 
 logger = logging.getLogger("benchmark")
 logging.basicConfig(level=logging.INFO)
+
+
+def get_handcrafted_partition(model, rank, placement):
+	# CRAFTED FOR FULLTRANSFORMER, ADAPT FOR OTHER MODELS
+	num_blocks = len(model.blocks)
+	num_ranks = len(placement)
+	blocks_per_rank = num_blocks // num_ranks
+	extra_blocks = num_blocks % num_ranks
+	parts = [None] * num_ranks
+
+	start_idx = 0
+	for i in range(num_ranks):
+		# Add one extra block to earlier ranks if blocks don't divide evenly
+		rank_blocks = blocks_per_rank + (1 if i < extra_blocks else 0)
+		end_idx = start_idx + rank_blocks
+
+		if i == 0:
+			parts[i] = torch.nn.Sequential(model.embed, *model.blocks[start_idx:end_idx])
+		elif i == num_ranks - 1:
+			parts[i] = torch.nn.Sequential(*model.blocks[start_idx:], model.head)
+		else:
+			parts[i] = torch.nn.Sequential(*model.blocks[start_idx:end_idx])
+
+		start_idx = end_idx
+
+	return [parts[i] for i, p in enumerate(placement) if p == rank]
 
 
 def medians(times):
@@ -28,6 +56,13 @@ if __name__ == "__main__":
 	parser = ArgumentParser(description="Benchmark different schedules")
 	parser.add_argument(
 		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
+	)
+	parser.add_argument(
+		"--partitioner",
+		choices=["naive", "constrained", "metis", "dagP", "handcrafted"],
+		required=False,
+		default="naive",
+		help="partitioner to distribute the model",
 	)
 	args = parser.parse_args()
 	match args.log:
@@ -60,58 +95,96 @@ if __name__ == "__main__":
 
 	# torch.cuda.cudart().cudaProfilerStart()
 
-	model = SimpleTransformer(8000, 2048, 32, 512)
+	model = FullTransformer(500, 1024, 32, 256, 32, 0.1)
 	if rank == 0:
-		logger.info(
-			f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters"
-		)
+		print(f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters")
 	loss_fn = model.loss_fn
 
 	setups = [
 		("GPipe", list(range(world_size)), "afab"),
 		("1f1b", list(range(world_size)), "1f1b"),
-		("Megatron", list(range(world_size)) * 2, "1f1b"),
+		# ("Megatron", list(range(world_size)) * 2, "1f1b"),
 		("Hanayo", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
 		("Full Remat", list(range(world_size)), "full_remat"),
+		("ZBH1", list(range(world_size)), "zbh1"),
+		("ZBH2", list(range(world_size)), "zbh2"),
 	]
 
+	batch_size = 32
+	n_micro_batches = 8
+	split_size = batch_size // n_micro_batches
+	n_iterations = 20
+
 	for s, placement, schedule in setups:
+		partitioner = args.partitioner
+		if partitioner == "handcrafted":
+			parts = get_handcrafted_partition(model, rank, placement)
+			sources, dsts = get_sources_targets_sequential(placement)  # "targets" is already used :)
+			partitioner = False
+		else:
+			parts = model
+			sources, dsts = None, None
+
+		if s.startswith("ZBH"):
+			replace_linear_with_linear_dw(model, rank)
+
 		if global_rank == 0:
-			logger.info(f"Beginning benchmark for {s}")
-		# logger.info(f"Rank {rank} - Memory allocated : {torch.cuda.memory_allocated() / 2**30:.3f} GB")
+			print(f"Beginning benchmark for {s}")
 
-		inputs = model.get_sample(32)
-		targets = model.get_target(32)
+		inputs = model.get_sample(batch_size)
+		targets = model.get_target(batch_size)
 
-		pipe = Pipeline(model, inputs, placement, schedule=schedule)
+		pipe = Pipeline(
+			parts,
+			inputs,
+			placement,
+			schedule=schedule,
+			partitioner=partitioner,
+			sources=sources,
+			targets=dsts,
+		)
 		# Warmup
 		if global_rank == 0:
-			logger.info(f"{s} - Warming up")
+			print(f"{s} - Warming up")
 		for i in range(3):
-			y = pipe(inputs.clone(), targets.clone(), loss_fn)
+			y = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=split_size)
+
 		torch.cuda.reset_peak_memory_stats()
 
 		if global_rank == 0:
-			logger.info(f"{s} - Benchmark")
-		times = []
-		for i in range(10):
-			model.zero_grad()
-			inputs = model.get_sample(32)
-			targets = model.get_target(32)
-			y = pipe(inputs, targets, loss_fn)
-			times.append(pipe.times)
+			print(f"{s} - Benchmark")
+
+		dist.barrier()
+		torch.cuda.synchronize()
+
+		stats = []
+		with Timer() as timer:
+			for i in range(n_iterations):
+				model.zero_grad()
+				inputs = model.get_sample(batch_size)  # should we include input allocation in the stats?
+				targets = model.get_target(batch_size)
+				y = pipe(inputs, targets, loss_fn, split_size=split_size)
+				stats.append(pipe.stats)
+			dist.barrier()
 
 		mems = [torch.tensor(0.0, device=rank) for _ in range(world_size)] if global_rank == 0 else None
 		dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=rank), mems, 0)
 
-		median_times = medians(times)
+		median_times = medians(stats)
 		itimes = [{} for _ in range(world_size)] if global_rank == 0 else None
 		dist.gather_object(median_times, itimes, 0)
 
 		if global_rank == 0:
-			print(
-				f'{s} :\n\tMedian time : {median_times["total"]:.3f}s\n\tIdle time : {median_times["idle"]:.2f}s, or {100 * median_times["idle"] / median_times["total"]:.1f}% of total time.\n\tMems : {[m.item() for m in mems]} GB'
-			)
+			iteration_times = [f"{it['total']:.2f}" for it in itimes]
+			idle_times = [f"{it['idle']:.2f}" for it in itimes]
+			idle_percentages = [f"{it['idle'] / it['total'] * 100:.1f}" for it in itimes]
+			peak_mems = [f"{m.item():.2f}" for m in mems]
+			print(f"{s}:")
+			print(f"\tIteration times: {iteration_times} s")
+			print(f"\tIdle times: {idle_times} s ({idle_percentages}%)")
+			print(f"\tTotal time ({n_iterations} iterations): {timer.time():.2f} s")
+			print(f"\tPeak memories: {peak_mems} GB")
+
 			with open(fileout, "a") as f:
 				f.write(f"{s}")
 				for d in itimes:

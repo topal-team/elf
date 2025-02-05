@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from .scheduling import OpOptions
 from .utils import Timer, TensorMetadata
+from .zb_utils import LayerDW
 import logging
 
 logger = logging.getLogger("block")
@@ -26,11 +27,23 @@ class Variable:
 		self.metadata = None  # shape, dtype
 		self.was_metadata_sent = False  # flag to avoid sending metadata twice
 
+		# Single-use data structures ; data is deleted after being read
 		self.to_process = []  # (work, tensor) : received object waiting to be processed
 		self.saved = []  # tensor : object kept for backward
 		self.to_send = []  # tensor : object ready to be sent to the peer
 
 	def get(self, queue, mb_id):
+		"""
+		Get an element from the specified queue at the given micro-batch index.
+
+		:param queue: Queue to get data from (to_process, saved, or to_send)
+		:type queue: List
+		:param mb_id: Micro-batch index to retrieve
+		:type mb_id: int
+		:return: Data at the specified index
+		:rtype: torch.Tensor or Any
+		:raises Exception: If queue is shorter than mb_id or if data at mb_id is None
+		"""
 		if len(queue) <= mb_id:
 			raise Exception(f"Variable {self.name} - Data queue shorter than mb_id {mb_id}")
 		if queue[mb_id] is None:
@@ -41,6 +54,17 @@ class Variable:
 		return data
 
 	def set(self, queue, mb_id, value):
+		"""
+		Set an element in the specified queue at the given micro-batch index.
+
+		:param queue: Queue to set data in (to_process, saved, or to_send)
+		:type queue: List
+		:param mb_id: Micro-batch index to set
+		:type mb_id: int
+		:param value: Data to set
+		:type value: torch.Tensor or Any
+		:raises Exception: If queue is shorter than mb_id or if data at mb_id is already set
+		"""
 		if len(queue) <= mb_id:
 			queue.extend([None] * (mb_id - len(queue) + 1))
 		if queue[mb_id] is not None:
@@ -52,15 +76,27 @@ class Variable:
 	def wait_and_pop(self, mb_id):
 		"""
 		Get one element from the waiting queue. Waits for the corresponding communication to complete if needed.
+
+		:param mb_id: Micro-batch index to retrieve
+		:type mb_id: int
+		:return: Data at the specified index
+		:rtype: torch.Tensor or Any
 		"""
 		work, tensor = self.get(self.to_process, mb_id)
 		if work is not None:
 			work.wait()
-		return tensor
+		return (
+			tensor.detach()
+		)  # communications are differentiable, we detach to delete any unnecessary node
 
 	def get_buffer(self, size):
 		"""
 		Get a buffer of the given batch size
+
+		:param size: Size of the batch
+		:type size: int
+		:return: Buffer of the given size
+		:rtype: torch.Tensor
 		"""
 		return self.metadata.get_buffer(size)
 
@@ -71,16 +107,22 @@ class Variable:
 		return str(self)
 
 	def clear(self):
+		"""
+		Clear all queues for this variable.
+		"""
 		self.to_process.clear()
 		self.saved.clear()
 		self.to_send.clear()
 
 	# Debug utility
 	def _state(self):
-		w = len([x for x in self.to_process if x is not None])
-		k = len([x for x in self.saved if x is not None])
-		f = len([x for x in self.to_send if x is not None])
-		return f"{str(self)} - waiting: {w}, kept: {k}, finished: {f}"
+		"""
+		Debug utility to print the state of the variable.
+		"""
+		to_process = len([x for x in self.to_process if x is not None])
+		saved = len([x for x in self.saved if x is not None])
+		to_send = len([x for x in self.to_send if x is not None])
+		return f"{str(self)} - to process: {to_process}, saved: {saved}, to send: {to_send}"
 
 
 class PipelineBlock:
@@ -117,12 +159,13 @@ class PipelineBlock:
 
 		# Helpers to manage data queues and src/dst ranks
 		self.signature = signature
-		# One input comes from one block
-		self.inputs = [
+
+		# One input comes from one block (List[Variable])
+		self.input_variables = [
 			Variable(name, src, self.pp_group) for name, src in zip(signature.inputs, signature.sources)
 		]
-		# But an output can be needed by multiple blocks
-		self.outputs = [
+		# But an output can be needed by multiple blocks (List[List[Variable]])
+		self.output_variables = [
 			[Variable(name, dst, self.pp_group) for dst in dsts]
 			for name, dsts in zip(signature.outputs, signature.targets)
 		]
@@ -144,53 +187,53 @@ class PipelineBlock:
 
 		# Gather all variables needed for forward
 		inputs = []
-		for var in self.inputs:
-			x = var.wait_and_pop(mb_id)
+		for input_var in self.input_variables:
+			x = input_var.wait_and_pop(mb_id)
 
-			if x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-				x.requires_grad = True
+			if x.is_floating_point():
+				x.requires_grad_(True)
 
 			inputs.append(x)
 
-		with Timer() as timer:
+		with Timer(name=f"forward({self.id}:{mb_id})") as timer:
 			if options.get(OpOptions.REMAT):
 				with torch.no_grad():
 					y = self.model(*inputs)
 					y = (y,) if not isinstance(y, tuple) else y
 
 					# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
-					for var, value in zip(self.inputs, inputs):
-						var.set(var.to_process, mb_id, (None, value))
+					for input_var, value in zip(self.input_variables, inputs):
+						input_var.set(input_var.to_process, mb_id, (None, value))
 			else:
 				y = self.model(*inputs)
 				y = (y,) if not isinstance(y, tuple) else y
-				for var, value in zip(self.outputs, y):
-					for dst in var:
-						dst.set(dst.saved, mb_id, value)
 
-				# Keep inputs for backward
-				for var, value in zip(self.inputs, inputs):
-					var.set(var.saved, mb_id, value)
+				# Keep both outputs and inputs for backward
+				for output_var, value in zip(self.output_variables, y):
+					for output_dst in output_var:
+						output_dst.set(output_dst.saved, mb_id, value)
 
-		self.compute_time.append(timer.time)
+				for input_var, value in zip(self.input_variables, inputs):
+					input_var.set(input_var.saved, mb_id, value)
 
-		if any(not dst.metadata for var in self.outputs for dst in var):
+		self.compute_time.append(timer)
+
+		if any(not dst.metadata for var in self.output_variables for dst in var):
 			self._register_out_metadata(y)
 
 		# Register what will be sent to next
-		for var, value in zip(self.outputs, y):
-			for dst in var:
-				value = value.detach()  # non-tensor comms are not handled anyway
-				dst.set(dst.to_send, mb_id, value)
+		for output_var, value in zip(self.output_variables, y):
+			for output_dst in output_var:
+				output_dst.set(output_dst.to_send, mb_id, value.detach())
 
 		if self.is_last:
 			output = []
-			for var in self.outputs:
-				assert len(var) == 1, "Output of the pipeline has multiple destinations"
-				output.append(var[0].get(var[0].to_send, mb_id))
+			for output_var in self.output_variables:
+				assert len(output_var) == 1, "Output of the pipeline has multiple destinations"
+				output.append(output_var[0].get(output_var[0].to_send, mb_id))
 			return output
 
-	def backward(self, mb_id, **options):
+	def backward_inputs(self, mb_id, **options):
 		"""
 		Perform the backward pass for one tensor of gradients and register it as computed
 		Backward assumes activations AND grads to be on top of the queue
@@ -199,52 +242,69 @@ class PipelineBlock:
 		"""
 		logger.debug(f"{self} - Computing one backward with options {options}")
 
+		# Gather the inputs to access their gradients later on
 		inputs = []
-		for var in self.inputs:
-			inputs.append(var.get(var.saved, mb_id))
+		for input_var in self.input_variables:
+			inputs.append(input_var.get(input_var.saved, mb_id))
 
-		act = []
-		for var in self.outputs:
-			# Even if there are multiple destinations, it's the same tensor for everyone of them
-			act.append(var[0].get(var[0].saved, mb_id))
-			for target in var[1:]:
-				target.get(target.saved, mb_id)
+		# Gather the outputs
+		outputs = []
+		for output_var in self.output_variables:
+			# Even if there are multiple destinations, it's the same tensor for all of them
+			# retrieve the first one, delete others
+			outputs.append(output_var[0].get(output_var[0].saved, mb_id))
+			for output_dst in output_var[1:]:
+				output_dst.get(output_dst.saved, mb_id)
 
-		grads = []
-		# wait for all recv to be enqueued without sync
-		for var in self.outputs:
-			g = []
-			for dst in var:
-				g.append(dst.wait_and_pop(mb_id))
-			grads.append(g)
+		for i, output_var in enumerate(self.output_variables):
+			# wait for all recvs to be finished for this variable
+			incoming_grads = []
+			for output_dst in output_var:
+				incoming_grads.append(output_dst.wait_and_pop(mb_id))
 
-			with Timer() as timer:
+			with Timer(name=f"backward({self.id}:{mb_id})") as timer:
 				# sum up all the gradients from all destinations
-				for i in range(len(grads)):
-					g = grads[i][0]
-					for dst_grads in grads[i][1:]:
-						g += dst_grads
-					grads[i] = g
+				gradient_accumulator = incoming_grads[0]
+				for grad in incoming_grads[1:]:
+					gradient_accumulator += grad
 
-				for i in range(len(self.outputs)):
-					if not isinstance(act[i], torch.Tensor):
-						continue
-					assert (
-						act[i].shape == grads[i].shape
-					), f"Expected same shape for activations and gradients, got {act[i].shape} and {grads[i].shape}"
-					# We may need to keep the graph for multiple backwards, if an intermediate value is needed by next blocks
-					act[i].backward(grads[i], retain_graph=(i != len(self.outputs) - 1))
+				if not isinstance(outputs[i], torch.Tensor):
+					continue
+				assert outputs[i].shape == gradient_accumulator.shape, (
+					f"Expected same shape for activations and gradients, got {outputs[i].shape} and {gradient_accumulator.shape}"
+				)
+				# We may need to keep the graph for multiple backwards, if an intermediate value is needed by next blocks
+				outputs[i].backward(
+					gradient_accumulator, retain_graph=(i != len(self.output_variables) - 1)
+				)
 
-		self.compute_time.append(timer.time)
+		self.compute_time.append(timer)
 
-		for var, value in zip(self.inputs, inputs):
+		for input_var, value in zip(self.input_variables, inputs):
 			# This is not technically an issue, but it might be a source of bugs
 			if not value.requires_grad or value.grad is None:
 				# Input usually doesn't need gradients, don't log everytime
-				if var.peer is not None:
-					logger.warning(f"{self} - No gradient computed for var {var}")
+				if input_var.peer is not None:
+					logger.warning(f"{self} - No gradient computed for var {input_var}")
 				continue
-			var.set(var.to_send, mb_id, value.grad.data)
+			input_var.set(input_var.to_send, mb_id, value.grad.data)
+
+	def backward_params(self, mb_id, **options):
+		"""
+		Perform the backward pass for the parameters of the model
+
+		:param mb_id: micro-batch index
+		:type mb_id: int
+		:param **options: options to modify the backward behaviour
+		"""
+		with Timer(name=f"backward_params({self.id}:{mb_id})") as timer:
+			for name, module in self.model.named_modules():
+				if isinstance(module, LayerDW):
+					logger.debug(f"{self} - Backwarding params of {name}")
+					module.backward()
+				else:
+					logger.debug(f"{self} - {name} is not a LayerDW ; skipping")
+		self.compute_time.append(timer)
 
 	def send_forward(self, mb_id, **options):
 		"""
@@ -260,7 +320,7 @@ class PipelineBlock:
 			return
 
 		sends = []
-		for var in self.outputs:
+		for var in self.output_variables:
 			for target in var:
 				# only perform communications for that dst
 				if target.peer != dst:
@@ -292,7 +352,7 @@ class PipelineBlock:
 			return
 
 		sends = []
-		for var in self.inputs:
+		for var in self.input_variables:
 			if var.peer != dst:
 				continue
 
@@ -319,16 +379,16 @@ class PipelineBlock:
 		"""
 		src = options.get("src")
 
-		# If some metadata is missing, it should be received from the previous block before actual data
-		if any(not var.metadata for var in self.inputs):
-			self._receive_metadata(src)
-
 		if src is None or self.placement[src] == self.rank:
 			return
 
+		# If some metadata is missing, it should be received from the previous block before actual data
+		if any(not var.metadata for var in self.input_variables):
+			self._receive_metadata(src)
+
 		recvs = []
 		# We couple buffer and work objects for now so that we can wait at the right moment
-		for var in self.inputs:
+		for var in self.input_variables:
 			if var.peer != src:
 				continue
 
@@ -362,7 +422,7 @@ class PipelineBlock:
 			return
 
 		recvs = []
-		for var in self.outputs:
+		for var in self.output_variables:
 			for target in var:
 				if target.peer != src:
 					continue
@@ -405,13 +465,13 @@ class PipelineBlock:
 
 	def _receive_metadata(self, src):
 		"""
-		Register input metadata by receiving it from the previous block, or using the current input tensor if src is None or the same as the current rank.
+		Register input metadata by receiving it from the previous block. No-op if src is None or the same as the current rank.
 
 		:param src: rank of the previous block
 		:type src: int
 		"""
 
-		for var in self.inputs:
+		for var in self.input_variables:
 			if src is None or self.placement[src] == self.rank:
 				continue
 			else:
@@ -424,7 +484,7 @@ class PipelineBlock:
 				dist.recv(metadata, src=rank, group=self.pp_group)
 				var.metadata = TensorMetadata.from_tensor(metadata)
 
-		logger.debug(f"{self} - Registered metadata {[var for var in self.inputs]} from {src}")
+		logger.debug(f"{self} - Registered metadata {[var for var in self.input_variables]} from {src}")
 
 	def _send_metadata(self, dst):
 		"""
@@ -436,7 +496,7 @@ class PipelineBlock:
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		for var in self.outputs:
+		for var in self.output_variables:
 			for target in var:
 				if target.peer != dst:
 					continue
@@ -453,7 +513,9 @@ class PipelineBlock:
 		:param output: output of the forward pass
 		:type output: Tuple[Tensor]
 		"""
-		for var, value in zip(self.outputs, output):
+		for var, value in zip(self.output_variables, output):
 			for target in var:
-				target.metadata = TensorMetadata(value[0])
+				target.metadata = TensorMetadata(
+					value[0]
+				)  # omit batch dimension ; if the tensor is not batched, this is wrong!
 			logger.debug(f"{self} - registered output metadata {var[0].metadata} for {var[0].name}")

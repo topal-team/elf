@@ -1,4 +1,4 @@
-from .pipeline import Pipeline
+from .pipeline import *
 from .schedules import *
 from .partitioners import *
 from .scheduling import *

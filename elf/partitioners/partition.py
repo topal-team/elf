@@ -4,6 +4,8 @@ API and main utils for graph partition
 
 import torch
 import numpy as np
+
+from elf.zb_utils import LayerDWTracer
 from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
@@ -111,12 +113,10 @@ def get_inputs_outputs(parts):
 							if dep in parts[prev]:
 								break
 							prev -= 1
-							# if dep.name not in outputs[prev]:
-							# raise Exception(
-							# 	f"Skip connection detected in partition. Node {node} is located in part {i} and needs output of node {dep} which is not in part {i - 1}."
-							# )
+
 						if prev == -1:
 							continue
+
 						# Return each tensor only once ; sending it to multiple targets is managed later
 						if dep.name not in outputs[prev]:
 							outputs[prev].append(dep.name)
@@ -170,6 +170,7 @@ def get_sources_targets(inputs, outputs):
 		for i in range(imin + 1, n):
 			if out in inputs[i]:
 				tgts.append(i)
+
 		# If no target is found, it means the output is the final output
 		if not tgts:
 			tgts.append(None)
@@ -195,8 +196,15 @@ def get_sources_targets(inputs, outputs):
 	return sources, targets
 
 
+def symbolic_trace_with_layerdw(model: torch.nn.Module) -> torch.fx.GraphModule:
+	"""Helper function to trace a model with LayerDW modules treated as leaf nodes"""
+	tracer = LayerDWTracer()
+	graph = tracer.trace(model)
+	return torch.fx.GraphModule(model, graph)
+
+
 def extract_graph_fx(model):
-	return torch.fx.symbolic_trace(model)
+	return symbolic_trace_with_layerdw(model)
 
 
 def extract_graph_export(model, sample, use_dynamic_batch_size=False):
@@ -310,6 +318,6 @@ def partition_graph(model, n, sample, partitioner="naive"):
 
 	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
 	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
-	logger.info(f'Estimated times : {["%.3fs" % t for t in estimated_times]}')
-	logger.info(f'Estimated memory transfers : {["%.1fMB" % t for t in estimated_mems]}')
+	logger.info(f"Estimated times : {['%.3fs' % t for t in estimated_times]}")
+	logger.info(f"Estimated memory transfers : {['%.1fMB' % t for t in estimated_mems]}")
 	return blocks, signatures

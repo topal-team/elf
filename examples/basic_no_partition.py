@@ -8,8 +8,12 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torchvision.models import resnet50
-
+from elf.zb_utils import replace_linear_with_linear_dw
 from elf import Pipeline
+
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
 
 
 def get_part(model, rank):
@@ -30,13 +34,20 @@ if __name__ == "__main__":
 	dist.init_process_group(backend="nccl")
 
 	model = resnet50()
+	replace_linear_with_linear_dw(model, rank)
 	part = get_part(model, rank)
 
 	# We don't need a sample here
 	placement = [0, 1, 2, 3]
 	sources, targets = get_sources_targets_sequential(placement)
 	pipe = Pipeline(
-		part, None, partitioner=False, placement=placement, sources=sources, targets=targets
+		part,
+		None,
+		partitioner=False,
+		placement=placement,
+		sources=sources,
+		targets=targets,
+		schedule="zbh2",
 	)
 
 	loss_fn = nn.functional.cross_entropy

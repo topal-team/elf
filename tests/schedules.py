@@ -86,15 +86,15 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 	if global_rank == placement[-1]:
 		full_model = load_full_model(len(placement)).cuda()
 		groundtruth = full_model(batch.clone().detach())
-		assert torch.allclose(
-			output, groundtruth, rtol=1e-3, atol=5e-6
-		), f"Pipelined and regular models have different outputs : {output} and {groundtruth}"
+		assert torch.allclose(output, groundtruth, rtol=1e-3, atol=5e-6), (
+			f"Pipelined and regular models have different outputs : {output} and {groundtruth}"
+		)
 		print("Outputs are correct")
 
 		loss = F.mse_loss(groundtruth, target)
-		assert torch.allclose(
-			pipeloss, loss
-		), f"Pipelined and regular models have different losses : {pipeloss} and {loss}"
+		assert torch.allclose(pipeloss, loss), (
+			f"Pipelined and regular models have different losses : {pipeloss} and {loss}"
+		)
 		print("Losses are correct")
 		loss.backward()
 		# First device has the gradients, it will check that they are right
@@ -105,16 +105,16 @@ def test_pipeline(blocks, placement, scheduler, batch_size, split_size):
 		grads = blocks[0].model.weight.grad.data
 		if placement[0] == placement[-1]:
 			groundtruth = full_model[0].weight.grad.data
-			assert torch.allclose(
-				full_model[0].weight, blocks[0].model.weight
-			), f"Pipelined and regular models have different weights : {full_model[0].weight} and {blocks[0].model.weight}"
+			assert torch.allclose(full_model[0].weight, blocks[0].model.weight), (
+				f"Pipelined and regular models have different weights : {full_model[0].weight} and {blocks[0].model.weight}"
+			)
 		else:
 			groundtruth = torch.empty_like(blocks[0].model.weight)
 			dist.recv(groundtruth, placement[-1])
 
-		assert torch.allclose(
-			grads, groundtruth, rtol=1e-3, atol=1e-6
-		), f"Pipelined and regular models have different gradients : {grads} and {groundtruth}"
+		assert torch.allclose(grads, groundtruth, rtol=1e-3, atol=1e-6), (
+			f"Pipelined and regular models have different gradients : {grads} and {groundtruth}"
+		)
 		print("Gradients are correct")
 
 	pipe.clear()

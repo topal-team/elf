@@ -5,7 +5,7 @@ Execution manager
 import torch
 import torch.distributed as dist
 
-from collections import deque
+from collections import deque, OrderedDict
 import time
 
 from .scheduling import OperationType, OpOptions
@@ -26,6 +26,39 @@ def _fake_p2p(data):
 	:rtype: Tuple[Tensor]
 	"""
 	return [None, data.detach()]
+
+
+def _time_start():
+	"""
+	Returns a timing event or timestamp to mark the start of an operation.
+
+	:return: A CUDA event if CUDA is available, otherwise a timestamp
+	:rtype: torch.cuda.Event or float
+	"""
+	if torch.cuda.is_available():
+		event = torch.cuda.Event(enable_timing=True)
+		event.record()
+		return event
+	else:
+		return time.time()
+
+
+def _time_end(start):
+	"""
+	Returns a timing event or timestamp to mark the end of an operation.
+
+	:param start: Start time or event
+	:type start: torch.cuda.Event or float
+	:return: Elapsed time in milliseconds
+	:rtype: float
+	"""
+	if torch.cuda.is_available():
+		end = torch.cuda.Event(enable_timing=True)
+		end.record()
+		end.synchronize()
+		return start.elapsed_time(end) / 1000
+	else:
+		return time.time() - start
 
 
 class Engine:
@@ -110,8 +143,7 @@ class Engine:
 
 		- Result of the forward pass
 		- Losses for each micro-batch
-		- Insights about time taken, as a dict containing:
-
+		- Stats about the execution, as a dict containing:
 
 			- total: total time taken for the execution
 			- idle: total time not used for computation for this process
@@ -119,7 +151,11 @@ class Engine:
 			- end_idle: time between the last computation and the end of execution
 			- bubble: idle time between first and last computation
 
-		:rtype: Tensor, Tensor, Dict[float]
+		- Detailed stats, as a dict containing:
+			- all_events: time taken for each operation
+			- memories: total gpu memory allocated after each operation
+
+		:rtype: Tensor, Tensor, Dict[float], Dict[Dict[Operation, float]]
 		"""
 		split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]
 		microbatches = iter(zip(*split_batches))
@@ -130,9 +166,14 @@ class Engine:
 
 		grad_fns = deque()
 
-		dist.barrier()  # useful for timing, but it probably slows down the execution a bit
+		# -- uncomment this for precise timings
+		# dist.barrier()
+		# torch.cuda.synchronize()
+		start = _time_start()
+
 		pipe_start = time.time()
-		warmup_start = None
+		warmup_time = None
+		memories = OrderedDict()
 
 		for op in schedule:
 			block = self.id_to_block.get(op.block_id)
@@ -143,14 +184,18 @@ class Engine:
 
 			if profile:
 				torch.cuda.nvtx.range_push(f"{block}:{op}")
-			if warmup_start is None and op.op != OperationType.RECV_FORWARD:
+			if warmup_time is None and op.op != OperationType.RECV_FORWARD:
 				# Warmup time is the time spent waiting for the first forward
 				# The first operation after that is the end of warmup
-				torch.cuda.synchronize()
-				warmup_start = time.time()
+				# torch.cuda.synchronize() # -- uncomment this for precise timings
+				warmup_time = _time_end(start)
 
 			# A computation will synchronize! We want to enqueue all possible communications before that
-			if op.op in [OperationType.FORWARD, OperationType.BACKWARD]:
+			if op.op in [
+				OperationType.FORWARD,
+				OperationType.BACKWARD_INPUTS,
+				OperationType.BACKWARD_PARAMS,
+			]:
 				self._run_comms()
 
 			match op.op:
@@ -166,8 +211,11 @@ class Engine:
 								logger.warning("Non-tensor output")
 								result.append(output)
 
-				case OperationType.BACKWARD:
-					block.backward(op.mb_id, **op.options)
+				case OperationType.BACKWARD_INPUTS:
+					block.backward_inputs(op.mb_id, **op.options)
+
+				case OperationType.BACKWARD_PARAMS:
+					block.backward_params(op.mb_id, **op.options)
 
 				case OperationType.SEND_FORWARD:
 					if op.options.get("dst") in self.id_to_block:
@@ -190,7 +238,7 @@ class Engine:
 				case OperationType.RECV_FORWARD:
 					if block.is_first:
 						microbatch = next(microbatches)
-						for mb, var in zip(microbatch, block.inputs):
+						for mb, var in zip(microbatch, block.input_variables):
 							var.set(var.to_process, op.mb_id, _fake_p2p(mb))
 
 					comm = block.recv_forward(op.mb_id, mb_sizes[op.mb_id], **op.options)
@@ -202,9 +250,9 @@ class Engine:
 
 				case OperationType.LOSS_FORWARD:
 					if block.is_last:
-						assert op.mb_id < len(
-							result
-						), f"Loss forward for mb {op.mb_id} but only {len(result)} results computed"
+						assert op.mb_id < len(result), (
+							f"Loss forward for mb {op.mb_id} but only {len(result)} results computed"
+						)
 						loss, grad_fn = compute_loss(block, result[op.mb_id], microtargets[op.mb_id], loss_fn)
 						losses.append(loss)
 						grad_fns.append(grad_fn)
@@ -215,14 +263,14 @@ class Engine:
 
 				case OperationType.LOSS_BACKWARD:
 					if block.is_last:
-						assert op.mb_id < len(
-							losses
-						), f"Loss backward for mb {op.mb_id} but only {len(losses)} losses computed"
+						assert op.mb_id < len(losses), (
+							f"Loss backward for mb {op.mb_id} but only {len(losses)} losses computed"
+						)
 						grad_fn = grad_fns.popleft()
-						with Timer() as timer:
+						with Timer(name=f"backward({block.id}:{op.mb_id})") as timer:
 							grads = grad_fn()
-						block.compute_time.append(timer.time)
-						for grad, var in zip(grads, block.outputs):
+						block.compute_time.append(timer)
+						for grad, var in zip(grads, block.output_variables):
 							for dst in var:  # should be only one destination
 								dst.set(dst.to_process, op.mb_id, _fake_p2p(grad))
 					else:
@@ -236,6 +284,7 @@ class Engine:
 				case _:
 					raise Exception(f"Unknown operation : {op}")
 
+			memories[op] = torch.cuda.memory_allocated()
 			if profile:
 				torch.cuda.nvtx.range_pop()
 
@@ -243,23 +292,34 @@ class Engine:
 
 		self._run_comms()  # finish all comms
 		torch.cuda.synchronize()
-		cooldown_end = time.time()
-		dist.barrier()
+		cooldown_start = time.time()
+
+		# -- uncomment this for precise timings
+		# dist.barrier()
+		# torch.cuda.synchronize()
+
 		pipe_end = time.time()
 
 		compute_time = 0
+		all_events = {}
 		for block in self.blocks:
-			compute_time += sum([f() for f in block.compute_time])
-			block.compute_time = []
+			compute_time += sum([f.time() for f in block.compute_time])
+			all_events.update({timer.name: timer.time() for timer in block.compute_time})
 
-		times = {
+		stats = {
 			"total": pipe_end - pipe_start,
 			"idle": pipe_end - pipe_start - compute_time,
-			"start_idle": warmup_start - pipe_start,
-			"end_idle": pipe_end - cooldown_end,
+			"start_idle": warmup_time,
+			"end_idle": pipe_end - cooldown_start,
 		}
-		times["bubble"] = times["idle"] - times["start_idle"] - times["end_idle"]
-		return result, losses, times
+		stats["bubble"] = stats["idle"] - stats["start_idle"] - stats["end_idle"]
+
+		detailed_stats = {"all_events": all_events, "memories": memories}
+
+		for block in self.blocks:
+			block.compute_time.clear()
+
+		return result, losses, stats, detailed_stats
 
 
 def compute_loss(block, output, target, loss_fn):
@@ -283,13 +343,13 @@ def compute_loss(block, output, target, loss_fn):
 
 	output = output.detach().requires_grad_()
 
-	with Timer() as timer:
+	with Timer(name="loss_forward") as timer:
 		try:
 			loss = loss_fn(output, target, reduction="sum")
 		except TypeError:
 			loss = loss_fn(output, target)
 
-	block.compute_time.append(timer.time)
+	block.compute_time.append(timer)
 	loss = loss / (target.numel() // target.size(0))
 
 	def grad_fn():
@@ -307,10 +367,11 @@ def _transfer_forward(block, dst_block, mb_id):
 	:type block: PipelineBlock
 	:param dst_block: target block
 	:type dst_block: PipelineBlock
+	:rtype: None
 	"""
 	# We match by order and not by name because the names can be different with pre-partitioned models
-	all_to_send = [dst for var in block.outputs for dst in var if dst.peer == dst_block.id]
-	all_to_recv = [var for var in dst_block.inputs if var.peer == block.id]
+	all_to_send = [dst for var in block.output_variables for dst in var if dst.peer == dst_block.id]
+	all_to_recv = [var for var in dst_block.input_variables if var.peer == block.id]
 	for src, dst in zip(all_to_send, all_to_recv):
 		inputs = src.get(src.to_send, mb_id)
 		dst.set(dst.to_process, mb_id, _fake_p2p(inputs))
@@ -324,9 +385,10 @@ def _transfer_backward(block, dst_block, mb_id):
 	:type block: PipelineBlock
 	:param dst_block: target block
 	:type dst_block: PipelineBlock
+	:rtype: None
 	"""
-	all_to_send = [var for var in block.inputs if var.peer == dst_block.id]
-	all_to_recv = [src for var in dst_block.outputs for src in var if src.peer == block.id]
+	all_to_send = [var for var in block.input_variables if var.peer == dst_block.id]
+	all_to_recv = [src for var in dst_block.output_variables for src in var if src.peer == block.id]
 	for src, dst in zip(all_to_send, all_to_recv):
 		grads = src.get(src.to_send, mb_id)
 		dst.set(dst.to_process, mb_id, _fake_p2p(grads))

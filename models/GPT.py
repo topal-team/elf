@@ -152,11 +152,10 @@ class Conv1D(nn.Module):
 class FeedForward(nn.Module):
 	def __init__(self, dropout, d_model=768, nx=768 * 4):
 		super().__init__()
-		self.c_fc = Conv1D(d_model, nx)
-		self.c_proj = Conv1D(nx, d_model)
+		self.c_fc = nn.Linear(d_model, nx)
+		self.c_proj = nn.Linear(nx, d_model)
 		self.act = F.gelu
 		self.dropout = nn.Dropout(dropout)
-		# self.dropout = nn.Identity()
 
 	def forward(self, x):
 		return self.dropout(self.c_proj(self.act(self.c_fc(x))))
@@ -169,12 +168,12 @@ class Attention(nn.Module):
 		super().__init__()
 		self.n_head = config.n_head
 		self.d_model = config.n_embd
-		self.c_attn = Conv1D(config.n_embd, config.n_embd * 3)
+		self.c_attn = nn.Linear(config.n_embd, config.n_embd * 3)
 		self.scale = scale
 		self.softmax = nn.Softmax(dim=-1)
 		self.dropout = nn.Dropout(dropout)
 		# self.dropout = nn.Identity()
-		self.c_proj = Conv1D(config.n_embd, config.n_embd)
+		self.c_proj = nn.Linear(config.n_embd, config.n_embd)
 
 		assert config.n_embd % config.n_head == 0, f"n_embd={config.n_embd}, n_head={config.n_head}"
 		d = device if torch.device(device).type == "cuda" else "cpu"

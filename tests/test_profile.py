@@ -25,9 +25,9 @@ def test_profile():
 		times, memories = profile_operations(trace, sample)
 
 		memory_after = get_current_memory()
-		assert (
-			memory_after - memory_before < 100e6
-		), f"Memory leak detected: Before {memory_before}, After {memory_after}, diff = {memory_after - memory_before}"
+		assert memory_after - memory_before < 100e6, (
+			f"Memory leak detected: Before {memory_before}, After {memory_after}, diff = {memory_after - memory_before}"
+		)
 
 		assert len(times) == len(trace.graph.nodes)
 		assert len(memories) == len(trace.graph.nodes)

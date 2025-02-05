@@ -103,13 +103,6 @@ def get_memory(x):
 	"""
 	if isinstance(x, torch.Tensor):
 		return x.numel() * x.element_size()
-	# if isinstance(x, torch.nn.Parameter):
-	# 	return DONT_CUT_HERE
-	# elif isinstance(x, dict):
-	# 	return sum([get_memory(v) for v in x.values()])
-	# elif hasattr(x, "__iter__") and not isinstance(x, (str, torch.fx.proxy.Proxy)):
-	# 	return sum([get_memory(v) for v in x])
-	# return 0
 
 	# We dont want to cut anywhere that is not a tensor
 	return DONT_CUT_HERE
@@ -158,7 +151,7 @@ def profile_operations(graph_module, input_sample, niter=10):
 	inputs = iter(input_sample)
 	for node in graph_module.graph.nodes:
 		if node.op == "placeholder":
-			profiler.memories[node.name] = get_memory(next(inputs))  # TODO: handle multiple inputs
+			profiler.memories[node.name] = get_memory(next(inputs))
 			profiler.times[node.name] = 0
 		if node.op == "output":
 			profiler.times[node.name] = 0

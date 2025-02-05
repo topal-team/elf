@@ -154,9 +154,9 @@ def split_graph_metis(graph, times, memories, n):
 	:return: ``n`` lists of nodes corresponding to each part
 	:rtype: List[List[fx.Node]]
 	"""
-	assert shutil.which(
-		"gpmetis"
-	), "METIS chosen as partition strategy, but can't find it. Please make sure it is installed and findable in the PATH."
+	assert shutil.which("gpmetis"), (
+		"METIS chosen as partition strategy, but can't find it. Please make sure it is installed and findable in the PATH."
+	)
 	graph = convert_fx(graph, times, memories)
 	file = write_metis(graph)
 	execute_metis(file, n)

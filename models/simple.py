@@ -1,5 +1,7 @@
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SimpleResNet(nn.Module):
@@ -174,6 +176,115 @@ class SimpleTransformer(nn.Module):
 					SimpleAttention(hidden_dim), nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)
 				)
 			)
+			self.add_module(f"block_{i}", self.blocks[-1])
+
+	def forward(self, x):
+		x = self.embed(x)
+
+		for b in self.blocks:
+			x = b(x)
+
+		x = self.head(x)
+		return x
+
+	def get_sample(self, batch_size):
+		return torch.randint(0, self.input_dim, (batch_size, self.seq_len))
+
+	def get_target(self, batch_size):
+		return self.get_sample(batch_size)
+
+	def loss_fn(self, pred, target, *args, **kwargs):
+		pred = pred.view(-1, self.input_dim)  # flatten seq dim
+		target = target.view(-1)
+		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
+
+
+class MultiHeadAttention(nn.Module):
+	def __init__(self, dim, num_heads=4, dropout=0.1):
+		super().__init__()
+		assert dim % num_heads == 0, "dim must be divisible by num_heads"
+
+		self.dim = dim
+		self.num_heads = num_heads
+		self.head_dim = dim // num_heads
+		self.scale = 1.0 / math.sqrt(self.head_dim)
+
+		# Single large linear layers for Q,K,V
+		self.q_proj = nn.Linear(dim, dim)
+		self.k_proj = nn.Linear(dim, dim)
+		self.v_proj = nn.Linear(dim, dim)
+
+		self.dropout = nn.Dropout(dropout)
+
+	def forward(self, x):
+		batch_size, seq_len, _ = x.shape
+
+		# Project and split heads: (batch, seq, dim) -> (batch, seq, num_heads, head_dim)
+		q = self.q_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+		k = self.k_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+		v = self.v_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+
+		# Transpose for attention: (batch, num_heads, seq, head_dim)
+		q = q.transpose(1, 2)
+		k = k.transpose(1, 2)
+		v = v.transpose(1, 2)
+
+		# Attention scores
+		attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+		attn = F.softmax(attn, dim=-1)
+		attn = self.dropout(attn)
+
+		# Apply attention to values
+		out = torch.matmul(attn, v)
+
+		# Reshape back: (batch, seq, dim)
+		out = out.transpose(1, 2).reshape(batch_size, seq_len, self.dim)
+
+		return out
+
+
+class TransformerBlock(nn.Module):
+	def __init__(self, dim, num_heads=4, dropout=0.1):
+		super().__init__()
+		self.norm1 = nn.LayerNorm(dim)
+		self.norm2 = nn.LayerNorm(dim)
+		self.attn = MultiHeadAttention(dim, num_heads, dropout)
+		self.proj = nn.Linear(dim, dim)
+		self.dropout1 = nn.Dropout(dropout)
+		self.dropout2 = nn.Dropout(dropout)
+		self.mlp = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim))
+
+	def forward(self, x):
+		residual = x
+		y = self.norm1(x)
+
+		y = self.attn(y)
+		y = self.proj(y)
+		y = self.dropout1(y)
+		y = residual + y
+		residual = y
+
+		y = self.norm2(y)
+		y = self.mlp(y)
+		y = self.dropout2(y)
+		y = residual + y
+
+		return y
+
+
+class FullTransformer(nn.Module):
+	def __init__(self, input_dim, hidden_dim, n_blocks=4, seq_len=64, num_heads=4, dropout=0.1):
+		super(FullTransformer, self).__init__()
+
+		self.input_dim = input_dim
+		self.hidden_dim = hidden_dim
+		self.seq_len = seq_len
+
+		self.embed = nn.Embedding(input_dim, hidden_dim)
+		self.head = nn.Linear(hidden_dim, input_dim)
+		self.blocks = []
+		for i in range(n_blocks):
+			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout))
 			self.add_module(f"block_{i}", self.blocks[-1])
 
 	def forward(self, x):

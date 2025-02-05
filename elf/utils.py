@@ -37,9 +37,9 @@ def op_to_str(op):
 
 def pretty_print_params(n):
 	if n > 1e9:
-		return f"{n/1e9:.1f}B"
+		return f"{n / 1e9:.1f}B"
 	elif n > 1e6:
-		return f"{n/1e6:.1f}M"
+		return f"{n / 1e6:.1f}M"
 	else:
 		return f"{int(n)}"
 
@@ -170,22 +170,29 @@ class Timer:
 
 	"""
 
-	def __new__(cls, *args):
-		if args:
-			if args[0].lower() in ["gpu", "cuda"]:
-				return TimerGPU()
-			elif args[0].lower() == "cpu":
-				return TimerCPU()
+	def __new__(cls, type=None, name=None, *, type_=None, name_=None):
+		timer_type = type or type_
+		timer_name = name or name_
+
+		if timer_type:
+			if timer_type.lower() in ["gpu", "cuda"]:
+				return TimerGPU(timer_name)
+			elif timer_type.lower() == "cpu":
+				return TimerCPU(timer_name)
+
 		if torch.cuda.is_available():
-			return TimerGPU()
+			return TimerGPU(timer_name)
 		else:
-			return TimerCPU()
+			return TimerCPU(timer_name)
 
 
 class TimerCPU:
 	"""
 	Timer for CPU execution
 	"""
+
+	def __init__(self, name="unknown"):
+		self.name = name
 
 	def __enter__(self):
 		self.start = time.perf_counter()
@@ -203,7 +210,8 @@ class TimerGPU:
 	Timer for CUDA execution
 	"""
 
-	def __init__(self):
+	def __init__(self, name="unknown"):
+		self.name = name
 		self.start_event = torch.cuda.Event(enable_timing=True)
 		self.end_event = torch.cuda.Event(enable_timing=True)
 

@@ -7,8 +7,10 @@ import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+
 sys.path.append("./")
 from elf.pipeline import Pipeline
+from elf.zb_utils import replace_linear_with_linear_dw
 from models.simple import SimpleTransformer, SimpleCNN, SimpleResNet
 
 from argparse import ArgumentParser
@@ -178,6 +180,7 @@ def train(pipe, model, data, pp, dp):
 				y = model(x)
 				loss = loss_fn(y, t)
 				loss.backward()
+
 				optimizer.step()
 				epoch_loss += loss.detach()
 			losses.append(epoch_loss)
@@ -231,7 +234,11 @@ if __name__ == "__main__":
 		required=False,
 	)
 	parser.add_argument(
-		"--schedule", "-s", choices=["afab", "1f1b", "hanayo"], default="1f1b", required=False
+		"--schedule",
+		"-s",
+		choices=["afab", "1f1b", "hanayo", "zbh1", "zbh2"],
+		default="1f1b",
+		required=False,
 	)
 	parser.add_argument(
 		"--interleaving", "-i", type=int, required=False, default=1, help="interleaving degree"
@@ -262,6 +269,7 @@ if __name__ == "__main__":
 			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
 
 	model = model.cuda()
+	gt = copy.deepcopy(model)
 
 	match args.schedule:
 		case "afab" | "1f1b":
@@ -269,6 +277,11 @@ if __name__ == "__main__":
 		case "hanayo":
 			placement = [i for i in range(args.pp)] + [i for i in reversed(range(args.pp))]
 			placement *= args.interleaving
+		case "zbh1" | "zbh2":
+			placement = [i for i in range(args.pp)]
+			if args.interleaving > 1:
+				logger.warning("Interleaving is not supported for ZB schedules")
+			replace_linear_with_linear_dw(model, rank)
 		case _:
 			raise ValueError(f"Unknown schedule {args.schedule}")
 
@@ -280,7 +293,6 @@ if __name__ == "__main__":
 		partitioner=args.partitioner,
 		dp=args.dp,
 	)
-	gt = copy.deepcopy(model)
 
 	train(pipe, gt, data, args.pp, args.dp)
 
@@ -307,9 +319,9 @@ if __name__ == "__main__":
 			y = torch.empty_like(z)
 			dist.recv(y, pipe.placement[-1])
 
-		assert torch.allclose(
-			y, z, rtol=relative_tolerance, atol=absolute_tolerance
-		), f"Wrong output for pipelined model. Difference norm = {torch.linalg.norm(y - z)}"
+		assert torch.allclose(y, z, rtol=relative_tolerance, atol=absolute_tolerance), (
+			f"Wrong output for pipelined model. Difference norm = {torch.linalg.norm(y - z)}"
+		)
 		print("Test passed successfully")
 
 	elif rank == pipe.placement[-1]:
