@@ -292,7 +292,7 @@ class Engine:
 		logger.debug(f"[Rank {self.rank}] - Finished execution")
 
 		self._run_comms()  # finish all comms
-		torch.cuda.synchronize()
+		# torch.cuda.synchronize() # -- uncomment this for precise timings
 		cooldown_start = time.time()
 
 		# -- uncomment this for precise timings

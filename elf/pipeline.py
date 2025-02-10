@@ -503,13 +503,10 @@ class Pipeline:
 			recv_models(blocks, src=worker, group=self.pp_group)
 			dist.recv_object_list(signatures, src=worker, group=self.pp_group)
 
-			torch.cuda.synchronize()
-
 		if self.dp > 1:
 			r = rank % self.pp
 			broadcast_models(blocks, src=r, group=self.dp_groups[r])
 			dist.broadcast_object_list(signatures, src=r, group=self.dp_groups[r])
-			torch.cuda.synchronize()
 
 		logger.debug(f"Rank {rank} has {len(blocks)} block" + ("s" if len(blocks) > 1 else ""))
 
