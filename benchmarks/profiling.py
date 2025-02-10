@@ -7,6 +7,7 @@ import torch.cuda.profiler as profiler
 from torch.cuda import cudart
 
 sys.path.append(".")
+from elf.zb_utils import replace_linear_with_linear_dw
 from models.simple import SimpleTransformer
 from elf import Pipeline
 
@@ -20,16 +21,17 @@ if __name__ == "__main__":
 
 	# Create model and sample data
 	model = SimpleTransformer(4000, 2048, 8 * ws, 512)
+	replace_linear_with_linear_dw(model, "cuda")
 	sample = model.get_sample(32).cuda()
 	target = model.get_target(32).cuda()
 	loss_fn = model.loss_fn
 
 	# Create pipeline
-	pipe = Pipeline(model, sample)
+	pipe = Pipeline(model, sample, schedule="zbh2")
 	optimizer = torch.optim.Adam(pipe.parameters())
 
 	# Warmup iterations
-	for _ in range(1):
+	for _ in range(3):
 		_ = pipe(sample, target, loss_fn)
 		optimizer.step()
 
@@ -37,7 +39,7 @@ if __name__ == "__main__":
 	profiler.start()
 	cudart().cudaProfilerStart()
 
-	for i in range(1):
+	for i in range(5):
 		if rank == 0:
 			print(f"Iteration {i}")
 		_ = pipe(sample, target, loss_fn, profile=True)

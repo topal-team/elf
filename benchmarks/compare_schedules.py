@@ -3,14 +3,15 @@ import torch.distributed as dist
 import os
 import sys
 import gc
+from datetime import timedelta
 
-
-sys.path.append("./")
+sys.path.append(".")
 from elf.pipeline import Pipeline, get_sources_targets_sequential
 from argparse import ArgumentParser
 from models.simple import FullTransformer
 from elf.utils import Timer, pretty_print_params
 from elf.zb_utils import replace_linear_with_linear_dw
+from elf.schedules import schedule_from_str
 
 import logging
 
@@ -44,6 +45,20 @@ def get_handcrafted_partition(model, rank, placement):
 	return [parts[i] for i, p in enumerate(placement) if p == rank]
 
 
+def manual_zb(placement, nmb, signatures):
+	# sched0 = "ffffFFFbwfbwbwbwrbwrbwrbwbw"
+	# sched1 = "ffffFbFbfbwfbwrbwrbwbwbwww"
+	# sched2 = "fffbfbfbfbfbwfbwbwbwwwww"
+	# sched3 = "fbfbfbfbfbfbfbwfbwwwwwww"
+	sched0 = "fFFFFFFrbwFbwrbwrrbwrbwrbwrbwbw"
+	sched1 = "fFFFFrbFrbFwbwFrbrbwrbwrbwrbwww"
+	sched2 = "fFFbFrbFrbFrbFrbFwrbwrbwrbwwwww"
+	sched3 = "fbfbfbfbfbfbwfbwfbwwwwww"
+	s = [sched0, sched1, sched2, sched3]
+
+	sched = schedule_from_str(s, placement, signatures)
+	return sched
+
 def medians(times):
 	meds = {}
 	for t in times[0].keys():
@@ -74,46 +89,50 @@ if __name__ == "__main__":
 			logging.getLogger().setLevel(100)
 
 	world_size = int(os.environ["WORLD_SIZE"])
-	rank = int(os.environ["LOCAL_RANK"])
-	global_rank = int(os.environ["RANK"])
+	rank = int(os.environ["RANK"])
+	local_rank = int(os.environ["LOCAL_RANK"])
 
-	torch.cuda.set_device(rank)
+	torch.cuda.set_device(local_rank)
 	fileout = "results.csv"
 
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", timeout=timedelta(seconds=300))
 
-	if global_rank == 0:
+	if rank == 0:
 		if os.path.exists(fileout):
 			os.remove(fileout)
 		with open(fileout, "w") as f:
 			f.write("name")
-			for i in range(4):
+			for i in range(world_size):
 				f.write(f",total_time_{i},idle_time_{i},start_time_{i},end_time_{i},bubble_time_{i}")
-			for i in range(4):
+			for i in range(world_size):
 				f.write(f",mem_{i}")
 			f.write("\n")
 
 	# torch.cuda.cudart().cudaProfilerStart()
 
-	model = FullTransformer(500, 1024, 32, 256, 32, 0.1)
+	n_blocks = 64
+
+	model = FullTransformer(500, 1024, n_blocks, 256, 32, 0.1)
 	if rank == 0:
 		print(f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters")
 	loss_fn = model.loss_fn
 
 	setups = [
-		("GPipe", list(range(world_size)), "afab"),
-		("1f1b", list(range(world_size)), "1f1b"),
+		# ("GPipe", list(range(world_size)), "afab"),
+		# ("1f1b", list(range(world_size)), "1f1b"),
 		# ("Megatron", list(range(world_size)) * 2, "1f1b"),
-		("Hanayo", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
-		("Full Remat", list(range(world_size)), "full_remat"),
+		# ("Hanayo 1W", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
+		# ("Hanayo 2W", (list(range(world_size)) + list(reversed(range(world_size)))) * 2, "hanayo"),
+		# ("Full Remat", list(range(world_size)), "full_remat"),
 		("ZBH1", list(range(world_size)), "zbh1"),
 		("ZBH2", list(range(world_size)), "zbh2"),
+		# ("Manual ZBH2", list(range(world_size)), manual_zb),
 	]
 
-	batch_size = 32
-	n_micro_batches = 8
+	batch_size = world_size * 4
+	n_micro_batches = world_size * 2
 	split_size = batch_size // n_micro_batches
-	n_iterations = 20
+	n_iterations = 15
 
 	for s, placement, schedule in setups:
 		partitioner = args.partitioner
@@ -125,10 +144,10 @@ if __name__ == "__main__":
 			parts = model
 			sources, dsts = None, None
 
-		if s.startswith("ZBH"):
-			replace_linear_with_linear_dw(model, rank)
+		if "ZBH" in s:
+			replace_linear_with_linear_dw(model, local_rank)
 
-		if global_rank == 0:
+		if rank == 0:
 			print(f"Beginning benchmark for {s}")
 
 		inputs = model.get_sample(batch_size)
@@ -144,14 +163,14 @@ if __name__ == "__main__":
 			targets=dsts,
 		)
 		# Warmup
-		if global_rank == 0:
+		if rank == 0:
 			print(f"{s} - Warming up")
 		for i in range(3):
 			y = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=split_size)
 
 		torch.cuda.reset_peak_memory_stats()
 
-		if global_rank == 0:
+		if rank == 0:
 			print(f"{s} - Benchmark")
 
 		dist.barrier()
@@ -167,14 +186,14 @@ if __name__ == "__main__":
 				stats.append(pipe.stats)
 			dist.barrier()
 
-		mems = [torch.tensor(0.0, device=rank) for _ in range(world_size)] if global_rank == 0 else None
-		dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=rank), mems, 0)
+		mems = [torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
+		dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=local_rank), mems, 0)
 
 		median_times = medians(stats)
-		itimes = [{} for _ in range(world_size)] if global_rank == 0 else None
+		itimes = [{} for _ in range(world_size)] if rank == 0 else None
 		dist.gather_object(median_times, itimes, 0)
 
-		if global_rank == 0:
+		if rank == 0:
 			iteration_times = [f"{it['total']:.2f}" for it in itimes]
 			idle_times = [f"{it['idle']:.2f}" for it in itimes]
 			idle_percentages = [f"{it['idle'] / it['total'] * 100:.1f}" for it in itimes]

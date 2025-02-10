@@ -6,6 +6,7 @@ import sys
 import wandb
 
 sys.path.append("./")
+from elf.zb_utils import replace_linear_with_linear_dw
 import elf.pipeline as MyPipe
 from elf.utils import Timer
 from models.simple import SimpleTransformer
@@ -75,7 +76,8 @@ def pippy():
 
 
 def elf():
-	pipe = MyPipe.Pipeline(model, inputs.clone(), schedule="1f1b")
+	replace_linear_with_linear_dw(model, "cuda")
+	pipe = MyPipe.Pipeline(model, inputs.clone(), schedule="zbh2")
 	# Warmup
 	for _ in range(5):
 		y, loss = pipe(inputs.clone(), targets.clone(), loss_fn)

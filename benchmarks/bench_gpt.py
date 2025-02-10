@@ -1,5 +1,7 @@
 import sys
 
+from elf.zb_utils import replace_linear_with_linear_dw
+
 sys.path.append(".")
 from elf.pipeline import Pipeline
 
@@ -48,7 +50,7 @@ if __name__ == "__main__":
 	)
 	parser.add_argument(
 		"--schedule",
-		choices=["afab", "1f1b", "hanayo", "full_remat"],
+		choices=["afab", "1f1b", "hanayo", "full_remat", "zbh1", "zbh2"],
 		default="1f1b",
 		help="Schedule to use",
 	)
@@ -100,6 +102,9 @@ if __name__ == "__main__":
 		logger.info(
 			f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters"
 		)
+
+	if args.schedule == "zbh2":
+		replace_linear_with_linear_dw(model, "cuda")
 
 	# Create sample inputs
 	inputs = torch.randint(0, config.vocab_size, (args.batch_size, args.seq_len), device=local_rank)
