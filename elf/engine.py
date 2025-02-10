@@ -159,7 +159,8 @@ class Engine:
 		"""
 		split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]
 		microbatches = iter(zip(*split_batches))
-		microtargets = target.split(mb_sizes, dim=0)
+		if target is not None:
+			microtargets = target.split(mb_sizes, dim=0)
 
 		result = []
 		losses = []

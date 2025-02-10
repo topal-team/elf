@@ -132,7 +132,8 @@ class Pipeline:
 
 		# Move to GPU
 		batch = tuple(item.cuda() if isinstance(item, torch.Tensor) else item for item in batch)
-		target = target.cuda()  # We don't support multiple targets yet
+		if target is not None:  # target can be None for inference
+			target = target.cuda()  # We don't support multiple targets yet
 
 		mb_sizes = self._get_mb_sizes(split_size, batch)
 		n_micro_batches = len(mb_sizes)

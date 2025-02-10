@@ -21,9 +21,7 @@ def init_dist():
 	torch.cuda.set_device(local_rank)
 	try:
 		if not dist.is_initialized():
-			dist.init_process_group(
-				backend="nccl", timeout=timedelta(seconds=60), device_id=torch.device(local_rank)
-			)
+			dist.init_process_group(backend="nccl", timeout=timedelta(seconds=60))
 
 		yield rank, local_rank, world_size
 	finally:
@@ -183,3 +181,47 @@ def test_get_mb_sizes():
 	split_size = [5, 9, 11, 7]
 	mb_sizes = pipe._get_mb_sizes(split_size, batch)
 	assert mb_sizes == [5, 9, 11, 7]
+
+
+@pytest.mark.multi
+def test_inference_pipeline(init_dist):
+	rank, local_rank, world_size = init_dist
+
+	if world_size < 4:
+		pytest.skip("This test needs at least 4 gpus (and processes) to run.")
+		return
+
+	model = nn.Sequential(
+		nn.Linear(10, 10), nn.Linear(10, 10), nn.Linear(10, 10), nn.Linear(10, 10)
+	).cuda()
+	inputs = torch.randn(4, 10).cuda()
+
+	if rank == 0:
+		ref = model(inputs)
+
+	part = model[local_rank]
+	if rank == 0:
+		for i in range(1, world_size):
+			dist.send(model[i].weight, i)
+			dist.send(model[i].bias, i)
+	else:
+		dist.recv(part.weight.data, 0)
+		dist.recv(part.bias.data, 0)
+
+	sources, targets = get_sources_targets_sequential([0, 1, 2, 3])
+
+	pipe = Pipeline(
+		part, None, schedule="inference", partitioner=False, sources=sources, targets=targets
+	)
+	assert len(pipe.blocks) == 1
+	assert pipe.blocks[0].id == pipe.blocks[0].rank == rank
+
+	y, _ = pipe(inputs, None, None)
+	if rank == 0:
+		y = torch.empty_like(ref)
+		dist.recv(y, 3)
+		assert torch.allclose(y, ref)
+	elif rank == 3:
+		dist.send(y, 0)
+
+	dist.barrier()
