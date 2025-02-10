@@ -306,3 +306,28 @@ class FullTransformer(nn.Module):
 		pred = pred.view(-1, self.input_dim)  # flatten seq dim
 		target = target.view(-1)
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
+
+class ChainTransformer(nn.Module):
+	def __init__(self, hidden_dim, n_blocks=4, seq_len=64, num_heads=4, dropout=0.1):
+		super(ChainTransformer, self).__init__()
+
+		self.hidden_dim = hidden_dim
+		self.seq_len = seq_len
+		self.blocks = []
+		for i in range(n_blocks):
+			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout))
+			self.add_module(f"block_{i}", self.blocks[-1])
+
+	def forward(self, x):
+		for b in self.blocks:
+			x = b(x)
+		return x
+
+	def get_sample(self, batch_size):
+		return torch.randn(batch_size, self.seq_len, self.hidden_dim)
+
+	def get_target(self, batch_size):
+		return self.get_sample(batch_size)
+
+	def loss_fn(self, pred, target, *args, **kwargs):
+		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)

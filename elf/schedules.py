@@ -363,3 +363,51 @@ def generate_inference_schedule(placement, n_micro_batches, signatures):
 				schedule.pop(-1)  # remove loss forward
 
 	return schedule
+
+
+def schedule_from_str(schedule_str, placement, signatures):
+	"""
+	Generate a schedule from a string representation. All communications are automatically handled. Micro batches are computed in ascending order. An AllReduce operation is added at the end of the schedule.
+	Expected representation:
+		schedule_str = [
+			"fbwfbw",
+			"ffbbww"
+		]
+	This example will be executed on 2 ranks (2 strings).
+	- f: forward and save all
+	- F: forward and save none
+	- r: recompute forward (and save all)
+	- b: backward for inputs and save all
+	- w: backward for weights
+	"""
+	schedule = []
+	for rank, rank_sched in enumerate(schedule_str):
+		f = 0
+		b = 0
+		w = 0
+		to_recompute = []
+		for op in rank_sched:
+			match op:
+				case "f":
+					_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+					f += 1
+				case "b":
+					_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+					schedule.pop(-1)  # hack: remove the backward wrt weights
+					b += 1
+				case "w":
+					schedule.append(Operation(rank, w, OperationType.BACKWARD_PARAMS, rank))
+					w += 1
+				case "F":
+					to_recompute.append(f)
+					_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank], **{OpOptions.REMAT: True})
+					f += 1
+				case "r":
+					mb_id = to_recompute.pop(0)
+					schedule.append(Operation(rank, mb_id, OperationType.FORWARD, rank))
+				case "AR":
+					pass # we will add anyway later
+
+		schedule.append(Operation(rank, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
+
+	return schedule

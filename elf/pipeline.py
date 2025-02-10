@@ -6,11 +6,12 @@ import os
 import torch
 import shutil
 import torch.distributed as dist
+
 from .block import PipelineBlock
 from .schedules import *
 from .engine import Engine
 from .utils import *
-from .scheduling import mark_batched_comms, schedule_to_str
+from .scheduling import mark_batched_comms, schedule_to_str, check_schedule_validity
 from .partitioners import partition_graph
 from .partitioners.utils import Signature
 from collections import OrderedDict
@@ -347,6 +348,7 @@ class Pipeline:
 		:rtype: List[Operation]
 		"""
 		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
+		check_schedule_validity(schedule)
 		if dist.get_rank() == 0:
 			logger.info(schedule_to_str(schedule))
 
@@ -534,6 +536,25 @@ def get_sources_targets_sequential(placement):
 	"""
 	Generates sources and targets for a fully sequential model (no skip connections), with one input and one output per stage.
 	This is intended to be used with the ``partitioner=False`` option.
+
+	.. note::
+		here's an example of what the returned sources and targets look like:
+		sources = {
+			0: { # stage 0's sources
+				"input": None # variable input comes from None
+			},
+			1: {
+				"x": 0 # variable x comes from stage 0
+			}, ...
+		}
+		targets = {
+			0: { # stage 0's targets
+				"output": [1, 2] # variable output goes to stages 1 and 2
+			},
+			1: {
+				"output": [2] # variable output goes to stage 2
+			}, ...
+		}
 
 	:param placement: placement of the model blocks on gpus
 	:type placement: List[int]
