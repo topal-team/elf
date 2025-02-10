@@ -41,6 +41,7 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 
 	REMAT = auto()
 	BATCHED_COMM = auto()
+	OFFLOAD_DW = auto()
 
 
 class Operation:

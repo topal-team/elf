@@ -7,12 +7,14 @@ class LinearDX(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, input, linear):
 		ctx.linear = linear
+		ctx.input = input # if under torch.no_grad(), does this cause memory leaks?
 		return torch.nn.functional.linear(input, linear.weight, linear.bias)
 
 	@staticmethod
 	def backward(ctx, grad_output):
 		linear = ctx.linear
 		linear.ctx["grad_output"].append(grad_output.detach())
+		linear.ctx["input"].append(ctx.input.detach())
 		with torch.no_grad():
 			grad_input = torch.matmul(grad_output, linear.weight)
 
@@ -49,10 +51,14 @@ class LinearDW(nn.Linear, LayerDW):
 		# LinearDW.forward -> LinearDX.forward -> LinearDX.backward -> LinearDW.backward
 
 	def forward(self, x, *args, **kwargs):
-		# If we are under no_grad context, we don't want to keep stuff, as it will never be used
-		if x.requires_grad:
-			self.ctx["input"].append(x.detach())
 		return LinearDX.apply(x, self, *args, **kwargs)
+	
+	def offload_last(self, to="cpu"):
+		grads = self.ctx["grad_output"].pop()
+		inputs = self.ctx["input"].pop()
+		with torch.no_grad():
+			self.ctx["grad_output"].append(grads.to(to, non_blocking=True))
+			self.ctx["input"].append(inputs.to(to, non_blocking=True))
 
 	def backward(self):
 		assert len(self.ctx["grad_output"]) > 0, "No grad kept for backward"
@@ -65,14 +71,14 @@ class LinearDW(nn.Linear, LayerDW):
 			inp = inputs.reshape(-1, inputs.size(-1))
 
 			# dL/dW
-			grads_w = torch.matmul(go.T, inp)
+			grads_w = torch.matmul(go.T, inp).to(self.weight.device, non_blocking=True)
 			self.weight.grad = (
 				grads_w if self.weight.grad is None else self.weight.grad + grads_w
 			)  # accumulate
 
 			# dL/db
 			if self.bias is not None:
-				grads_b = go.sum(0)
+				grads_b = go.sum(0).to(self.bias.device, non_blocking=True)
 				self.bias.grad = (
 					grads_b if self.bias.grad is None else self.bias.grad + grads_b
 				)  # accumulate

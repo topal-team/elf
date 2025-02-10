@@ -278,6 +278,9 @@ class PipelineBlock:
 					gradient_accumulator, retain_graph=(i != len(self.output_variables) - 1)
 				)
 
+		if options.get(OpOptions.OFFLOAD_DW, False):
+			self._offload_dw(to="cpu")
+			
 		self.compute_time.append(timer)
 
 		for input_var, value in zip(self.input_variables, inputs):
@@ -519,3 +522,14 @@ class PipelineBlock:
 					value[0]
 				)  # omit batch dimension ; if the tensor is not batched, this is wrong!
 			logger.debug(f"{self} - registered output metadata {var[0].metadata} for {var[0].name}")
+
+	def _offload_dw(self, to="cpu"):
+		"""
+		Offload the gradients and activations saved between B and W. The computation will be done on the new device.
+
+		:param to: device to offload to
+		:type to: str or torch.device
+		"""
+		for module in self.model.modules():
+			if isinstance(module, LayerDW):
+				module.offload_last(to)
