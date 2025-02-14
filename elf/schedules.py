@@ -238,7 +238,7 @@ def generate_full_remat_schedule(placement, n_micro_batches, signatures):
 		for i in range(n_micro_batches):
 			for id_ in ids:
 				_add_forward_pass(
-					schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.REMAT: True}
+					schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.REMAT_STRATEGY: "full"}
 				)
 		# All backward
 		for i in range(n_micro_batches):
@@ -400,7 +400,7 @@ def schedule_from_str(schedule_str, placement, signatures):
 					w += 1
 				case "F":
 					to_recompute.append(f)
-					_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank], **{OpOptions.REMAT: True})
+					_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank], **{OpOptions.REMAT_STRATEGY: "full"})
 					f += 1
 				case "r":
 					mb_id = to_recompute.pop(0)

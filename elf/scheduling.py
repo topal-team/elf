@@ -39,7 +39,8 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	Options that can be passed to operations to modify their behaviour
 	"""
 
-	REMAT = auto()
+	REMAT_STRATEGY = auto()
+	REMAT_SELECTION = auto()
 	BATCHED_COMM = auto()
 	OFFLOAD_DW = auto()
 
@@ -229,13 +230,11 @@ def schedule_to_str(schedule, print_comms = False):
 		OperationType.BACKWARD_INPUTS: "b",
 		OperationType.BACKWARD_PARAMS: "w",
 		OperationType.SEND_BACKWARD: "sb",
-		OperationType.LOSS_FORWARD: "lf",
-		OperationType.LOSS_BACKWARD: "lb",
 		OperationType.ALL_REDUCE_PARAM_GRADS: "(AR)",
 	}
 	def shorten(op):
 		letter = reprs[op.op]
-		if op.op == OperationType.FORWARD and op.options.get(OpOptions.REMAT, False):
+		if op.op == OperationType.FORWARD and op.options.get(OpOptions.REMAT_STRATEGY, "none") == "full":
 			letter = "F"
 		return letter
 
@@ -243,7 +242,7 @@ def schedule_to_str(schedule, print_comms = False):
 	ranks = sorted(set(op.rank for op in schedule))
 	lines = []
 	for rank in ranks:
-		rank_ops = [op for op in schedule if op.rank == rank and (print_comms or op.op not in comm_types)]
+		rank_ops = [op for op in schedule if op.rank == rank and op.op in reprs and (print_comms or op.op not in comm_types)]
 		ops_str = " ".join(filter(lambda s: s != "", [f"{shorten(op)}{op.mb_id if op.mb_id is not None else ''}" for op in rank_ops]))
 		lines.append(f"Rank {rank}: {ops_str}")
 	return "\n".join(lines)
@@ -266,7 +265,7 @@ def check_schedule_validity(schedule):
 
 		for mb_id in rank_mb_ids:
 			mb_ops = [op for op in rank_ops if op.mb_id == mb_id]
-			i, _ = find(mb_ops, lambda op: op.op == OperationType.FORWARD and not op.options.get(OpOptions.REMAT, False))
+			i, _ = find(mb_ops, lambda op: op.op == OperationType.FORWARD and not op.options.get(OpOptions.REMAT_STRATEGY, "none") == "full")
 			# in case of no backward, we allow to have 0 forward without remat
 			j, _ = find(mb_ops, lambda op: op.op == OperationType.BACKWARD_INPUTS)
 			assert i != -1 or j == -1, f"[Rank {rank}] Forward should be present for microbatch {mb_id}"
