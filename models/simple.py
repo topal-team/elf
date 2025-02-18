@@ -199,6 +199,21 @@ class SimpleTransformer(nn.Module):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
 
 
+class Attention(nn.Module):
+	def __init__(self, dim, dropout=0.1):
+		super().__init__()
+		self.dim = dim
+		self.scale = 1.0 / math.sqrt(self.dim)
+		self.dropout = nn.Dropout(dropout)
+
+	def forward(self, q, k, v):
+		# Attention scores
+		attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+		attn = F.softmax(attn, dim=-1)
+		attn = self.dropout(attn)
+		return torch.matmul(attn, v)
+
+
 class MultiHeadAttention(nn.Module):
 	def __init__(self, dim, num_heads=4, dropout=0.1):
 		super().__init__()
@@ -207,14 +222,13 @@ class MultiHeadAttention(nn.Module):
 		self.dim = dim
 		self.num_heads = num_heads
 		self.head_dim = dim // num_heads
-		self.scale = 1.0 / math.sqrt(self.head_dim)
-
 		# Single large linear layers for Q,K,V
 		self.q_proj = nn.Linear(dim, dim)
 		self.k_proj = nn.Linear(dim, dim)
 		self.v_proj = nn.Linear(dim, dim)
 
-		self.dropout = nn.Dropout(dropout)
+		self.attn = Attention(self.head_dim, dropout)
+
 
 	def forward(self, x):
 		batch_size, seq_len, _ = x.shape
@@ -229,13 +243,7 @@ class MultiHeadAttention(nn.Module):
 		k = k.transpose(1, 2)
 		v = v.transpose(1, 2)
 
-		# Attention scores
-		attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-		attn = F.softmax(attn, dim=-1)
-		attn = self.dropout(attn)
-
-		# Apply attention to values
-		out = torch.matmul(attn, v)
+		out = self.attn(q, k, v)
 
 		# Reshape back: (batch, seq, dim)
 		out = out.transpose(1, 2).reshape(batch_size, seq_len, self.dim)
