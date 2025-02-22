@@ -164,6 +164,7 @@ def train(pipe, model, data, pp, dp):
 	)
 
 	loss_fn = model.loss_fn
+	split_size = (16 // dp) // (pp * 2)
 	if rank < pp:
 		for block in pipe.blocks:
 			pipe_params, pipe_grads = get_all_parameters(block.model, block.pp_group)
@@ -190,7 +191,7 @@ def train(pipe, model, data, pp, dp):
 
 		for x, t in loader_distributed:
 			optimizer_distributed.zero_grad()
-			y, loss_distributed = pipe(x, t, loss_fn=loss_fn)
+			y, loss_distributed = pipe(x, t, loss_fn=loss_fn, split_size=split_size)
 			if loss_distributed:
 				epoch_loss += loss_distributed.detach()
 			optimizer_distributed.step()
@@ -262,7 +263,7 @@ if __name__ == "__main__":
 			model = SimpleCNN(256)
 			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
 		case "tf":
-			model = SimpleTransformer(128, 128, args.pp * args.interleaving * 2)
+			model = SimpleTransformer(128, 1024, args.pp * args.interleaving * 16)
 			data = Dummy((64,), torch.int64, (64,), torch.int64)
 		case "resnet":
 			model = SimpleResNet(args.pp * args.interleaving)

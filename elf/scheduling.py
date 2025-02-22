@@ -39,8 +39,11 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	Options that can be passed to operations to modify their behaviour
 	"""
 
-	REMAT_STRATEGY = auto()
 	REMAT_SELECTION = auto()
+	DEL_ACT_BW = auto()
+	DEL_GRAD_BW = auto()
+	REMAT_ACT_BW = auto()
+	REMAT_GRAD_BW = auto()
 	BATCHED_COMM = auto()
 	OFFLOAD_DW = auto()
 
@@ -221,7 +224,7 @@ def mark_batched_comms(schedule, placement):
 		visited.add(i)
 
 
-def schedule_to_str(schedule, print_comms = False):
+def schedule_to_str(schedule, print_comms=False):
 	reprs = {
 		OperationType.RECV_FORWARD: "rf",
 		OperationType.FORWARD: "f",
@@ -232,18 +235,39 @@ def schedule_to_str(schedule, print_comms = False):
 		OperationType.SEND_BACKWARD: "sb",
 		OperationType.ALL_REDUCE_PARAM_GRADS: "(AR)",
 	}
+
 	def shorten(op):
 		letter = reprs[op.op]
-		if op.op == OperationType.FORWARD and op.options.get(OpOptions.REMAT_STRATEGY, "none") == "full":
+		if (
+			op.op == OperationType.FORWARD and op.options.get(OpOptions.REMAT_SELECTION, False)
+		):
 			letter = "F"
+		elif (
+			op.op == OperationType.BACKWARD_INPUTS and op.options.get(OpOptions.REMAT_SELECTION, False)
+		):
+			letter = "B"
 		return letter
 
-	comm_types = {OperationType.RECV_FORWARD, OperationType.RECV_BACKWARD, OperationType.SEND_FORWARD, OperationType.SEND_BACKWARD}
+	comm_types = {
+		OperationType.RECV_FORWARD,
+		OperationType.RECV_BACKWARD,
+		OperationType.SEND_FORWARD,
+		OperationType.SEND_BACKWARD,
+	}
 	ranks = sorted(set(op.rank for op in schedule))
 	lines = []
 	for rank in ranks:
-		rank_ops = [op for op in schedule if op.rank == rank and op.op in reprs and (print_comms or op.op not in comm_types)]
-		ops_str = " ".join(filter(lambda s: s != "", [f"{shorten(op)}{op.mb_id if op.mb_id is not None else ''}" for op in rank_ops]))
+		rank_ops = [
+			op
+			for op in schedule
+			if op.rank == rank and op.op in reprs and (print_comms or op.op not in comm_types)
+		]
+		ops_str = " ".join(
+			filter(
+				lambda s: s != "",
+				[f"{shorten(op)}{op.mb_id if op.mb_id is not None else ''}" for op in rank_ops],
+			)
+		)
 		lines.append(f"Rank {rank}: {ops_str}")
 	return "\n".join(lines)
 
@@ -261,16 +285,26 @@ def check_schedule_validity(schedule):
 	for rank in range(n_ranks):
 		rank_ops = [op for op in schedule if op.rank == rank]
 		rank_mb_ids = set(op.mb_id for op in rank_ops if op.mb_id is not None)
-		assert len(rank_mb_ids) == n_mb, f"[Rank {rank}] has {len(rank_mb_ids)} microbatches, expected {n_mb}"
+		assert len(rank_mb_ids) == n_mb, (
+			f"[Rank {rank}] has {len(rank_mb_ids)} microbatches, expected {n_mb}"
+		)
 
 		for mb_id in rank_mb_ids:
 			mb_ops = [op for op in rank_ops if op.mb_id == mb_id]
-			i, _ = find(mb_ops, lambda op: op.op == OperationType.FORWARD and not op.options.get(OpOptions.REMAT_STRATEGY, "none") == "full")
+			i, _ = find(
+				mb_ops,
+				lambda op: op.op == OperationType.FORWARD
+			)
 			# in case of no backward, we allow to have 0 forward without remat
 			j, _ = find(mb_ops, lambda op: op.op == OperationType.BACKWARD_INPUTS)
 			assert i != -1 or j == -1, f"[Rank {rank}] Forward should be present for microbatch {mb_id}"
-			assert i < j or j == -1, f"[Rank {rank}] Forward should be before backward inputs for microbatch {mb_id}" # we allow "no backward"
+			assert i < j or j == -1, (
+				f"[Rank {rank}] Forward should be before backward inputs for microbatch {mb_id}"
+			)  # we allow "no backward"
 			k, _ = find(mb_ops, lambda op: op.op == OperationType.BACKWARD_PARAMS)
-			assert k != -1 or j == -1, f"[Rank {rank}] Backward params should be present for microbatch {mb_id} since backward inputs is present"
-			assert j < k, f"[Rank {rank}] Backward params should be after backward inputs for microbatch {mb_id}"
-
+			assert k != -1 or j == -1, (
+				f"[Rank {rank}] Backward params should be present for microbatch {mb_id} since backward inputs is present"
+			)
+			assert j < k, (
+				f"[Rank {rank}] Backward params should be after backward inputs for microbatch {mb_id}"
+			)

@@ -1,20 +1,18 @@
 import torch
 import torch.nn as nn
-from collections import deque
-
 
 class LinearDX(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, input, linear):
 		ctx.linear = linear
-		ctx.input = input # if under torch.no_grad(), does this cause memory leaks?
+		ctx.input = input  # if under torch.no_grad(), does this cause memory leaks?
+		linear.ctx["input"].append(input.detach())
 		return torch.nn.functional.linear(input, linear.weight, linear.bias)
 
 	@staticmethod
 	def backward(ctx, grad_output):
 		linear = ctx.linear
 		linear.ctx["grad_output"].append(grad_output.detach())
-		linear.ctx["input"].append(ctx.input.detach())
 		with torch.no_grad():
 			grad_input = torch.matmul(grad_output, linear.weight)
 
@@ -44,27 +42,79 @@ class LayerDW(nn.Module):
 class LinearDW(nn.Linear, LayerDW):
 	def __init__(self, in_features, out_features, bias=True):
 		super(LinearDW, self).__init__(in_features, out_features, bias)
-		self.ctx["input"] = deque()
-		self.ctx["grad_output"] = deque()
+		self.ctx["input"] = []
+		self.ctx["grad_output"] = []
 
 		# Execution order:
 		# LinearDW.forward -> LinearDX.forward -> LinearDX.backward -> LinearDW.backward
 
+	def clear(self):
+		self.ctx["input"].clear()
+		self.ctx["grad_output"].clear()
+
 	def forward(self, x, *args, **kwargs):
 		return LinearDX.apply(x, self, *args, **kwargs)
-	
+
 	def offload_last(self, to="cpu"):
-		grads = self.ctx["grad_output"].pop()
-		inputs = self.ctx["input"].pop()
+		grads = self.ctx["grad_output"].pop(-1)
+		inputs = self.ctx["input"].pop(-1)
 		with torch.no_grad():
 			self.ctx["grad_output"].append(grads.to(to, non_blocking=True))
 			self.ctx["input"].append(inputs.to(to, non_blocking=True))
 
+	def del_last_act(self):
+		"""
+		Delete the last activation from the queue.
+		"""
+		self.ctx["input"].pop(-1)
+
+	def del_last_grad(self):
+		"""
+		Delete the last gradient from the queue.
+		"""
+		self.ctx["grad_output"].pop(-1)
+
+	def del_first_grad(self):
+		"""
+		Delete the first gradient from the queue.
+		"""
+		self.ctx["grad_output"].pop(0)
+
+	def del_act_last_grad(self):
+		"""
+		Delete the last activation from the queue.
+		"""
+		idx = len(self.ctx["grad_output"]) - 1
+		self.ctx["input"].pop(idx)
+
+	def mark_last_act_as_recomputed(self):
+		"""
+		Move the last activation to the front
+		"""
+		last_act = self.ctx["input"].pop(-1)
+		self.ctx["input"].insert(0, last_act)
+
+	def mark_last_grad_as_recomputed(self):
+		"""
+		Move the last gradient to the front
+		"""
+		last_grad = self.ctx["grad_output"].pop(-1)
+		self.ctx["grad_output"].insert(0, last_grad)
+
+	def sync_input_grads(self):
+		"""
+		When using torch.utils.checkpoint, the inputs are recomputed just before the backward pass. Some other forwards may have been done inbetween. Therefore we need to sync their position in the queues.
+		Intended to be called just after the backward() call on a checkpointed module.
+		"""
+		idx = len(self.ctx["grad_output"]) - 1
+		x = self.ctx["input"].pop(-1)
+		self.ctx["input"].insert(idx, x)
+
 	def backward(self):
 		assert len(self.ctx["grad_output"]) > 0, "No grad kept for backward"
 		assert len(self.ctx["input"]) > 0, "No input kept for backward"
-		grad_output = self.ctx["grad_output"].popleft()
-		inputs = self.ctx["input"].popleft()
+		grad_output = self.ctx["grad_output"].pop(0)
+		inputs = self.ctx["input"].pop(0)
 
 		with torch.no_grad():
 			go = grad_output.reshape(-1, grad_output.size(-1))

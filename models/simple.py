@@ -229,7 +229,6 @@ class MultiHeadAttention(nn.Module):
 
 		self.attn = Attention(self.head_dim, dropout)
 
-
 	def forward(self, x):
 		batch_size, seq_len, _ = x.shape
 
@@ -314,6 +313,7 @@ class FullTransformer(nn.Module):
 		pred = pred.view(-1, self.input_dim)  # flatten seq dim
 		target = target.view(-1)
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
+
 
 class ChainTransformer(nn.Module):
 	def __init__(self, hidden_dim, n_blocks=4, seq_len=64, num_heads=4, dropout=0.1):

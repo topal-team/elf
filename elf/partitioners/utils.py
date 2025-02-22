@@ -86,6 +86,6 @@ class Signature:
 		s += ", ".join([f"{o} ({t})" for o, t in zip(self.outputs, self.targets)])
 		s += ")"
 		return s
-	
+
 	def __repr__(self):
 		return str(self)

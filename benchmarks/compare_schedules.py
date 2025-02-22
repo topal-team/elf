@@ -9,83 +9,15 @@ import torch.distributed as dist
 
 sys.path.append(".")
 from elf.pipeline import Pipeline, get_sources_targets_sequential
-from elf.scheduling import OpOptions, OperationType
-from models.simple import ChainTransformer, Attention
+from models.simple import ChainTransformer
 from elf.utils import Timer, pretty_print_params
 from elf.zb_utils import replace_linear_with_linear_dw
-from elf.schedules import generate_zbh2_schedule, schedule_from_str
+from local.benchmark_utils import get_handcrafted_imbalanced_partition
 
 import logging
 
 logger = logging.getLogger("benchmark")
 logging.basicConfig(level=logging.INFO)
-
-
-def get_handcrafted_partition(model, rank, placement):
-	# CRAFTED FOR CHAINTRANSFORMER, ADAPT FOR OTHER MODELS
-	num_blocks = len(model.blocks)
-	num_ranks = len(placement)
-	blocks_per_rank = num_blocks // num_ranks
-	extra_blocks = num_blocks % num_ranks
-	parts = [None] * num_ranks
-
-	start_idx = 0
-	for i in range(num_ranks):
-		# Add one extra block to earlier ranks if blocks don't divide evenly
-		rank_blocks = blocks_per_rank + (1 if i < extra_blocks else 0)
-		end_idx = start_idx + rank_blocks
-
-		parts[i] = torch.nn.Sequential(*model.blocks[start_idx:end_idx])
-
-		start_idx = end_idx
-
-	return [parts[i] for i, p in enumerate(placement) if p == rank]
-
-def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
-
-	num_blocks = len(model.blocks)
-	num_ranks = len(placement)
-	parts = [None] * num_ranks
-	assert int(sum(factors)) == int(num_blocks)
-
-	start_idx = 0
-	for i in range(num_ranks):
-		end_idx = start_idx + factors[i]
-		parts[i] = torch.nn.Sequential(*model.blocks[start_idx:end_idx])
-		start_idx = end_idx
-
-	return [parts[i] for i, p in enumerate(placement) if p == rank]
-	
-
-def manual_zb(placement, nmb, signatures):
-	# sched0 = "ffffFFFbwfbwbwbwrbwrbwrbwbw"
-	# sched1 = "ffffFbFbfbwfbwrbwrbwbwbwww"
-	# sched2 = "fffbfbfbfbfbwfbwbwbwwwww"
-	# sched3 = "fbfbfbfbfbfbfbwfbwwwwwww"
-	sched0 = "fFFFFFFrbwFbwrbwrrbwrbwrbwrbwbw"
-	sched1 = "fFFFFrbFrbFwbwFrbrbwrbwrbwrbwww"
-	sched2 = "fFFbFrbFrbFrbFrbFwrbwrbwrbwwwww"
-	sched3 = "fbfbfbfbfbfbwfbwfbwwwwww"
-	s = [sched0, sched1, sched2, sched3]
-
-	sched = schedule_from_str(s, placement, signatures)
-	return sched
-
-def sr_zb(placement, nmb, signatures):
-	mbs = [
-		[0, 1, 5, 6],
-		[6],
-		[],
-		[]
-	]
-
-	sched = generate_zbh2_schedule(placement, nmb, signatures)
-	for op in sched:
-		if op.mb_id in mbs[op.block_id] and op.op in [OperationType.FORWARD, OperationType.BACKWARD_INPUTS]:
-			op.options[OpOptions.REMAT_STRATEGY] = "selective"
-			op.options[OpOptions.REMAT_SELECTION] = Attention
-
-	return sched
 
 
 def medians(times):
@@ -122,20 +54,8 @@ if __name__ == "__main__":
 	local_rank = int(os.environ["LOCAL_RANK"])
 
 	torch.cuda.set_device(local_rank)
-	fileout = "results.csv"
 
 	dist.init_process_group(backend="nccl", timeout=timedelta(seconds=300))
-
-	if rank == 0:
-		if os.path.exists(fileout):
-			os.remove(fileout)
-		with open(fileout, "w") as f:
-			f.write("name")
-			for i in range(world_size):
-				f.write(f",total_time_{i},idle_time_{i},start_time_{i},end_time_{i},bubble_time_{i}")
-			for i in range(world_size):
-				f.write(f",mem_{i}")
-			f.write("\n")
 
 	# torch.cuda.cudart().cudaProfilerStart()
 
@@ -156,7 +76,7 @@ if __name__ == "__main__":
 		# ("ZBH1", list(range(world_size)), "zbh1"),
 		# ("SRILP-ZBH2", list(range(world_size)), sr_zb),
 		# ("ZBH2", list(range(world_size)), "zbh2"),
-		("Imb-ZBH2", list(range(world_size)), "zbh2"),
+		("Imb-ZBH2", list(range(world_size)), "zbh2")
 		# ("Manual ZBH2", list(range(world_size)), manual_zb),
 	]
 
@@ -172,10 +92,10 @@ if __name__ == "__main__":
 		partitioner = args.partitioner
 		if partitioner == "handcrafted":
 			if "Imb" in s:
-				factors = [53, 58, 57, 56]
-				parts = get_handcrafted_imbalanced_partition(model, rank, placement, factors)
+				factors = [53, 58, 57, 56] # hardcoded
 			else:
-				parts = get_handcrafted_partition(model, rank, placement)
+				factors = [n_blocks // world_size for _ in range(world_size)]
+			parts = get_handcrafted_imbalanced_partition(model, rank, placement, factors)
 			sources, dsts = get_sources_targets_sequential(placement)  # "targets" is already used :)
 			partitioner = False
 		else:
@@ -184,7 +104,7 @@ if __name__ == "__main__":
 
 		if "ZBH" in s and not replaced_dw:
 			replaced_dw = True
-			replace_linear_with_linear_dw(model, 'cpu')
+			replace_linear_with_linear_dw(model, "cpu")
 
 		if rank == 0:
 			print(f"Beginning benchmark for {s}")
@@ -203,11 +123,15 @@ if __name__ == "__main__":
 		)
 
 		if rank == 0:
-			available_mem = torch.cuda.get_device_properties(local_rank).total_memory - torch.cuda.memory_allocated()
+			available_mem = (
+				torch.cuda.get_device_properties(local_rank).total_memory - torch.cuda.memory_allocated()
+			)
 			print(f"Available memory: {available_mem / (2**30):.2f}GB")
 			print(f"Allocated memory: {torch.cuda.memory_allocated() / (2**30):.2f}GB")
-			print(f"Occupied by parameters: {sum(p.numel() * p.element_size() for p in pipe.blocks[0].model.parameters()) / (2**30):.2f}GB")
-		
+			print(
+				f"Occupied by parameters: {sum(p.numel() * p.element_size() for p in pipe.blocks[0].model.parameters()) / (2**30):.2f}GB"
+			)
+
 		# Warmup
 		if rank == 0:
 			print(f"{s} - Warming up")
@@ -224,10 +148,14 @@ if __name__ == "__main__":
 		torch.cuda.synchronize()
 
 		if rank == 0:
-			available_mem = torch.cuda.get_device_properties(local_rank).total_memory - torch.cuda.memory_allocated()
+			available_mem = (
+				torch.cuda.get_device_properties(local_rank).total_memory - torch.cuda.memory_allocated()
+			)
 			print(f"Available memory: {available_mem / (2**30):.2f}GB")
 			print(f"Allocated memory: {torch.cuda.memory_allocated() / (2**30):.2f}GB")
-			print(f"Occupied by parameters: {sum((p.numel() + p.grad.numel()) * p.element_size() for p in pipe.blocks[0].model.parameters()) / (2**30):.2f}GB")
+			print(
+				f"Occupied by parameters: {sum((p.numel() + p.grad.numel()) * p.element_size() for p in pipe.blocks[0].model.parameters()) / (2**30):.2f}GB"
+			)
 
 		stats = []
 		with Timer() as timer:
@@ -240,7 +168,9 @@ if __name__ == "__main__":
 			dist.barrier()
 
 		mems = [torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
-		dist.gather(torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=local_rank), mems, 0)
+		dist.gather(
+			torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=local_rank), mems, 0
+		)
 
 		median_times = medians(stats)
 		itimes = [{} for _ in range(world_size)] if rank == 0 else None
@@ -254,18 +184,10 @@ if __name__ == "__main__":
 			print(f"{s}:")
 			print(f"\tIteration times: {iteration_times} s")
 			print(f"\tIdle times: {idle_times} s ({idle_percentages}%)")
-			print(f"\tTotal time ({n_iterations} iterations): {timer.time():.2f}s - Throughput: {(n_iterations * batch_size / timer.time()):.2f} seq/s, Time / iter: {timer.time() / n_iterations:.2f}s")
+			print(
+				f"\tTotal time ({n_iterations} iterations): {timer.time():.2f}s - Throughput: {(n_iterations * batch_size / timer.time()):.2f} seq/s, Time / iter: {timer.time() / n_iterations:.2f}s"
+			)
 			print(f"\tPeak memories: {peak_mems} GB")
-
-			with open(fileout, "a") as f:
-				f.write(f"{s}")
-				for d in itimes:
-					for t in d.values():
-						f.write(f",{t}")
-				for m in mems:
-					f.write(f",{m}")
-				f.write("\n")
-				f.flush()
 
 		pipe.clear()
 		model.zero_grad(set_to_none=True)

@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 from .scheduling import OpOptions
-from .utils import Timer, TensorMetadata
+from .utils import Timer, TensorMetadata, recompute_all_context_fn
 from .zb_utils import LayerDW
 import logging
 
@@ -196,20 +196,27 @@ class PipelineBlock:
 
 			inputs.append(x)
 
+		remat_strategy = options.get(OpOptions.REMAT_SELECTION, False)
+
+		if remat_strategy and remat_strategy != "full":
+			self._set_checkpoint(True, remat_strategy)			
+
 		with Timer(name=f"forward({self.id}:{mb_id})") as timer:
-			remat_strategy = options.get(OpOptions.REMAT_STRATEGY, "none")
+			y = self.model(*inputs)
+			y = (y,) if not isinstance(y, tuple) else y
 
-			if remat_strategy == "none":
-				y = self.model(*inputs)
-				y = (y,) if not isinstance(y, tuple) else y
+		# Delete graph if we just need intermediate activations
+		# TODO: if we recompute both F and B, we should not detach here
+		# if options.get(OpOptions.REMAT_ACT_BW, False):
+		# 	y = tuple(t.detach() if isinstance(t, torch.Tensor) else t for t in y)
 
-				# Keep both outputs and inputs for backward
-				for output_var, value in zip(self.output_variables, y):
-					for output_dst in output_var:
-						output_dst.set(output_dst.saved, mb_id, value)
+		if remat_strategy and remat_strategy != "full":
+			self._set_checkpoint(False, remat_strategy)
 
-			else:
-				y = self._forward_with_remat(mb_id, inputs, options)
+		# Keep both outputs and inputs for backward
+		for output_var, value in zip(self.output_variables, y):
+			for output_dst in output_var:
+				output_dst.set(output_dst.saved, mb_id, value)
 
 		# Save inputs to get gradients later on
 		for input_var, value in zip(self.input_variables, inputs):
@@ -225,56 +232,54 @@ class PipelineBlock:
 			for output_dst in output_var:
 				output_dst.set(output_dst.to_send, mb_id, value.detach())
 
-		if self.is_last:
+		if options.get(OpOptions.REMAT_ACT_BW, False):
+			for module in self.model.modules():
+				if isinstance(module, LayerDW):
+					module.mark_last_act_as_recomputed()
+
+			# We could delete input and output saved, except if we recompute both F and B before W.
+			# Since we detached output earlier, we consider that keeping input/output tensors is not that big.
+
+			for output_var in self.output_variables:
+				for output_dst in output_var:
+					output_dst.get(output_dst.to_send, mb_id)
+
+		if remat_strategy == "full":
+			for module in self.model.modules():
+				if isinstance(module, LayerDW):
+					module.del_last_act()
+
+			# Delete saved variables
+			for output_var in self.output_variables:
+				for output_dst in output_var:
+					output_dst.get(output_dst.saved, mb_id)
+
+			for input_var, value in zip(self.input_variables, inputs):
+				input_var.set(input_var.to_process, mb_id, (None, value)) # But save inputs to recompute forward later
+				# If we save them here, then use some detached version or smth later, these grads will not be populated.
+				# Better to save them when recomputing
+				input_var.get(input_var.saved, mb_id)
+
+		if self.is_last and not options.get(OpOptions.REMAT_ACT_BW, False):
 			output = []
 			for output_var in self.output_variables:
 				assert len(output_var) == 1, "Output of the pipeline has multiple destinations"
 				output.append(output_var[0].get(output_var[0].to_send, mb_id))
 			return output
 
-	def _forward_with_remat(self, mb_id, inputs, options):
-		remat_strategy = options.get(OpOptions.REMAT_STRATEGY)
-		if remat_strategy == "full":
-			with torch.no_grad():
-				y = self.model(*inputs)
-				y = (y,) if not isinstance(y, tuple) else y
-
-				# We'll need to recompute the forward pass, so we keep the inputs in the waiting queue
-				for input_var, value in zip(self.input_variables, inputs):
-					input_var.set(input_var.to_process, mb_id, (None, value))
-
-		elif remat_strategy == "selective":
-			remat_selection = options.get(OpOptions.REMAT_SELECTION)
-			for module in self.model.modules():
-				if isinstance(module, remat_selection):
+	def _set_checkpoint(self, use_checkpoint, remat_strategy):
+		for module in self.model.modules():
+			if isinstance(module, remat_strategy):
+				if use_checkpoint:
 					original_forward = getattr(module, "forward")
 					setattr(module, "_elf_original_forward", original_forward)
-
 					def wrapped_forward(*args, **kwargs):
-						return checkpoint(original_forward, *args, **kwargs, use_reentrant=False)
-
+						return checkpoint(original_forward, *args, **kwargs, use_reentrant=False, context_fn=recompute_all_context_fn())
 					setattr(module, "forward", wrapped_forward)
-
-			y = self.model(*inputs)
-			y = (y,) if not isinstance(y, tuple) else y
-
-			# No need to save inputs in the waiting queue, torch manages it
-
-			# Keep outputs for backward ; the graph does not contain intermediate activations so it's fine
-			for output_var, value in zip(self.output_variables, y):
-				for output_dst in output_var:
-					output_dst.set(output_dst.saved, mb_id, value)
-
-			# Restore original forward
-			for module in self.model.modules():
-				if isinstance(module, remat_selection):
-					setattr(module, "forward", getattr(module, "_elf_original_forward"))
+				else:
+					original_forward = getattr(module, "_elf_original_forward")
+					setattr(module, "forward", original_forward)
 					delattr(module, "_elf_original_forward")
-
-		else:
-			raise ValueError(f"Invalid remat strategy: {remat_strategy}")
-
-		return y
 
 	def backward_inputs(self, mb_id, **options):
 		"""
@@ -285,25 +290,24 @@ class PipelineBlock:
 		"""
 		logger.debug(f"{self} - Computing one backward with options {options}")
 
+		if options.get(OpOptions.REMAT_SELECTION, False) == "full":
+			self._recompute_forward(mb_id)
+		
 		# Gather the inputs to access their gradients later on
 		inputs = []
 		for input_var in self.input_variables:
 			inputs.append(input_var.get(input_var.saved, mb_id))
+			
+		retain_for_later = options.get(OpOptions.DEL_GRAD_BW, False) and not options.get(OpOptions.DEL_ACT_BW, False)
 
-		if options.get(OpOptions.REMAT_STRATEGY) == "full":
-			y = self.model(*inputs)
-			y = (y,) if not isinstance(y, tuple) else y
-			outputs = y
-
-		else:
-			# Gather the outputs
-			outputs = []
-			for output_var in self.output_variables:
-				# Even if there are multiple destinations, it's the same tensor for all of them
-				# retrieve the first one, delete others
-				outputs.append(output_var[0].get(output_var[0].saved, mb_id))
-				for output_dst in output_var[1:]:
-					output_dst.get(output_dst.saved, mb_id)
+		# Gather the outputs
+		outputs = []
+		for output_var in self.output_variables:
+			# Even if there are multiple destinations, it's the same tensor for all of them
+			# retrieve the first one, delete others
+			outputs.append(output_var[0].get(output_var[0].saved, mb_id))
+			for output_dst in output_var[1:]:
+				output_dst.get(output_dst.saved, mb_id)
 
 		for i, output_var in enumerate(self.output_variables):
 			# wait for all recvs to be finished for this variable
@@ -323,12 +327,35 @@ class PipelineBlock:
 					f"Expected same shape for activations and gradients, got {outputs[i].shape} and {gradient_accumulator.shape}"
 				)
 				# We may need to keep the graph for multiple backwards, if an intermediate value is needed by next blocks
-				outputs[i].backward(
-					gradient_accumulator, retain_graph=(i != len(self.output_variables) - 1)
-				)
+				retain_graph = (i != len(self.output_variables) - 1) or retain_for_later
+				outputs[i].backward(gradient_accumulator, retain_graph=retain_graph)
 
 		if options.get(OpOptions.OFFLOAD_DW, False):
 			self._offload_dw(to="cpu")
+
+		# Save inputs to recompute forward later
+		if options.get(OpOptions.DEL_ACT_BW, False):
+			for value, input_var in zip(inputs, self.input_variables):
+				input_var.set(input_var.to_process, mb_id, (None, value))
+
+		# Save outputs to recompute backward later
+		if options.get(OpOptions.DEL_GRAD_BW, False):
+			for value, output_var in zip(outputs, self.output_variables):
+				output_var[0].set(output_var[0].to_process, mb_id, (None, value))
+
+		for module in self.model.modules():
+			if isinstance(module, LayerDW):
+				# These two options both move activations around in the queue, be careful!
+				if options.get(OpOptions.DEL_ACT_BW, False):
+					module.del_act_last_grad()
+				elif options.get(OpOptions.REMAT_SELECTION, False) == "full":
+					module.sync_input_grads()
+
+				if options.get(OpOptions.DEL_GRAD_BW, False):
+					module.del_last_grad()
+					
+				if options.get(OpOptions.REMAT_GRAD_BW, False):
+					module.mark_last_grad_as_recomputed()
 
 		self.compute_time.append(timer)
 
@@ -341,6 +368,29 @@ class PipelineBlock:
 				continue
 			input_var.set(input_var.to_send, mb_id, value.grad.data)
 
+	def _recompute_forward(self, mb_id):
+		inputs = []
+		for input_var in self.input_variables:
+			x = input_var.wait_and_pop(mb_id)
+
+			if x.is_floating_point():
+				x.requires_grad_(True)
+
+			inputs.append(x)
+
+		with Timer(name=f"recompute_forward({self.id}:{mb_id})") as timer:
+			y = self.model(*inputs)
+			y = (y,) if not isinstance(y, tuple) else y
+
+		self.compute_time.append(timer)
+
+		for output_var, value in zip(self.output_variables, y):
+			for output_dst in output_var:
+				output_dst.set(output_dst.saved, mb_id, value)
+
+		for input_var, value in zip(self.input_variables, inputs):
+			input_var.set(input_var.saved, mb_id, value)
+
 	def backward_params(self, mb_id, **options):
 		"""
 		Perform the backward pass for the parameters of the model
@@ -350,12 +400,10 @@ class PipelineBlock:
 		:param **options: options to modify the backward behaviour
 		"""
 		with Timer(name=f"backward_params({self.id}:{mb_id})") as timer:
-			for name, module in self.model.named_modules():
+			for module in self.model.modules():
 				if isinstance(module, LayerDW):
-					logger.debug(f"{self} - Backwarding params of {name}")
 					module.backward()
-				else:
-					logger.debug(f"{self} - {name} is not a LayerDW ; skipping")
+		
 		self.compute_time.append(timer)
 
 	def send_forward(self, mb_id, **options):

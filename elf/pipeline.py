@@ -7,11 +7,13 @@ import torch
 import shutil
 import torch.distributed as dist
 
+
 from .block import PipelineBlock
 from .schedules import *
 from .engine import Engine
 from .utils import *
 from .scheduling import mark_batched_comms, schedule_to_str, check_schedule_validity
+from .zb_utils import LayerDW
 from .partitioners import partition_graph
 from .partitioners.utils import Signature
 from collections import OrderedDict
@@ -145,6 +147,11 @@ class Pipeline:
 
 			self.last_nmb = n_micro_batches
 
+		for block in self.blocks:
+			for module in block.model.modules():
+				if isinstance(module, LayerDW):
+					module.clear()
+
 		# Execute the schedule
 		result, losses, stats, detailed_stats = self.engine.train_step(
 			batch, target, loss_fn, self.schedule, mb_sizes, profile
@@ -157,6 +164,12 @@ class Pipeline:
 			for var in block.output_variables:
 				for dst in var:
 					dst.clear()
+
+			for name, module in block.model.named_modules():
+				if isinstance(module, LayerDW):
+					if len(module.ctx["input"]) > 0 or len(module.ctx["grad_output"]) > 0:
+						logger.warning(f"{block} - Module {name} still has {len(module.ctx['input'])} inputs and {len(module.ctx['grad_output'])} grad_outputs")
+					module.clear()
 
 		self.stats = stats
 		self.detailed_stats = detailed_stats

@@ -132,6 +132,7 @@ class GPT1TConfig(GPTConfig):
 	n_head = 128
 	n_embd = 25600
 
+
 class FeedForward(nn.Module):
 	def __init__(self, dropout, d_model=768, nx=768 * 4):
 		super().__init__()
