@@ -104,7 +104,7 @@ class Pipeline:
 		parts, signatures = self._partition_model(model, partitioner, sample, worker, sources, targets)
 		self.blocks = self._create_pipeline(parts, signatures)
 		self.signatures = signatures
-		self.scheduler = self._get_scheduler(schedule)
+		self.scheduler = Pipeline._get_scheduler(schedule)
 		self.engine = Engine(self.blocks)
 
 		# Used to avoid re-generating schedule every time
@@ -167,8 +167,10 @@ class Pipeline:
 
 			for name, module in block.model.named_modules():
 				if isinstance(module, LayerDW):
-					if len(module.ctx["input"]) > 0 or len(module.ctx["grad_output"]) > 0:
-						logger.warning(f"{block} - Module {name} still has {len(module.ctx['input'])} inputs and {len(module.ctx['grad_output'])} grad_outputs")
+					if not module.is_empty("input") or not module.is_empty("grad_output"):
+						logger.warning(
+							f"{block} - Module {name} still has {module._state('input')} values in queues"
+						)
 					module.clear()
 
 		self.stats = stats
@@ -326,7 +328,8 @@ class Pipeline:
 
 		return mb_sizes
 
-	def _get_scheduler(self, schedule):
+	@staticmethod
+	def _get_scheduler(schedule):
 		if not isinstance(schedule, str):
 			return schedule
 		match schedule.lower():
@@ -363,7 +366,7 @@ class Pipeline:
 		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
 		check_schedule_validity(schedule)
 		if dist.get_rank() == 0:
-			logger.info(schedule_to_str(schedule))
+			logger.info(f"Schedule:\n{schedule_to_str(schedule)}")
 
 		mark_batched_comms(schedule, self.placement)
 

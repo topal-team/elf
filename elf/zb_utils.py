@@ -1,18 +1,18 @@
 import torch
 import torch.nn as nn
 
+
 class LinearDX(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, input, linear):
 		ctx.linear = linear
-		ctx.input = input  # if under torch.no_grad(), does this cause memory leaks?
-		linear.ctx["input"].append(input.detach())
+		linear.last_input = input
 		return torch.nn.functional.linear(input, linear.weight, linear.bias)
 
 	@staticmethod
 	def backward(ctx, grad_output):
 		linear = ctx.linear
-		linear.ctx["grad_output"].append(grad_output.detach())
+		linear.last_grad_output = grad_output
 		with torch.no_grad():
 			grad_input = torch.matmul(grad_output, linear.weight)
 
@@ -29,7 +29,10 @@ class LayerDW(nn.Module):
 
 	def __init__(self):
 		super(LayerDW, self).__init__()
-		self.ctx = {}
+		self.ctx = {"input": [], "grad_output": []}
+
+	def forward(self, *args, **kwargs):
+		raise NotImplementedError("Subclasses must implement forward()")
 
 	def backward(self):
 		"""
@@ -38,83 +41,63 @@ class LayerDW(nn.Module):
 		"""
 		raise NotImplementedError("Subclasses must implement backward()")
 
-
-class LinearDW(nn.Linear, LayerDW):
-	def __init__(self, in_features, out_features, bias=True):
-		super(LinearDW, self).__init__(in_features, out_features, bias)
-		self.ctx["input"] = []
-		self.ctx["grad_output"] = []
-
-		# Execution order:
-		# LinearDW.forward -> LinearDX.forward -> LinearDX.backward -> LinearDW.backward
-
 	def clear(self):
 		self.ctx["input"].clear()
 		self.ctx["grad_output"].clear()
 
+	def is_empty(self, queue):
+		return all(x is None for x in self.ctx[queue])
+
+	def _state(self):
+		ninputs = len([x for x in self.ctx["input"] if x is not None])
+		ngrads = len([x for x in self.ctx["grad_output"] if x is not None])
+		return f"({ninputs},{ngrads})"
+
+	def set(self, queue, idx, value):
+		values = self.ctx[queue]
+		if len(values) <= idx:
+			values.extend([None] * (idx - len(values) + 1))
+		if values[idx] is not None:
+			raise ValueError(f"{queue} at index {idx} already set")
+		values[idx] = value
+
+	def delete(self, queue, idx):
+		values = self.ctx[queue]
+		if values[idx] is None:
+			raise ValueError(f"{queue} at index {idx} not set")
+		values[idx] = None
+
+	def move_last_computed(self, queue, idx):
+		if getattr(self, f"last_{queue}", None) is None:
+			raise ValueError(f"Last {queue} not set")
+		self.set(queue, idx, getattr(self, f"last_{queue}"))
+		setattr(self, f"last_{queue}", None)
+
+	def offload_last(self, idx, to="cpu"):
+		grads = self.ctx["grad_output"][idx]
+		inputs = self.ctx["input"][idx]
+		with torch.no_grad():
+			self.ctx["grad_output"][idx] = grads.to(to, non_blocking=True)
+			self.ctx["input"][idx] = inputs.to(to, non_blocking=True)
+
+
+class LinearDW(nn.Linear, LayerDW):
+	def __init__(self, in_features, out_features, bias=True):
+		super(LinearDW, self).__init__(in_features, out_features, bias)
+
+		# Execution order:
+		# LinearDW.forward -> LinearDX.forward -> LinearDX.backward -> LinearDW.backward
+
 	def forward(self, x, *args, **kwargs):
 		return LinearDX.apply(x, self, *args, **kwargs)
 
-	def offload_last(self, to="cpu"):
-		grads = self.ctx["grad_output"].pop(-1)
-		inputs = self.ctx["input"].pop(-1)
-		with torch.no_grad():
-			self.ctx["grad_output"].append(grads.to(to, non_blocking=True))
-			self.ctx["input"].append(inputs.to(to, non_blocking=True))
-
-	def del_last_act(self):
-		"""
-		Delete the last activation from the queue.
-		"""
-		self.ctx["input"].pop(-1)
-
-	def del_last_grad(self):
-		"""
-		Delete the last gradient from the queue.
-		"""
-		self.ctx["grad_output"].pop(-1)
-
-	def del_first_grad(self):
-		"""
-		Delete the first gradient from the queue.
-		"""
-		self.ctx["grad_output"].pop(0)
-
-	def del_act_last_grad(self):
-		"""
-		Delete the last activation from the queue.
-		"""
-		idx = len(self.ctx["grad_output"]) - 1
-		self.ctx["input"].pop(idx)
-
-	def mark_last_act_as_recomputed(self):
-		"""
-		Move the last activation to the front
-		"""
-		last_act = self.ctx["input"].pop(-1)
-		self.ctx["input"].insert(0, last_act)
-
-	def mark_last_grad_as_recomputed(self):
-		"""
-		Move the last gradient to the front
-		"""
-		last_grad = self.ctx["grad_output"].pop(-1)
-		self.ctx["grad_output"].insert(0, last_grad)
-
-	def sync_input_grads(self):
-		"""
-		When using torch.utils.checkpoint, the inputs are recomputed just before the backward pass. Some other forwards may have been done inbetween. Therefore we need to sync their position in the queues.
-		Intended to be called just after the backward() call on a checkpointed module.
-		"""
-		idx = len(self.ctx["grad_output"]) - 1
-		x = self.ctx["input"].pop(-1)
-		self.ctx["input"].insert(idx, x)
-
-	def backward(self):
-		assert len(self.ctx["grad_output"]) > 0, "No grad kept for backward"
-		assert len(self.ctx["input"]) > 0, "No input kept for backward"
-		grad_output = self.ctx["grad_output"].pop(0)
-		inputs = self.ctx["input"].pop(0)
+	def backward(self, mb_id):
+		assert len(self.ctx["grad_output"]) >= mb_id, "No grad kept for backward"
+		assert len(self.ctx["input"]) >= mb_id, "No input kept for backward"
+		grad_output = self.ctx["grad_output"][mb_id]
+		inputs = self.ctx["input"][mb_id]
+		assert grad_output is not None, "Grad output not set"
+		assert inputs is not None, "Input not set"
 
 		with torch.no_grad():
 			go = grad_output.reshape(-1, grad_output.size(-1))
@@ -132,6 +115,9 @@ class LinearDW(nn.Linear, LayerDW):
 				self.bias.grad = (
 					grads_b if self.bias.grad is None else self.bias.grad + grads_b
 				)  # accumulate
+
+		self.ctx["grad_output"][mb_id] = None
+		self.ctx["input"][mb_id] = None
 
 
 def replace_linear_with_linear_dw(model, device):

@@ -238,7 +238,7 @@ def generate_full_remat_schedule(placement, n_micro_batches, signatures):
 		for i in range(n_micro_batches):
 			for id_ in ids:
 				_add_forward_pass(
-					schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.REMAT_SELECTION: "full"}
+					schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.SAVE: False}
 				)
 		# All backward
 		for i in range(n_micro_batches):
@@ -406,40 +406,51 @@ def schedule_from_str(schedule_str, placement, signatures):
 				case "F":
 					to_recompute_forward.append(f)
 					_add_forward_pass(
-						schedule,
-						placement,
-						rank,
-						f,
-						rank,
-						signatures[rank],
-						**{OpOptions.REMAT_SELECTION: "full"},
+						schedule, placement, rank, f, rank, signatures[rank], **{OpOptions.SAVE: False}
 					)
 					f += 1
 				case "r":
 					mb_id = to_recompute_forward.pop(0)
 					schedule.append(Operation(rank, mb_id, OperationType.FORWARD, rank))
 				case "a":
-					_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank], **{OpOptions.DEL_ACT_BW: True})
+					_add_backward_pass(
+						schedule, placement, rank, b, rank, signatures[rank], **{OpOptions.DEL_ACT_BW: True}
+					)
 					schedule.pop(-1)
 					to_recompute_bact.append(b)
 					b += 1
 				case "g":
-					_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank], **{OpOptions.DEL_GRAD_BW: True})
+					_add_backward_pass(
+						schedule, placement, rank, b, rank, signatures[rank], **{OpOptions.DEL_GRAD_BW: True}
+					)
 					schedule.pop(-1)
 					to_recompute_bgrads.append(b)
 					b += 1
 				case "B":
-					_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank], **{OpOptions.DEL_ACT_BW: True, OpOptions.DEL_GRAD_BW: True})
+					_add_backward_pass(
+						schedule,
+						placement,
+						rank,
+						b,
+						rank,
+						signatures[rank],
+						**{OpOptions.DEL_ACT_BW: True, OpOptions.DEL_GRAD_BW: True},
+					)
 					schedule.pop(-1)  # hack: remove the backward wrt weights
 					to_recompute_bact.append(b)
 					to_recompute_bgrads.append(b)
 					b += 1
 				case "p":
 					mb_id = to_recompute_bact.pop(0)
-					schedule.append(Operation(rank, mb_id, OperationType.FORWARD, rank), **{OpOptions.REMAT_ACT_BW: True})
+					schedule.append(
+						Operation(rank, mb_id, OperationType.FORWARD, rank), **{OpOptions.REMAT_ACT_BW: True}
+					)
 				case "P":
 					mb_id = to_recompute_bgrads.pop(0)
-					schedule.append(Operation(rank, mb_id, OperationType.BACKWARD_INPUTS, rank), **{OpOptions.REMAT_GRAD_BW: True})
+					schedule.append(
+						Operation(rank, mb_id, OperationType.BACKWARD_INPUTS, rank),
+						**{OpOptions.REMAT_GRAD_BW: True},
+					)
 				case "AR":
 					pass  # we will add anyway later
 

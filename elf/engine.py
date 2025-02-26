@@ -278,6 +278,12 @@ class Engine:
 						logger.warning(f"Tried to compute loss backward on a non-last block {block}")
 						continue
 
+				case OperationType.RECOMPUTE_FORWARD:
+					block.recompute_forward(op.mb_id, **op.options)
+
+				case OperationType.RECOMPUTE_BACKWARD_INPUTS:
+					block.recompute_backward_inputs(op.mb_id, **op.options)
+
 				case OperationType.ALL_REDUCE_PARAM_GRADS:
 					block.scale_grads(sum(mb_sizes))  # we also average out the gradients here
 					block.all_reduce_param_grads(**op.options)

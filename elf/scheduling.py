@@ -26,6 +26,8 @@ class OperationType(Enum):
 	LOSS_FORWARD = 7
 	LOSS_BACKWARD = 8
 	ALL_REDUCE_PARAM_GRADS = 9
+	RECOMPUTE_FORWARD = 10
+	RECOMPUTE_BACKWARD_INPUTS = 11
 
 	def __repr__(self) -> str:
 		return self.name.lower()
@@ -39,11 +41,13 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	Options that can be passed to operations to modify their behaviour
 	"""
 
-	REMAT_SELECTION = auto()
-	DEL_ACT_BW = auto()
-	DEL_GRAD_BW = auto()
-	REMAT_ACT_BW = auto()
-	REMAT_GRAD_BW = auto()
+	REMAT_STRATEGY = auto()
+
+	# SAVE is used differently depending on the operation type
+	# for forward, it's a boolean to save the activations or not
+	# for backward, it's a string among ["full", "gradients", "none"]. "full" means keeping the partial activations and gradients, "gradients" means only the gradients, "none" means deleting both.
+	SAVE = auto()
+	
 	BATCHED_COMM = auto()
 	OFFLOAD_DW = auto()
 
@@ -233,19 +237,25 @@ def schedule_to_str(schedule, print_comms=False):
 		OperationType.BACKWARD_INPUTS: "b",
 		OperationType.BACKWARD_PARAMS: "w",
 		OperationType.SEND_BACKWARD: "sb",
+		OperationType.RECOMPUTE_FORWARD: "R",
+		OperationType.RECOMPUTE_BACKWARD_INPUTS: "R*",
 		OperationType.ALL_REDUCE_PARAM_GRADS: "(AR)",
 	}
 
 	def shorten(op):
 		letter = reprs[op.op]
-		if (
-			op.op == OperationType.FORWARD and op.options.get(OpOptions.REMAT_SELECTION, False)
-		):
-			letter = "F"
-		elif (
-			op.op == OperationType.BACKWARD_INPUTS and op.options.get(OpOptions.REMAT_SELECTION, False)
-		):
-			letter = "B"
+		if op.op == OperationType.FORWARD:
+			is_recomputed = not op.options.get(OpOptions.SAVE, True)
+			is_recomputed |= bool(op.options.get(OpOptions.REMAT_STRATEGY, False))
+			letter = "F" if is_recomputed else "f"
+		elif op.op == OperationType.BACKWARD_INPUTS:
+			match op.options.get(OpOptions.SAVE, "full"):
+				case "full":
+					letter = "b"
+				case "gradients":
+					letter = "b*"
+				case "none":
+					letter = "B"
 		return letter
 
 	comm_types = {
@@ -291,10 +301,7 @@ def check_schedule_validity(schedule):
 
 		for mb_id in rank_mb_ids:
 			mb_ops = [op for op in rank_ops if op.mb_id == mb_id]
-			i, _ = find(
-				mb_ops,
-				lambda op: op.op == OperationType.FORWARD
-			)
+			i, _ = find(mb_ops, lambda op: op.op == OperationType.FORWARD)
 			# in case of no backward, we allow to have 0 forward without remat
 			j, _ = find(mb_ops, lambda op: op.op == OperationType.BACKWARD_INPUTS)
 			assert i != -1 or j == -1, f"[Rank {rank}] Forward should be present for microbatch {mb_id}"
