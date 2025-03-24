@@ -33,7 +33,7 @@ def split_graph(graph, times, memories, n=3):
 
 	for node in nodes:
 		node_time = np.median(times.get(node.name, 0))
-		if current_time + node_time > target_time * (len(parts) + 1) and len(parts) < n:
+		if current_time > target_time * (len(parts) + 1) and len(parts) < n:
 			parts.append(current_part)
 			current_part = []
 		current_part.append(node)

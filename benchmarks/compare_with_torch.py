@@ -22,9 +22,10 @@ args = parser.parse_args()
 
 n_stages = args.pp
 n_procs = args.pp
-batch_size = 32
+nmb = args.pp * 2
+batch_size = nmb * 2
 seq_len = 512
-model = SimpleTransformer(4000, 2048, 8 * args.pp, 512)
+model = SimpleTransformer(2000, 1024, 4 * args.pp, seq_len)
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
@@ -34,23 +35,20 @@ mb_size = batch_size // n_procs
 def get_part(rank):
 	blocks_per_stage = len(model.blocks) // n_stages
 	if rank == 0:
-		return nn.Sequential(model.embed, *model.blocks[:blocks_per_stage]).cuda(), inputs.clone()[
-			:mb_size
-		].cuda()
+		return nn.Sequential(model.embed, *model.blocks[:blocks_per_stage]).cuda()
 	elif rank == n_procs - 1:
-		return nn.Sequential(*model.blocks[-blocks_per_stage:], model.head).cuda(), torch.randn(
-			mb_size, seq_len, model.hidden_dim
-		).cuda()
+		return nn.Sequential(*model.blocks[-blocks_per_stage:], model.head).cuda()
 	else:
 		return nn.Sequential(
 			*model.blocks[blocks_per_stage * rank : blocks_per_stage * (rank + 1)]
-		).cuda(), torch.randn(mb_size, seq_len, model.hidden_dim).cuda()
+		).cuda()
 
 
 def pippy():
-	part, sample = get_part(rank)
+	part = get_part(rank)
 	stage = PiPPy.PipelineStage(part, rank, n_stages, torch.cuda.current_device())
-	schedule = PiPPy.Schedule1F1B(stage, n_stages, loss_fn=loss_fn)
+	# schedule = PiPPy.Schedule1F1B(stage, n_stages, loss_fn=loss_fn)
+	schedule = PiPPy.ScheduleInterleavedZeroBubble([stage], nmb, loss_fn=loss_fn)
 	# Warmup
 	for _ in range(5):
 		if rank == 0:
@@ -76,8 +74,12 @@ def pippy():
 
 
 def elf():
-	replace_linear_with_linear_dw(model, "cuda")
-	pipe = MyPipe.Pipeline(model, inputs.clone(), schedule="zbh2")
+	part = get_part(rank)
+	replace_linear_with_linear_dw(part, "cpu")
+	sources, dsts = MyPipe.get_sources_targets_sequential(list(range(world_size)))
+	pipe = MyPipe.Pipeline(
+		part, None, partitioner=False, schedule="zbh2", sources=sources, targets=dsts
+	)
 	# Warmup
 	for _ in range(5):
 		y, loss = pipe(inputs.clone(), targets.clone(), loss_fn)
@@ -101,6 +103,11 @@ if __name__ == "__main__":
 	targets = targets.cuda()
 
 	torch_time, torch_mem = pippy()
+
+	dist.barrier()
+	torch.cuda.empty_cache()
+	torch.cuda.synchronize()
+
 	elf_time, elf_mem = elf()
 
 	# Gather memory stats from all GPUs
@@ -116,7 +123,12 @@ if __name__ == "__main__":
 
 	if rank == 0:
 		# Log config
-		config_dict = {"pp_size": args.pp, "batch_size": batch_size, "seq_len": seq_len}
+		config_dict = {
+			"pp_size": args.pp,
+			"batch_size": batch_size,
+			"seq_len": seq_len,
+			"schedule": "zbh2",
+		}
 
 		wandb.init(
 			project="compare-frameworks",

@@ -7,6 +7,7 @@ class LinearDX(torch.autograd.Function):
 	def forward(ctx, input, linear):
 		ctx.linear = linear
 		linear.last_input = input
+		ctx.save_for_backward(input) # used in dL/dw, we mark it as saved here to force torch.utils.checkpoint to recompute it
 		return torch.nn.functional.linear(input, linear.weight, linear.bias)
 
 	@staticmethod
@@ -63,7 +64,7 @@ class LayerDW(nn.Module):
 
 	def delete(self, queue, idx):
 		values = self.ctx[queue]
-		if values[idx] is None:
+		if idx >= len(values) or values[idx] is None:
 			raise ValueError(f"{queue} at index {idx} not set")
 		values[idx] = None
 
@@ -96,8 +97,8 @@ class LinearDW(nn.Linear, LayerDW):
 		assert len(self.ctx["input"]) >= mb_id, "No input kept for backward"
 		grad_output = self.ctx["grad_output"][mb_id]
 		inputs = self.ctx["input"][mb_id]
-		assert grad_output is not None, "Grad output not set"
-		assert inputs is not None, "Input not set"
+		assert grad_output is not None, f"Grad output not set for mb {mb_id}"
+		assert inputs is not None, f"Input not set for mb {mb_id}"
 
 		with torch.no_grad():
 			go = grad_output.reshape(-1, grad_output.size(-1))

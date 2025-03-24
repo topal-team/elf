@@ -9,7 +9,7 @@ from torch.utils.checkpoint import checkpoint
 from contextlib import contextmanager
 
 from .scheduling import OpOptions
-from .utils import Timer, TensorMetadata, recompute_all_context_fn
+from .utils import Timer, TensorMetadata
 from .zb_utils import LayerDW
 
 import logging
@@ -198,17 +198,17 @@ class PipelineBlock:
 			inputs.append(x)
 
 		# By default, checkpoint nothing. Otherwise, use the provided strategy
-		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda _: False)
+		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
 
 		with self._selective_remat(remat_strategy, mb_id):
 			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
 
+			for module in self.model.modules():
+				if isinstance(module, LayerDW):
+					module.move_last_computed("input", mb_id)
+
 		if any(not dst.metadata for var in self.output_variables for dst in var):
 			self._register_out_metadata(y)
-
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
-				module.move_last_computed("input", mb_id)
 
 		# Register outputs to send
 		for output_var, value in zip(self.output_variables, y):
@@ -240,27 +240,23 @@ class PipelineBlock:
 	@contextmanager
 	def _selective_remat(self, remat_strategy, mb_id):
 		# Save original forwards and wrap with checkpoint
-		for module in self.model.modules():
-			if remat_strategy(module):
+		for name, module in self.model.named_modules():
+			if remat_strategy(name, module):
 				original = getattr(module, "forward")
 				setattr(module, "_elf_original_forward", original)
 
-				def wrapped_forward(*args, **kwargs):
+				# Be careful about the scope of "original" here!
+				def wrapped_forward(*args, original=original, **kwargs):
 					return checkpoint(
-						original,
-						*args,
-						**kwargs,
-						use_reentrant=False,
-						context_fn=recompute_all_context_fn(),
+						original, *args, **kwargs, use_reentrant=True
 					)
-					
 
 				setattr(module, "forward", wrapped_forward)
 		try:
 			yield
 		finally:
-			for module in self.model.modules():
-				if remat_strategy(module):
+			for name, module in self.model.named_modules():
+				if remat_strategy(name, module):
 					# Delete unwanted activations
 					# (Should we iterate over submodules here?)
 					if isinstance(module, LayerDW):
@@ -278,8 +274,7 @@ class PipelineBlock:
 		inputs = []
 		for input_var in self.input_variables:
 			value = input_var.get(input_var.saved, mb_id)
-			if value.requires_grad:
-				inputs.append(value)
+			inputs.append(value)
 
 		# We need outputs to start the backward
 		outputs = []
@@ -305,6 +300,9 @@ class PipelineBlock:
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
 				module.move_last_computed("grad_output", mb_id)
+				# In case of recomputation, we need to move the input as well
+				if getattr(module, "last_input", None) is not None:
+					module.move_last_computed("input", mb_id)
 
 		# Register the gradients to send
 		for input_var, value in zip(self.input_variables, input_grads):
@@ -317,7 +315,7 @@ class PipelineBlock:
 		if save != "full":
 			for input_var, value in zip(self.input_variables, inputs):
 				input_var.set(input_var.saved, mb_id, value)
-		
+
 		if save == "none":
 			# save incoming grads for second computation
 			for output_var, grad in zip(self.output_variables, output_grads):
@@ -366,8 +364,9 @@ class PipelineBlock:
 		for input in inputs:
 			if input.requires_grad:
 				grads.append(input.grad.data)
-			else:
-				logger.warning(f"{self} - No gradient computed for var {input}")
+			# This could be a source of bugs, but it's usually just the input of the first block that doesn't require grads
+			# else:
+			# 	logger.warning(f"{self} - No gradient computed for var {input}")
 
 		self.compute_time.append(timer)
 		return grads
@@ -400,11 +399,10 @@ class PipelineBlock:
 			# Save inputs and outputs for second backward
 			for input_var, value in zip(self.input_variables, inputs):
 				input_var.set(input_var.saved, mb_id, value)
-				
+
 			for output_var, value in zip(self.output_variables, y):
 				for output_dst in output_var:
 					output_dst.set(output_dst.saved, mb_id, value)
-
 
 	def recompute_backward_inputs(self, mb_id, **options):
 		"""
@@ -431,7 +429,7 @@ class PipelineBlock:
 			for i, (output, grad) in enumerate(zip(outputs, grads)):
 				retain_graph = i != len(outputs) - 1  # save until the last backward
 				torch.autograd.backward(output, grad, inputs=inputs, retain_graph=retain_graph)
-				
+
 		self.compute_time.append(timer)
 
 		for module in self.model.modules():
