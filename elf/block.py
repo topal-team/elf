@@ -258,9 +258,10 @@ class PipelineBlock:
 			for name, module in self.model.named_modules():
 				if remat_strategy(name, module):
 					# Delete unwanted activations
-					# (Should we iterate over submodules here?)
-					if isinstance(module, LayerDW):
-						module.delete("input", mb_id)
+					# (Should we iterate over submodules here?: yes because we only checkpoint the root, but the LayerDW inside are also recomputed)
+					for submodule in module.modules():
+						if isinstance(submodule, LayerDW):
+							submodule.delete("input", mb_id)
 					# Restore original forwards
 					setattr(module, "forward", getattr(module, "_elf_original_forward"))
 					delattr(module, "_elf_original_forward")
@@ -300,7 +301,7 @@ class PipelineBlock:
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
 				module.move_last_computed("grad_output", mb_id)
-				# In case of recomputation, we need to move the input as well
+				# If we used checkpointing, we need to move the input as well
 				if getattr(module, "last_input", None) is not None:
 					module.move_last_computed("input", mb_id)
 

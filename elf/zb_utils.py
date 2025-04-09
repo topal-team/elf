@@ -6,6 +6,7 @@ class LinearDX(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, input, linear):
 		ctx.linear = linear
+		input = input.detach()
 		linear.last_input = input
 		ctx.save_for_backward(input) # used in dL/dw, we mark it as saved here to force torch.utils.checkpoint to recompute it
 		return torch.nn.functional.linear(input, linear.weight, linear.bias)
@@ -43,18 +44,42 @@ class LayerDW(nn.Module):
 		raise NotImplementedError("Subclasses must implement backward()")
 
 	def clear(self):
+		"""
+		Delete all saved tensors.
+		"""
 		self.ctx["input"].clear()
 		self.ctx["grad_output"].clear()
 
 	def is_empty(self, queue):
+		"""
+		Check if there are any saved tensors in the queue.
+
+		:param queue: queue to check among ["input", "grad_output"]
+		:type queue: str
+		:return: True if there are no saved tensors in the queue, False otherwise
+		:rtype: bool
+		"""
 		return all(x is None for x in self.ctx[queue])
 
 	def _state(self):
+		"""
+		Return the state of the queues as a string.
+		"""
 		ninputs = len([x for x in self.ctx["input"] if x is not None])
 		ngrads = len([x for x in self.ctx["grad_output"] if x is not None])
 		return f"({ninputs},{ngrads})"
 
 	def set(self, queue, idx, value):
+		"""
+		Set a value in the queue at a given index.
+
+		:param queue: queue to set the value in
+		:type queue: str
+		:param idx: index to set the value at
+		:type idx: int
+		:param value: value to set
+		:type value: torch.Tensor
+		"""
 		values = self.ctx[queue]
 		if len(values) <= idx:
 			values.extend([None] * (idx - len(values) + 1))
@@ -63,18 +88,38 @@ class LayerDW(nn.Module):
 		values[idx] = value
 
 	def delete(self, queue, idx):
+		"""
+		Delete a value in the queue at a given index.
+
+		:param queue: queue to delete the value from
+		:type queue: str
+		:param idx: index to delete the value at
+		:type idx: int
+		"""
 		values = self.ctx[queue]
 		if idx >= len(values) or values[idx] is None:
 			raise ValueError(f"{queue} at index {idx} not set")
 		values[idx] = None
 
 	def move_last_computed(self, queue, idx):
+		"""
+		Move the last computed value to the queue at a given index.
+		This should be called after the forward pass for every microbatch.
+
+		:param queue: queue to move the last computed value to
+		:type queue: str
+		:param idx: index to move the last computed value to
+		:type idx: int
+		"""
 		if getattr(self, f"last_{queue}", None) is None:
 			raise ValueError(f"Last {queue} not set")
 		self.set(queue, idx, getattr(self, f"last_{queue}"))
 		setattr(self, f"last_{queue}", None)
 
 	def offload_last(self, idx, to="cpu"):
+		"""
+		Offload the last computed value to a given device.
+		"""
 		grads = self.ctx["grad_output"][idx]
 		inputs = self.ctx["input"][idx]
 		with torch.no_grad():
