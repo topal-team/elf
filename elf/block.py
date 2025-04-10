@@ -247,9 +247,7 @@ class PipelineBlock:
 
 				# Be careful about the scope of "original" here!
 				def wrapped_forward(*args, original=original, **kwargs):
-					return checkpoint(
-						original, *args, **kwargs, use_reentrant=True
-					)
+					return checkpoint(original, *args, **kwargs, use_reentrant=True)
 
 				setattr(module, "forward", wrapped_forward)
 		try:
@@ -309,25 +307,23 @@ class PipelineBlock:
 		for input_var, value in zip(self.input_variables, input_grads):
 			input_var.set(input_var.to_send, mb_id, value)
 
-		save = options.get(OpOptions.SAVE, "full")
-		# can be "full", "gradients" or "none"
+		# We may need input to recompute F before W; we save them here and let W delete them
+		# This is not optimal, we could check here if any module needs recomputation to delete them right away
+		for input_var, value in zip(self.input_variables, inputs):
+			input_var.set(input_var.saved, mb_id, value)
 
-		# If we don't save activations, we need to keep the inputs for recomputation
-		if save != "full":
-			for input_var, value in zip(self.input_variables, inputs):
-				input_var.set(input_var.saved, mb_id, value)
+		strategy = options.get(
+			OpOptions.REMAT_STRATEGY, lambda *_: False
+		)  # by default, no recomputation
 
-		if save == "none":
-			# save incoming grads for second computation
-			for output_var, grad in zip(self.output_variables, output_grads):
-				output_var[0].set(output_var[0].to_process, mb_id, grad)
+		for name, module in self.model.named_modules():
+			if strategy(name, module):
+				for _, submodule in module.named_modules():
+					if isinstance(submodule, LayerDW):
+						submodule.delete("input", mb_id)
 
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
-				if save != "full":  # will recompute F
-					module.delete("input", mb_id)
-				if save == "none":  # will recompute F+B
-					module.delete("grad_output", mb_id)
+					# if save == "none":  # will recompute F+B
+					# 	module.delete("grad_output", mb_id)
 
 	def _compute_forward(self, inputs, timer_name="forward"):
 		"""
@@ -386,24 +382,57 @@ class PipelineBlock:
 		# if we're doing B next, we need to save inputs/outputs
 		# if we're doing W without B however, we don't need to save inputs/outputs
 		save = options.get(OpOptions.SAVE, False)
+		strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
+
+		# Deletes the forward function from modules that don't need recomputation (temporarily)
+		def delete_forward(name, module, strategy=strategy):
+			# If this module needs recomputation, we need to keep it
+			if strategy(name, module):
+				return False
+
+			can_be_deleted = True
+			for subname, submodule in module.named_children():
+				fullname = name + "." + subname if name else subname
+				# If any submodule needs recomputation, we need to keep this one too
+				if not delete_forward(fullname, submodule, strategy):
+					can_be_deleted = False
+
+			if not can_be_deleted:
+				return False
+
+			original_forward = getattr(module, "forward")
+			setattr(module, "_elf_original_forward", original_forward)
+			setattr(module, "forward", lambda *args: args)  # no-op
+
+			return True
+
+		# Remove forward function from modules that don't need recomputation
+		delete_forward("", self.model, strategy)
+
 		if not save:
 			with torch.no_grad():
-				y = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
+				_ = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 		else:
-			y = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
+			_ = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
+		for name, module in self.model.named_modules():
+			if isinstance(module, LayerDW) and getattr(module, "last_input", None) is not None:
 				module.move_last_computed("input", mb_id)
 
-		if save:
-			# Save inputs and outputs for second backward
-			for input_var, value in zip(self.input_variables, inputs):
-				input_var.set(input_var.saved, mb_id, value)
+		# Restore original forwards
+		for name, module in self.model.named_modules():
+			if hasattr(module, "_elf_original_forward"):
+				setattr(module, "forward", getattr(module, "_elf_original_forward"))
+				delattr(module, "_elf_original_forward")
 
-			for output_var, value in zip(self.output_variables, y):
-				for output_dst in output_var:
-					output_dst.set(output_dst.saved, mb_id, value)
+		# if save:
+		# 	# Save inputs and outputs for second backward
+		# 	for input_var, value in zip(self.input_variables, inputs):
+		# 		input_var.set(input_var.saved, mb_id, value)
+
+		# 	for output_var, value in zip(self.output_variables, y):
+		# 		for output_dst in output_var:
+		# 			output_dst.set(output_dst.saved, mb_id, value)
 
 	def recompute_backward_inputs(self, mb_id, **options):
 		"""

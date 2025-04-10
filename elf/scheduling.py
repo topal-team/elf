@@ -41,13 +41,15 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	Options that can be passed to operations to modify their behaviour
 	"""
 
+	# Remat strategy is a function that indicates if we recompute a module or not
+	# (name: str, module: nn.Module) -> bool
+	# It can be used for both forward and backward operations ;
+	# in the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations
 	REMAT_STRATEGY = auto()
 
-	# SAVE is used differently depending on the operation type
 	# for forward, it's a boolean to save the activations or not
-	# for backward, it's a string among ["full", "gradients", "none"]. "full" means keeping the partial activations and gradients, "gradients" means only the gradients, "none" means deleting both.
 	SAVE = auto()
-	
+
 	BATCHED_COMM = auto()
 	OFFLOAD_DW = auto()
 

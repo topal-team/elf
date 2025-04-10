@@ -8,7 +8,9 @@ class LinearDX(torch.autograd.Function):
 		ctx.linear = linear
 		input = input.detach()
 		linear.last_input = input
-		ctx.save_for_backward(input) # used in dL/dw, we mark it as saved here to force torch.utils.checkpoint to recompute it
+		ctx.save_for_backward(
+			input
+		)  # used in dL/dw, we mark it as saved here to force torch.utils.checkpoint to recompute it
 		return torch.nn.functional.linear(input, linear.weight, linear.bias)
 
 	@staticmethod

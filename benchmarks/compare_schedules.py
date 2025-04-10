@@ -92,7 +92,7 @@ if __name__ == "__main__":
 		partitioner = args.partitioner
 		if partitioner == "handcrafted":
 			if "Imb" in s:
-				factors = [53, 58, 57, 56] # hardcoded
+				factors = [53, 58, 57, 56]  # hardcoded
 			else:
 				factors = [n_blocks // world_size for _ in range(world_size)]
 			parts = get_handcrafted_imbalanced_partition(model, rank, placement, factors)
