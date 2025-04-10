@@ -197,6 +197,22 @@ class PipelineBlock:
 
 			inputs.append(x)
 
+		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
+		handle = None
+		if rbb_strategy is not None:
+			for name, module in self.model.named_modules():
+				is_recomputed, is_frontier = rbb_strategy(name, module)
+				if is_frontier:
+
+					def backward_hook(
+						module, grad_input, grad_output, output_vars=self.output_variables, mb_id=mb_id
+					):
+						for grad, output_var in zip(grad_output, output_vars):
+							output_var[0].set(output_var[0].to_process, mb_id, grad)
+
+					handle = module.register_full_backward_hook(backward_hook)
+
+
 		# By default, checkpoint nothing. Otherwise, use the provided strategy
 		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
 
@@ -206,6 +222,9 @@ class PipelineBlock:
 			for module in self.model.modules():
 				if isinstance(module, LayerDW):
 					module.move_last_computed("input", mb_id)
+
+		if handle is not None:
+			handle.remove()
 
 		if any(not dst.metadata for var in self.output_variables for dst in var):
 			self._register_out_metadata(y)
@@ -292,6 +311,7 @@ class PipelineBlock:
 				grad_accumulator += grad
 			output_grads.append(grad_accumulator)
 
+		
 		input_grads = self._compute_backward_inputs(
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
 		)
@@ -316,14 +336,31 @@ class PipelineBlock:
 			OpOptions.REMAT_STRATEGY, lambda *_: False
 		)  # by default, no recomputation
 
+		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
+
 		for name, module in self.model.named_modules():
 			if strategy(name, module):
 				for _, submodule in module.named_modules():
 					if isinstance(submodule, LayerDW):
 						submodule.delete("input", mb_id)
 
-					# if save == "none":  # will recompute F+B
-					# 	module.delete("grad_output", mb_id)
+			if rbb_strategy is not None:
+				is_recomputed, is_frontier = rbb_strategy(name, module)
+				if is_frontier:
+					def forward_hook(module, input, output, output_vars=self.output_variables, mb_id=mb_id):
+						output = (output,) if not isinstance(output, tuple) else output
+						for out, output_var in zip(output, output_vars):
+							output_var[0].set(output_var[0].saved, mb_id, out)
+
+						# Remove the hook after it's been called
+						getattr(module, f"_elf_forward_hook_{mb_id}").remove()
+
+					setattr(module, f"_elf_forward_hook_{mb_id}", module.register_forward_hook(forward_hook))
+
+				if is_recomputed:
+					for _, submodule in module.named_modules():
+						if isinstance(submodule, LayerDW):
+							submodule.delete("grad_output", mb_id)
 
 	def _compute_forward(self, inputs, timer_name="forward"):
 		"""
@@ -411,28 +448,22 @@ class PipelineBlock:
 
 		if not save:
 			with torch.no_grad():
-				_ = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
+				self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 		else:
-			_ = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
+			self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 
-		for name, module in self.model.named_modules():
+			for input_var, value in zip(self.input_variables, inputs):
+				input_var.set(input_var.saved, mb_id, value)
+
+		for _, module in self.model.named_modules():
 			if isinstance(module, LayerDW) and getattr(module, "last_input", None) is not None:
 				module.move_last_computed("input", mb_id)
 
 		# Restore original forwards
-		for name, module in self.model.named_modules():
+		for _, module in self.model.named_modules():
 			if hasattr(module, "_elf_original_forward"):
 				setattr(module, "forward", getattr(module, "_elf_original_forward"))
 				delattr(module, "_elf_original_forward")
-
-		# if save:
-		# 	# Save inputs and outputs for second backward
-		# 	for input_var, value in zip(self.input_variables, inputs):
-		# 		input_var.set(input_var.saved, mb_id, value)
-
-		# 	for output_var, value in zip(self.output_variables, y):
-		# 		for output_dst in output_var:
-		# 			output_dst.set(output_dst.saved, mb_id, value)
 
 	def recompute_backward_inputs(self, mb_id, **options):
 		"""
@@ -463,7 +494,8 @@ class PipelineBlock:
 		self.compute_time.append(timer)
 
 		for module in self.model.modules():
-			if isinstance(module, LayerDW):
+			# Some grads were not recomputed
+			if isinstance(module, LayerDW) and getattr(module, "last_grad_output", None) is not None:
 				module.move_last_computed("grad_output", mb_id)
 
 	def backward_params(self, mb_id, **options):

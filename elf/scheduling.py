@@ -46,6 +46,7 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	# It can be used for both forward and backward operations ;
 	# in the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations
 	REMAT_STRATEGY = auto()
+	RBB_STRATEGY = auto()
 
 	# for forward, it's a boolean to save the activations or not
 	SAVE = auto()
