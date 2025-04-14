@@ -186,6 +186,10 @@ class PipelineBlock:
 	def forward(self, mb_id, **options):
 		"""
 		Basic forward pass operation
+
+		Possible options:
+		- REMAT_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
+		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
 		"""
 		# Gather all variables needed for forward
 		inputs = []
@@ -198,20 +202,7 @@ class PipelineBlock:
 			inputs.append(x)
 
 		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-		handle = None
-		if rbb_strategy is not None:
-			for name, module in self.model.named_modules():
-				is_recomputed, is_frontier = rbb_strategy(name, module)
-				if is_frontier:
-
-					def backward_hook(
-						module, grad_input, grad_output, output_vars=self.output_variables, mb_id=mb_id
-					):
-						for grad, output_var in zip(grad_output, output_vars):
-							output_var[0].set(output_var[0].to_process, mb_id, grad)
-
-					handle = module.register_full_backward_hook(backward_hook)
-
+		handles = self._register_backward_hooks(rbb_strategy, mb_id)
 
 		# By default, checkpoint nothing. Otherwise, use the provided strategy
 		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
@@ -223,7 +214,7 @@ class PipelineBlock:
 				if isinstance(module, LayerDW):
 					module.move_last_computed("input", mb_id)
 
-		if handle is not None:
+		for handle in handles:
 			handle.remove()
 
 		if any(not dst.metadata for var in self.output_variables for dst in var):
@@ -238,15 +229,8 @@ class PipelineBlock:
 		for input_var, value in zip(self.input_variables, inputs):
 			input_var.set(input_var.saved, mb_id, value)
 
-		# Save outputs for backward, except if specified otherwise
-		save = options.get(OpOptions.SAVE, True)
-		if save:
-			for output_var, value in zip(self.output_variables, y):
-				output_var[0].set(output_var[0].saved, mb_id, value)  # save only to first, we only need one
-		else:
-			for module in self.model.modules():
-				if isinstance(module, LayerDW):
-					module.delete("input", mb_id)
+		for output_var, value in zip(self.output_variables, y):
+			output_var[0].set(output_var[0].saved, mb_id, value)  # save only to first, we only need one
 
 		# If this is the last block, return the output
 		if self.is_last:
@@ -283,9 +267,48 @@ class PipelineBlock:
 					setattr(module, "forward", getattr(module, "_elf_original_forward"))
 					delattr(module, "_elf_original_forward")
 
+	def _register_forward_hooks(self, rbb_strategy, mb_id):
+		handles = []
+		if rbb_strategy is not None:
+			for name, module in self.model.named_modules():
+				is_recomputed, is_frontier = rbb_strategy(name, module)
+				if is_frontier:
+
+					def forward_hook(module, input, output, output_vars=self.output_variables, mb_id=mb_id):
+						output = (output,) if not isinstance(output, tuple) else output
+						for out, output_var in zip(output, output_vars):
+							output_var[0].set(output_var[0].saved, mb_id, out)
+
+					handle = module.register_forward_hook(forward_hook)
+					handles.append(handle)
+
+		return handles
+
+	def _register_backward_hooks(self, rbb_strategy, mb_id):
+		handles = []
+		if rbb_strategy is not None:
+			for name, module in self.model.named_modules():
+				is_recomputed, is_frontier = rbb_strategy(name, module)
+				if is_frontier:
+
+					def backward_hook(
+						module, grad_input, grad_output, output_vars=self.output_variables, mb_id=mb_id
+					):
+						for grad, output_var in zip(grad_output, output_vars):
+							output_var[0].set(output_var[0].to_process, mb_id, grad)
+
+					handle = module.register_full_backward_hook(backward_hook)
+					handles.append(handle)
+
+		return handles
+
 	def backward_inputs(self, mb_id, **options):
 		"""
 		Perform the backward pass for the inputs of the model
+
+		Possible options:
+		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
+		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
 		"""
 		# We need inputs to get their gradients later on
 		# TODO: we don't actually need their data! find a way to get gradients without them (maybe GradientEdge?)
@@ -312,9 +335,20 @@ class PipelineBlock:
 			output_grads.append(grad_accumulator)
 
 		
+		rbf_strategy = options.get(
+			OpOptions.RBF_STRATEGY, lambda *_: False
+		)  # by default, no recomputation
+
+		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
+
+		handles = self._register_backward_hooks(rbb_strategy, mb_id) # if we recompute forward, the actual forward is done there, meaning we need to setup hooks here
+
 		input_grads = self._compute_backward_inputs(
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
 		)
+
+		for handle in handles:
+			handle.remove()
 
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
@@ -332,31 +366,14 @@ class PipelineBlock:
 		for input_var, value in zip(self.input_variables, inputs):
 			input_var.set(input_var.saved, mb_id, value)
 
-		strategy = options.get(
-			OpOptions.REMAT_STRATEGY, lambda *_: False
-		)  # by default, no recomputation
-
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-
 		for name, module in self.model.named_modules():
-			if strategy(name, module):
+			if rbf_strategy(name, module):
 				for _, submodule in module.named_modules():
 					if isinstance(submodule, LayerDW):
 						submodule.delete("input", mb_id)
 
 			if rbb_strategy is not None:
 				is_recomputed, is_frontier = rbb_strategy(name, module)
-				if is_frontier:
-					def forward_hook(module, input, output, output_vars=self.output_variables, mb_id=mb_id):
-						output = (output,) if not isinstance(output, tuple) else output
-						for out, output_var in zip(output, output_vars):
-							output_var[0].set(output_var[0].saved, mb_id, out)
-
-						# Remove the hook after it's been called
-						getattr(module, f"_elf_forward_hook_{mb_id}").remove()
-
-					setattr(module, f"_elf_forward_hook_{mb_id}", module.register_forward_hook(forward_hook))
-
 				if is_recomputed:
 					for _, submodule in module.named_modules():
 						if isinstance(submodule, LayerDW):
@@ -408,6 +425,11 @@ class PipelineBlock:
 	def recompute_forward(self, mb_id, **options):
 		"""
 		Recompute the forward pass of the model
+
+		Possible options:
+		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
+		- SAVE: bool - Whether to save the activations of the forward pass. If set to False, this allows us to compute under no_grad and therefore save some memory.
+		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
 		"""
 		# Inputs should have been saved by a previous forward pass
 		inputs = []
@@ -419,10 +441,10 @@ class PipelineBlock:
 		# if we're doing B next, we need to save inputs/outputs
 		# if we're doing W without B however, we don't need to save inputs/outputs
 		save = options.get(OpOptions.SAVE, False)
-		strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
+		rbf_strategy = options.get(OpOptions.RBF_STRATEGY, lambda *_: False)
 
 		# Deletes the forward function from modules that don't need recomputation (temporarily)
-		def delete_forward(name, module, strategy=strategy):
+		def delete_forward(name, module, strategy=rbf_strategy):
 			# If this module needs recomputation, we need to keep it
 			if strategy(name, module):
 				return False
@@ -444,8 +466,11 @@ class PipelineBlock:
 			return True
 
 		# Remove forward function from modules that don't need recomputation
-		delete_forward("", self.model, strategy)
+		delete_forward("", self.model, rbf_strategy)
 
+		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
+		handles = self._register_forward_hooks(rbb_strategy, mb_id)
+		
 		if not save:
 			with torch.no_grad():
 				self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
@@ -454,6 +479,9 @@ class PipelineBlock:
 
 			for input_var, value in zip(self.input_variables, inputs):
 				input_var.set(input_var.saved, mb_id, value)
+
+		for handle in handles:
+			handle.remove()
 
 		for _, module in self.model.named_modules():
 			if isinstance(module, LayerDW) and getattr(module, "last_input", None) is not None:
@@ -493,7 +521,7 @@ class PipelineBlock:
 
 		self.compute_time.append(timer)
 
-		for module in self.model.modules():
+		for name, module in self.model.named_modules():
 			# Some grads were not recomputed
 			if isinstance(module, LayerDW) and getattr(module, "last_grad_output", None) is not None:
 				module.move_last_computed("grad_output", mb_id)
