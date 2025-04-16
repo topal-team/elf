@@ -51,6 +51,8 @@ class LayerDW(nn.Module):
 		"""
 		self.ctx["input"].clear()
 		self.ctx["grad_output"].clear()
+		self.last_input = None
+		self.last_grad_output = None
 
 	def is_empty(self, queue):
 		"""

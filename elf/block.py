@@ -334,14 +334,15 @@ class PipelineBlock:
 				grad_accumulator += grad
 			output_grads.append(grad_accumulator)
 
-		
 		rbf_strategy = options.get(
 			OpOptions.RBF_STRATEGY, lambda *_: False
 		)  # by default, no recomputation
 
 		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
 
-		handles = self._register_backward_hooks(rbb_strategy, mb_id) # if we recompute forward, the actual forward is done there, meaning we need to setup hooks here
+		handles = self._register_backward_hooks(
+			rbb_strategy, mb_id
+		)  # if we recompute forward, the actual forward is done there, meaning we need to setup hooks here
 
 		input_grads = self._compute_backward_inputs(
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
@@ -470,7 +471,7 @@ class PipelineBlock:
 
 		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
 		handles = self._register_forward_hooks(rbb_strategy, mb_id)
-		
+
 		if not save:
 			with torch.no_grad():
 				self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
