@@ -12,7 +12,7 @@ from elf.pipeline import Pipeline, get_sources_targets_sequential
 from models.simple import ChainTransformer
 from elf.utils import Timer, pretty_print_params
 from elf.zb_utils import replace_linear_with_linear_dw
-from local.benchmark_utils import get_handcrafted_imbalanced_partition
+from benchmarks.benchmark_utils import get_handcrafted_imbalanced_partition
 
 import logging
 
