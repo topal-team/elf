@@ -350,7 +350,7 @@ def generate_zbh2_schedule(placement, n_micro_batches, signatures):
 
 		schedule.append(Operation(rank, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
 
-		return schedule
+	return schedule
 
 
 def generate_inference_schedule(placement, n_micro_batches, signatures):
