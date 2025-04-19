@@ -15,8 +15,7 @@ from models.simple import ChainTransformer, FullTransformer  # noqa: F401
 from benchmarks.benchmark_utils import bench, get_handcrafted_imbalanced_partition
 from benchmarks.zb_schedulers import FullRematScheduler, PartialRematScheduler
 
-logging.getLogger().setLevel(logging.INFO)
-
+logging.basicConfig(level=logging.INFO)
 
 def setup_logging(log_level: str) -> None:
 	"""Configure logging level based on command line argument."""
@@ -99,7 +98,7 @@ def process_solution(
 		print(f"{solution_type.capitalize()}:")
 
 	if solution_type in ["remat", "rematf"]:
-		balance = [n // world_size for _ in range(world_size)]
+		balance = balanced_partition(n, world_size)
 		scheduler = FullRematScheduler(solution, base, balance)
 	elif solution_type in ["combined", "combinedf"]:
 		balance = [int(b) for b in solution["b"]]
@@ -111,6 +110,11 @@ def process_solution(
 	parts = get_handcrafted_imbalanced_partition(model, rank, list(range(world_size)), balance)
 	return run_benchmark(model, parts, scheduler, rank=rank)
 
+def balanced_partition(n: int, world_size: int) -> List[int]:
+	"""Distribute blocks evenly, handling remainder."""
+	blocks_per_gpu = n // world_size
+	remainder = n % world_size
+	return [blocks_per_gpu + (1 if i < remainder else 0) for i in range(world_size)]
 
 def main():
 	parser = argparse.ArgumentParser()
@@ -122,9 +126,9 @@ def main():
 	rank, world_size = setup_distributed()
 
 	# Model configuration
-	hidden_size = 1024
-	seq_len = 256
-	num_heads = 32
+	hidden_size = 2304
+	seq_len = 1024
+	num_heads = 24
 	dropout = 0.1
 	base = "zbh2"
 
@@ -162,13 +166,11 @@ def main():
 		)
 
 		# Run base benchmark
-		if n < 256:  # 256 for zbh2
-			grad_acc = 2 if not base_is_possible else 1
-			if rank == 0:
-				print(f"Base {base} uses gradient accumulation of {grad_acc} for n = {n}")
-			balance = [n // world_size for _ in range(world_size)]
+		if base_is_possible:  # 256 for zbh2
+			# Distribute blocks evenly, handling remainder
+			balance = balanced_partition(n, world_size)
 			parts = get_handcrafted_imbalanced_partition(model, rank, list(range(world_size)), balance)
-			iter_time, all_peak_mems = run_benchmark(model, parts, base, grad_acc, rank)
+			iter_time, all_peak_mems = run_benchmark(model, parts, base, 1, rank)
 			if rank == 0:
 				results[str(n)]["base"]["time"] = iter_time
 				results[str(n)]["base"]["peak_mems"] = [float(m) for m in all_peak_mems]
