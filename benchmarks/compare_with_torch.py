@@ -18,18 +18,48 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--pp", type=int, default=4, help="Pipeline parallelism degree")
 parser.add_argument("--run_id", type=str, default="", help="Run ID")
+parser.add_argument(
+	"--schedule",
+	type=str,
+	default="zbh2",
+	help="Pipeline schedule type (supported: 1f1b, zbh1, zbh2, afab)",
+)
+parser.add_argument("--niter", type=int, default=10, help="Number of iterations")
 args = parser.parse_args()
 
 n_stages = args.pp
 n_procs = args.pp
 nmb = args.pp * 2
 batch_size = nmb * 2
+mb_size = batch_size // nmb
 seq_len = 512
-model = SimpleTransformer(2000, 1024, 4 * args.pp, seq_len)
-inputs = model.get_sample(batch_size)
+model = SimpleTransformer(2000, 1024, 24, seq_len)
+inputs = model.get_sample(batch_size).requires_grad_(True)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
-mb_size = batch_size // n_procs
+
+
+def get_schedule(schedule_type, stage, n_stages, nmb):
+	"""
+	Returns the appropriate schedule object for PiPPy based on the schedule type.
+	This function maps ELF schedule names to their PiPPy equivalents.
+
+	:param schedule_type: The type of schedule to use (e.g., "1f1b", "zbh1", "zbh2")
+	:param stage: PiPPy pipeline stage
+	:param n_stages: Number of pipeline stages
+	:param nmb_size: Number of microbatches
+	:return: A PiPPy schedule object
+	"""
+	schedule_type = schedule_type.lower()
+
+	if schedule_type == "1f1b":
+		return PiPPy.Schedule1F1B(stage, nmb, loss_fn=loss_fn)
+	elif schedule_type == "zbh1":
+		return PiPPy.ScheduleInterleavedZeroBubble([stage], nmb, loss_fn=loss_fn)
+	elif schedule_type == "afab":
+		return PiPPy.ScheduleGPipe(stage, nmb, loss_fn=loss_fn)
+	else:
+		raise ValueError(f"Unknown schedule type '{schedule_type}' for PiPPy")
 
 
 def get_part(rank):
@@ -47,8 +77,7 @@ def get_part(rank):
 def pippy():
 	part = get_part(rank)
 	stage = PiPPy.PipelineStage(part, rank, n_stages, torch.cuda.current_device())
-	# schedule = PiPPy.Schedule1F1B(stage, n_stages, loss_fn=loss_fn)
-	schedule = PiPPy.ScheduleInterleavedZeroBubble([stage], nmb, loss_fn=loss_fn)
+	schedule = get_schedule(args.schedule, stage, n_stages, nmb)
 	# Warmup
 	for _ in range(5):
 		if rank == 0:
@@ -61,7 +90,7 @@ def pippy():
 
 	torch.cuda.reset_peak_memory_stats()
 	with Timer() as timer:
-		for _ in range(10):
+		for _ in range(args.niter):
 			if rank == 0:
 				schedule.step(inputs.clone())
 			elif rank == world_size - 1:
@@ -78,7 +107,7 @@ def elf():
 	replace_linear_with_linear_dw(part, "cpu")
 	sources, dsts = MyPipe.get_sources_targets_sequential(list(range(world_size)))
 	pipe = MyPipe.Pipeline(
-		part, None, partitioner=False, schedule="zbh2", sources=sources, targets=dsts
+		part, None, partitioner=False, schedule=args.schedule, sources=sources, targets=dsts
 	)
 	# Warmup
 	for _ in range(5):
@@ -86,7 +115,7 @@ def elf():
 
 	torch.cuda.reset_peak_memory_stats()
 	with Timer() as timer:
-		for _ in range(10):
+		for _ in range(args.niter):
 			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn)
 
 	return timer.time(), torch.cuda.max_memory_allocated() / 2**30
@@ -127,7 +156,7 @@ if __name__ == "__main__":
 			"pp_size": args.pp,
 			"batch_size": batch_size,
 			"seq_len": seq_len,
-			"schedule": "zbh2",
+			"schedule": args.schedule,
 		}
 
 		wandb.init(

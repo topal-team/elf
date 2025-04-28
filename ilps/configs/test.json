@@ -1,0 +1,11 @@
+{
+    "metadata": {
+        "GPU": "V100"
+    },
+    "model": {
+        "hidden_dim": 4096,
+        "seq_len": 256,
+        "n_heads": 32,
+        "dropout": 0.1
+    }
+}

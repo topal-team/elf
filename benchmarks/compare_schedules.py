@@ -59,7 +59,7 @@ if __name__ == "__main__":
 
 	# torch.cuda.cudart().cudaProfilerStart()
 
-	n_blocks = 224
+	n_blocks = 128
 
 	model = ChainTransformer(1024, n_blocks, 256, 32, 0.1)
 	if rank == 0:
@@ -73,28 +73,23 @@ if __name__ == "__main__":
 		# ("Hanayo 1W", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
 		# ("Hanayo 2W", (list(range(world_size)) + list(reversed(range(world_size)))) * 2, "hanayo"),
 		# ("Full Remat", list(range(world_size)), "full_remat"),
-		# ("ZBH1", list(range(world_size)), "zbh1"),
-		# ("SRILP-ZBH2", list(range(world_size)), sr_zb),
-		# ("ZBH2", list(range(world_size)), "zbh2"),
-		("Imb-ZBH2", list(range(world_size)), "zbh2")
-		# ("Manual ZBH2", list(range(world_size)), manual_zb),
+		("ZBH1", list(range(world_size)), "zbh1"),
+		("ZBH2", list(range(world_size)), "zbh2"),
+		("ZBV", list(range(world_size)) + list(reversed(range(world_size))), "zbv"),
 	]
-
-	split_size = 2
 	n_micro_batches = world_size * 2
+	split_size = 2
 	batch_size = split_size * n_micro_batches
 	n_iterations = 20
 
 	replaced_dw = False
 
 	for s, placement, schedule in setups:
+		nparts = len(placement)
 		model.cpu()
 		partitioner = args.partitioner
 		if partitioner == "handcrafted":
-			if "Imb" in s:
-				factors = [53, 58, 57, 56]  # hardcoded
-			else:
-				factors = [n_blocks // world_size for _ in range(world_size)]
+			factors = [n_blocks // nparts for _ in range(nparts)]
 			parts = get_handcrafted_imbalanced_partition(model, rank, placement, factors)
 			sources, dsts = get_sources_targets_sequential(placement)  # "targets" is already used :)
 			partitioner = False
@@ -102,7 +97,7 @@ if __name__ == "__main__":
 			parts = model
 			sources, dsts = None, None
 
-		if "ZBH" in s and not replaced_dw:
+		if "ZB" in s and not replaced_dw:
 			replaced_dw = True
 			replace_linear_with_linear_dw(model, "cpu")
 

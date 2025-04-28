@@ -345,6 +345,8 @@ class Pipeline:
 				return generate_zbh1_schedule
 			case "zbh2":
 				return generate_zbh2_schedule
+			case "zbv":
+				return generate_zbv_schedule
 			case "inference":
 				return generate_inference_schedule
 			case _:

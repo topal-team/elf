@@ -4,13 +4,11 @@ Individual stage computation and communication management
 
 import torch
 import torch.distributed as dist
-from torch.utils.checkpoint import checkpoint
-
-from contextlib import contextmanager
 
 from .scheduling import OpOptions
 from .utils import Timer, TensorMetadata
 from .zb_utils import LayerDW
+from .remat import RematManager
 
 import logging
 
@@ -180,6 +178,9 @@ class PipelineBlock:
 
 		self.compute_time = []  # used to measure idle time
 
+		# Strategy manager to handle RBF and RBB strategies
+		self.remat_manager = RematManager(self)
+
 	def __str__(self) -> str:
 		return f"[Layer {self.id} : GPU {self.rank}]"
 
@@ -201,19 +202,20 @@ class PipelineBlock:
 
 			inputs.append(x)
 
+		# Get strategies from options
 		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-		handles = self._register_backward_hooks(rbb_strategy, mb_id)
-
-		# By default, checkpoint nothing. Otherwise, use the provided strategy
 		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
 
-		with self._selective_remat(remat_strategy, mb_id):
+		# Register hooks and perform rematerialization
+		handles = self.remat_manager.register_backward_hooks(rbb_strategy, mb_id)
+		with self.remat_manager.apply_selective_remat(remat_strategy, mb_id):
 			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
 
 			for module in self.model.modules():
 				if isinstance(module, LayerDW):
 					module.move_last_computed("input", mb_id)
 
+		# Clean up hooks
 		for handle in handles:
 			handle.remove()
 
@@ -239,146 +241,6 @@ class PipelineBlock:
 				assert len(output_var) == 1, "Output of the pipeline has multiple destinations"
 				output.append(output_var[0].get(output_var[0].to_send, mb_id))
 			return output
-
-	@contextmanager
-	def _selective_remat(self, remat_strategy, mb_id):
-		# Save original forwards and wrap with checkpoint
-		for name, module in self.model.named_modules():
-			if remat_strategy(name, module):
-				original = getattr(module, "forward")
-				setattr(module, "_elf_original_forward", original)
-
-				# Be careful about the scope of "original" here!
-				def wrapped_forward(*args, original=original, **kwargs):
-					return checkpoint(original, *args, **kwargs, use_reentrant=True)
-
-				setattr(module, "forward", wrapped_forward)
-		try:
-			yield
-		finally:
-			for name, module in self.model.named_modules():
-				if remat_strategy(name, module):
-					# Delete unwanted activations
-					# (Should we iterate over submodules here?: yes because we only checkpoint the root, but the LayerDW inside are also recomputed)
-					for submodule in module.modules():
-						if isinstance(submodule, LayerDW):
-							submodule.delete("input", mb_id)
-					# Restore original forwards
-					setattr(module, "forward", getattr(module, "_elf_original_forward"))
-					delattr(module, "_elf_original_forward")
-
-	def _register_forward_hooks(self, rbb_strategy, mb_id):
-		handles = []
-		if rbb_strategy is not None:
-			for name, module in self.model.named_modules():
-				is_recomputed, is_frontier = rbb_strategy(name, module)
-				if is_frontier:
-
-					def forward_hook(module, input, output, output_vars=self.output_variables, mb_id=mb_id):
-						output = (output,) if not isinstance(output, tuple) else output
-						for out, output_var in zip(output, output_vars):
-							output_var[0].set(output_var[0].saved, mb_id, out)
-
-					handle = module.register_forward_hook(forward_hook)
-					handles.append(handle)
-
-		return handles
-
-	def _register_backward_hooks(self, rbb_strategy, mb_id):
-		handles = []
-		if rbb_strategy is not None:
-			for name, module in self.model.named_modules():
-				is_recomputed, is_frontier = rbb_strategy(name, module)
-				if is_frontier:
-
-					def backward_hook(
-						module, grad_input, grad_output, output_vars=self.output_variables, mb_id=mb_id
-					):
-						for grad, output_var in zip(grad_output, output_vars):
-							output_var[0].set(output_var[0].to_process, mb_id, grad)
-
-					handle = module.register_full_backward_hook(backward_hook)
-					handles.append(handle)
-
-		return handles
-
-	def backward_inputs(self, mb_id, **options):
-		"""
-		Perform the backward pass for the inputs of the model
-
-		Possible options:
-		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
-		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
-		"""
-		# We need inputs to get their gradients later on
-		# TODO: we don't actually need their data! find a way to get gradients without them (maybe GradientEdge?)
-		inputs = []
-		for input_var in self.input_variables:
-			value = input_var.get(input_var.saved, mb_id)
-			inputs.append(value)
-
-		# We need outputs to start the backward
-		outputs = []
-		for output_var in self.output_variables:
-			value = output_var[0].get(output_var[0].saved, mb_id)
-			outputs.append(value)
-
-		# Gather the incoming gradients
-		# If an output has multiple destinations, we sum up the gradients
-		# Maybe we should time this and add to compute time, but it's probably negligible
-		output_grads = []
-		for output_var in self.output_variables:
-			grad_accumulator = output_var[0].wait_and_pop(mb_id)
-			for dst in output_var[1:]:
-				grad = dst.wait_and_pop(mb_id)
-				grad_accumulator += grad
-			output_grads.append(grad_accumulator)
-
-		rbf_strategy = options.get(
-			OpOptions.RBF_STRATEGY, lambda *_: False
-		)  # by default, no recomputation
-
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-
-		handles = self._register_backward_hooks(
-			rbb_strategy, mb_id
-		)  # if we recompute forward, the actual forward is done there, meaning we need to setup hooks here
-
-		input_grads = self._compute_backward_inputs(
-			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
-		)
-
-		for handle in handles:
-			handle.remove()
-
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
-				module.move_last_computed("grad_output", mb_id)
-				# If we used checkpointing, we need to move the input as well
-				if getattr(module, "last_input", None) is not None:
-					module.move_last_computed("input", mb_id)
-
-		# Register the gradients to send
-		for input_var, value in zip(self.input_variables, input_grads):
-			input_var.set(input_var.to_send, mb_id, value)
-
-		# We may need input to recompute F before W; we save them here and let W delete them
-		# This is not optimal, we could check here if any module needs recomputation to delete them right away
-		for input_var, value in zip(self.input_variables, inputs):
-			input_var.set(input_var.saved, mb_id, value)
-
-		for name, module in self.model.named_modules():
-			if rbf_strategy(name, module):
-				for _, submodule in module.named_modules():
-					if isinstance(submodule, LayerDW):
-						submodule.delete("input", mb_id)
-
-			if rbb_strategy is not None:
-				is_recomputed, is_frontier = rbb_strategy(name, module)
-				if is_recomputed:
-					for _, submodule in module.named_modules():
-						if isinstance(submodule, LayerDW):
-							submodule.delete("grad_output", mb_id)
 
 	def _compute_forward(self, inputs, timer_name="forward"):
 		"""
@@ -439,39 +301,18 @@ class PipelineBlock:
 			value = input_var.get(input_var.saved, mb_id)
 			inputs.append(value)
 
-		# if we're doing B next, we need to save inputs/outputs
-		# if we're doing W without B however, we don't need to save inputs/outputs
+		# Get options and strategies
 		save = options.get(OpOptions.SAVE, False)
 		rbf_strategy = options.get(OpOptions.RBF_STRATEGY, lambda *_: False)
-
-		# Deletes the forward function from modules that don't need recomputation (temporarily)
-		def delete_forward(name, module, strategy=rbf_strategy):
-			# If this module needs recomputation, we need to keep it
-			if strategy(name, module):
-				return False
-
-			can_be_deleted = True
-			for subname, submodule in module.named_children():
-				fullname = name + "." + subname if name else subname
-				# If any submodule needs recomputation, we need to keep this one too
-				if not delete_forward(fullname, submodule, strategy):
-					can_be_deleted = False
-
-			if not can_be_deleted:
-				return False
-
-			original_forward = getattr(module, "forward")
-			setattr(module, "_elf_original_forward", original_forward)
-			setattr(module, "forward", lambda *args: args)  # no-op
-
-			return True
-
-		# Remove forward function from modules that don't need recomputation
-		delete_forward("", self.model, rbf_strategy)
-
 		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-		handles = self._register_forward_hooks(rbb_strategy, mb_id)
 
+		# Prepare modules for recomputation
+		self.remat_manager.prepare_recompute_forward(rbf_strategy)
+
+		# Register hooks for the forward pass
+		handles = self.remat_manager.register_forward_hooks(rbb_strategy, mb_id)
+
+		# Execute forward pass with or without gradient tracking
 		if not save:
 			with torch.no_grad():
 				self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
@@ -481,18 +322,16 @@ class PipelineBlock:
 			for input_var, value in zip(self.input_variables, inputs):
 				input_var.set(input_var.saved, mb_id, value)
 
+		# Clean up hooks
 		for handle in handles:
 			handle.remove()
 
-		for _, module in self.model.named_modules():
+		for module in self.model.modules():
 			if isinstance(module, LayerDW) and getattr(module, "last_input", None) is not None:
 				module.move_last_computed("input", mb_id)
 
-		# Restore original forwards
-		for _, module in self.model.named_modules():
-			if hasattr(module, "_elf_original_forward"):
-				setattr(module, "forward", getattr(module, "_elf_original_forward"))
-				delattr(module, "_elf_original_forward")
+		# Restore original forward functions
+		self.remat_manager.restore_forwards()
 
 	def recompute_backward_inputs(self, mb_id, **options):
 		"""
@@ -766,3 +605,69 @@ class PipelineBlock:
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
 				module.offload_last(to)
+
+	def backward_inputs(self, mb_id, **options):
+		"""
+		Perform the backward pass for the inputs of the model
+
+		Possible options:
+		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
+		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
+		"""
+		# We need inputs to get their gradients later on
+		# TODO: we don't actually need their data! find a way to get gradients without them (maybe GradientEdge?)
+		inputs = []
+		for input_var in self.input_variables:
+			value = input_var.get(input_var.saved, mb_id)
+			inputs.append(value)
+
+		# We need outputs to start the backward
+		outputs = []
+		for output_var in self.output_variables:
+			value = output_var[0].get(output_var[0].saved, mb_id)
+			outputs.append(value)
+
+		# Gather the incoming gradients
+		# If an output has multiple destinations, we sum up the gradients
+		# Maybe we should time this and add to compute time, but it's probably negligible
+		output_grads = []
+		for output_var in self.output_variables:
+			grad_accumulator = output_var[0].wait_and_pop(mb_id)
+			for dst in output_var[1:]:
+				grad = dst.wait_and_pop(mb_id)
+				grad_accumulator += grad
+			output_grads.append(grad_accumulator)
+
+		# Get strategies from options
+		rbf_strategy = options.get(OpOptions.RBF_STRATEGY, lambda *_: False)
+		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
+
+		# Register hooks for backward
+		handles = self.remat_manager.register_backward_hooks(rbb_strategy, mb_id)
+
+		input_grads = self._compute_backward_inputs(
+			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
+		)
+
+		# Clean up hooks
+		for handle in handles:
+			handle.remove()
+
+		for module in self.model.modules():
+			if isinstance(module, LayerDW):
+				module.move_last_computed("grad_output", mb_id)
+				# If we used checkpointing, we need to move the input as well
+				if getattr(module, "last_input", None) is not None:
+					module.move_last_computed("input", mb_id)
+
+		# Register the gradients to send
+		for input_var, value in zip(self.input_variables, input_grads):
+			input_var.set(input_var.to_send, mb_id, value)
+
+		# We may need input to recompute F before W; we save them here and let W delete them
+		# This is not optimal, we could check here if any module needs recomputation to delete them right away
+		for input_var, value in zip(self.input_variables, inputs):
+			input_var.set(input_var.saved, mb_id, value)
+
+		# Process cleanup based on strategies
+		self.remat_manager.process_after_backward(rbf_strategy, rbb_strategy, mb_id)
