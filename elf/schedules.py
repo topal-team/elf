@@ -352,6 +352,112 @@ def generate_zbh2_schedule(placement, n_micro_batches, signatures):
 
 	return schedule
 
+def generate_zbv_schedule(placement, n_micro_batches, signatures):
+	"""
+	ZB-V schedule as in https://arxiv.org/abs/2401.10241
+
+	.. warning::
+		Written to work with 4 processors, 8 micro batches, 2 stages per device. Not tested with other setups.
+	"""
+	schedule = []
+	n_devices = max(placement) + 1
+	stages_per_device = len(placement) // n_devices
+
+	for rank in range(n_devices):
+		fs = [0] * stages_per_device
+		bs = [0] * stages_per_device
+		ws = [0] * stages_per_device
+
+		ids = [i for i in range(len(placement)) if placement[i] == rank]
+		n_warmups = min(n_micro_batches, 2 * (n_devices - rank) - 1)
+
+		# Warmup, phase 1: first stage
+		current = 0
+		for _ in range(n_warmups):
+			_add_forward_pass(schedule, placement, ids[current], fs[current], rank, signatures[ids[current]])
+			fs[current] += 1
+
+		# Warmup, phase 2: alternating stages
+		current = 1
+		for _ in range(2 * n_devices - n_warmups - 1):
+			id_ = ids[current]
+			_add_forward_pass(schedule, placement, id_, fs[current], rank, signatures[id_])
+			fs[current] += 1
+			current = 1 - current
+
+		# Steady, phase 1: last stage
+		current = 1
+		for _ in range(n_devices - rank):
+			_add_forward_pass(schedule, placement, ids[current], fs[current], rank, signatures[ids[current]])
+			fs[current] += 1
+			_add_backward_pass(schedule, placement, ids[current], bs[current], rank, signatures[ids[current]])
+			bs[current] += 1
+			schedule[-1].mb_id = ws[current]
+			ws[current] += 1
+		
+		# Steady, phase 2: alternating stages
+		for _ in range(rank + 1):
+			current = 0
+			_add_forward_pass(schedule, placement, ids[current], fs[current], rank, signatures[ids[current]])
+			fs[current] += 1
+			_add_backward_pass(schedule, placement, ids[current], bs[current], rank, signatures[ids[current]])
+			bs[current] += 1
+			schedule[-1].mb_id = ws[current]
+			ws[current] += 1
+
+			current = 1
+			_add_forward_pass(schedule, placement, ids[current], fs[current], rank, signatures[ids[current]])
+			fs[current] += 1
+			_add_backward_pass(schedule, placement, ids[current], bs[current], rank, signatures[ids[current]])
+			bs[current] += 1
+			schedule[-1].mb_id = ws[current]
+			ws[current] += 1
+
+		# Irregularity in the FBW pattern
+		for _ in range(n_devices - rank - 1):
+			current = 0
+			_add_backward_pass(schedule, placement, ids[current], bs[current], rank, signatures[ids[current]])
+			bs[current] += 1
+			schedule[-1].mb_id = ws[current]
+			ws[current] += 1
+
+			current = 1
+			_add_forward_pass(schedule, placement, ids[current], fs[current], rank, signatures[ids[current]])
+			fs[current] += 1
+			_add_backward_pass(schedule, placement, ids[current], bs[current], rank, signatures[ids[current]])
+			bs[current] += 1
+			schedule[-1].mb_id = ws[current]
+			ws[current] += 1
+
+		# Cooldown: inverse warmup phase
+		n_cooldowns = 2 * n_devices - n_warmups
+		current = 0
+		for _ in range(n_cooldowns):
+			_add_backward_pass(schedule, placement, ids[current], bs[current], rank, signatures[ids[current]])
+			bs[current] += 1
+			schedule.pop(-1) # only B
+			current = 1 - current
+
+		for _ in range(n_devices - rank - 1):
+			current = 0
+			schedule.append(Operation(ids[current], ws[current], OperationType.BACKWARD_PARAMS, rank))
+			ws[current] += 1
+			_add_backward_pass(schedule, placement, ids[current], bs[current], rank, signatures[ids[current]])
+			schedule.pop(-1) # only B
+			bs[current] += 1
+
+		for _ in range(rank + 1):
+			schedule.append(Operation(ids[0], ws[0], OperationType.BACKWARD_PARAMS, rank))
+			ws[0] += 1
+		for _ in range(rank):
+			schedule.append(Operation(ids[1], ws[1], OperationType.BACKWARD_PARAMS, rank))
+			ws[1] += 1
+
+		for id_ in ids:
+			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
+
+	return schedule
+			
 
 def generate_inference_schedule(placement, n_micro_batches, signatures):
 	schedule = []
