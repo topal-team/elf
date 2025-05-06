@@ -11,9 +11,11 @@ source venv/bin/activate
 
 # I recommend installing the nightly version
 # The V100 partition has cuda 12.8, even if no module exists with this version
-pip install --no-cache --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
-pip install --no-cache -r requirements.txt
+pip install --no-cache-dir --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126
+pip install --no-cache-dir -r requirements.txt
 ```
+
+For A100/H100 partitions, you can do the exact same thing in a **different environment** (one per partition), and by adding ``module load arch/{a,h}100`` before.
 
 ### With a container
 
