@@ -1,3 +1,4 @@
+import json
 import os
 import gc
 import sys
@@ -37,8 +38,21 @@ if __name__ == "__main__":
 		"--partitioner",
 		choices=["naive", "constrained", "metis", "dagP", "handcrafted"],
 		required=False,
-		default="naive",
+		default="handcrafted",
 		help="partitioner to distribute the model",
+	)
+	parser.add_argument("--nblocks", type=int, default=16, required=False, help="number of blocks")
+	parser.add_argument(
+		"--hidden-dim", type=int, default=2048, required=False, help="hidden dimension"
+	)
+	parser.add_argument("--seq-len", type=int, default=512, required=False, help="sequence length")
+	parser.add_argument("--niters", type=int, default=30, required=False, help="number of iterations")
+	parser.add_argument(
+		"--output",
+		type=str,
+		default="results/compare_schedules.json",
+		required=False,
+		help="output file",
 	)
 	args = parser.parse_args()
 	match args.log:
@@ -59,20 +73,18 @@ if __name__ == "__main__":
 
 	# torch.cuda.cudart().cudaProfilerStart()
 
-	n_blocks = 128
-
-	model = ChainTransformer(1024, n_blocks, 256, 32, 0.1)
+	model = ChainTransformer(args.hidden_dim, args.nblocks, args.seq_len, 32, 0.1)
 	if rank == 0:
 		print(f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters")
 	loss_fn = model.loss_fn
 
 	setups = [
-		# ("GPipe", list(range(world_size)), "afab"),
-		# ("1f1b", list(range(world_size)), "1f1b"),
-		# ("Megatron", list(range(world_size)) * 2, "1f1b"),
-		# ("Hanayo 1W", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
-		# ("Hanayo 2W", (list(range(world_size)) + list(reversed(range(world_size)))) * 2, "hanayo"),
-		# ("Full Remat", list(range(world_size)), "full_remat"),
+		("GPipe", list(range(world_size)), "afab"),
+		("1f1b", list(range(world_size)), "1f1b"),
+		("Megatron", list(range(world_size)) * 2, "1f1b"),
+		("Hanayo 1W", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
+		("Hanayo 2W", (list(range(world_size)) + list(reversed(range(world_size)))) * 2, "hanayo"),
+		("Full Remat", list(range(world_size)), "full_remat"),
 		("ZBH1", list(range(world_size)), "zbh1"),
 		("ZBH2", list(range(world_size)), "zbh2"),
 		("ZBV", list(range(world_size)) + list(reversed(range(world_size))), "zbv"),
@@ -80,16 +92,20 @@ if __name__ == "__main__":
 	n_micro_batches = world_size * 2
 	split_size = 2
 	batch_size = split_size * n_micro_batches
-	n_iterations = 20
+	n_iterations = args.niters
 
 	replaced_dw = False
+
+	results = {}
 
 	for s, placement, schedule in setups:
 		nparts = len(placement)
 		model.cpu()
 		partitioner = args.partitioner
 		if partitioner == "handcrafted":
-			factors = [n_blocks // nparts for _ in range(nparts)]
+			factors = [
+				(args.nblocks // nparts) + (1 if i < args.nblocks % nparts else 0) for i in range(nparts)
+			]
 			parts = get_handcrafted_imbalanced_partition(model, rank, placement, factors)
 			sources, dsts = get_sources_targets_sequential(placement)  # "targets" is already used :)
 			partitioner = False
@@ -142,16 +158,6 @@ if __name__ == "__main__":
 		dist.barrier()
 		torch.cuda.synchronize()
 
-		if rank == 0:
-			available_mem = (
-				torch.cuda.get_device_properties(local_rank).total_memory - torch.cuda.memory_allocated()
-			)
-			print(f"Available memory: {available_mem / (2**30):.2f}GB")
-			print(f"Allocated memory: {torch.cuda.memory_allocated() / (2**30):.2f}GB")
-			print(
-				f"Occupied by parameters: {sum((p.numel() + p.grad.numel()) * p.element_size() for p in pipe.blocks[0].model.parameters()) / (2**30):.2f}GB"
-			)
-
 		stats = []
 		with Timer() as timer:
 			for i in range(n_iterations):
@@ -184,6 +190,17 @@ if __name__ == "__main__":
 			)
 			print(f"\tPeak memories: {peak_mems} GB")
 
+			results[s] = {
+				"placement": placement,
+				"schedule": schedule,
+				"iteration_times": iteration_times,
+				"idle_times": idle_times,
+				"peak_mems": peak_mems,
+				"total_time": timer.time(),
+				"throughput": n_iterations * batch_size / timer.time(),
+				"time_per_iter": timer.time() / n_iterations,
+			}
+
 		pipe.clear()
 		model.zero_grad(set_to_none=True)
 		del pipe, y, inputs, targets, median_times, mems, itimes
@@ -191,6 +208,10 @@ if __name__ == "__main__":
 		torch.cuda.empty_cache()
 
 	# torch.cuda.cudart().cudaProfilerStop()
+
+	if rank == 0:
+		with open(args.output, "w") as f:
+			json.dump(results, f)
 
 	dist.barrier()
 	if dist.is_initialized():

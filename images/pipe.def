@@ -34,13 +34,13 @@ From: nvcr.io/nvidia/pytorch:24.09-py3
     # Nsight Systems
 
     # Get the debian package
-    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2024_7/nsight-systems-2024.7.1_2024.7.1.84-1_amd64.deb;
+    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_2/nsight-systems-2025.2.1_2025.2.1.130-1_amd64.deb;
     # Extract
-    ar x nsight-systems-2024.7.1_2024.7.1.84-1_amd64.deb ;
+    ar x nsight-systems-2025.2.1_2025.2.1.130-1_amd64.deb ;
     # Extract the important files
     tar xvzf data.tar.gz ;
     # Remove package metadata
-    rm debian-binary control.tar.gz nsight-systems-2024.7.1_2024.7.1.84-1_amd64.deb ;
+    rm debian-binary control.tar.gz nsight-systems-2025.2.1_2025.2.1.130-1_amd64.deb ;
     # Add binary to path. Replace ${pwd} by the correct path if you add it in .bashrc
     export PATH="$(pwd)/opt/nvidia/nsight-systems/2024.7.1/bin":$PATH ;
     # Check installation

@@ -21,25 +21,38 @@ parser.add_argument("--run_id", type=str, default="", help="Run ID")
 parser.add_argument(
 	"--schedule",
 	type=str,
-	default="zbh2",
-	help="Pipeline schedule type (supported: 1f1b, zbh1, zbh2, afab)",
+	default="zbv",
+	help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbv)",
 )
-parser.add_argument("--niter", type=int, default=10, help="Number of iterations")
+parser.add_argument("--niters", type=int, default=10, help="Number of iterations")
 args = parser.parse_args()
 
-n_stages = args.pp
 n_procs = args.pp
 nmb = args.pp * 2
 batch_size = nmb * 2
 mb_size = batch_size // nmb
 seq_len = 512
-model = SimpleTransformer(2000, 1024, 24, seq_len)
-inputs = model.get_sample(batch_size).requires_grad_(True)
+model = SimpleTransformer(2000, 2048, 80, seq_len)
+inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
 
 
-def get_schedule(schedule_type, stage, n_stages, nmb):
+def get_placement(schedule_type, world_size):
+	match schedule_type:
+		case "1f1b" | "zbh1" | "afab":
+			placement = list(range(world_size))
+		case "megatron":
+			placement = list(range(world_size)) * 2
+		case "zbv":
+			placement = list(range(world_size)) + list(reversed(range(world_size)))
+		case _:
+			raise ValueError(f"Unknown schedule type '{args.schedule}'")
+
+	return placement
+
+
+def get_schedule(schedule_type, stages, nmb):
 	"""
 	Returns the appropriate schedule object for PiPPy based on the schedule type.
 	This function maps ELF schedule names to their PiPPy equivalents.
@@ -52,71 +65,124 @@ def get_schedule(schedule_type, stage, n_stages, nmb):
 	"""
 	schedule_type = schedule_type.lower()
 
-	if schedule_type == "1f1b":
-		return PiPPy.Schedule1F1B(stage, nmb, loss_fn=loss_fn)
-	elif schedule_type == "zbh1":
-		return PiPPy.ScheduleInterleavedZeroBubble([stage], nmb, loss_fn=loss_fn)
-	elif schedule_type == "afab":
-		return PiPPy.ScheduleGPipe(stage, nmb, loss_fn=loss_fn)
-	else:
-		raise ValueError(f"Unknown schedule type '{schedule_type}' for PiPPy")
+	match schedule_type:
+		case "afab":
+			assert len(stages) == 1
+			return PiPPy.ScheduleGPipe(stages[0], nmb, loss_fn=loss_fn)
+		case "1f1b":
+			assert len(stages) == 1
+			return PiPPy.Schedule1F1B(stages[0], nmb, loss_fn=loss_fn)
+		case "megatron":
+			assert len(stages) == 2
+			return PiPPy.ScheduleInterleaved1F1B(stages, nmb, loss_fn=loss_fn)
+		case "zbh1":
+			assert len(stages) == 1
+			return PiPPy.ScheduleInterleavedZeroBubble(stages, nmb, loss_fn=loss_fn)
+		case "zbv":
+			assert len(stages) == 2
+			return PiPPy.ScheduleZBVZeroBubble(stages, nmb, loss_fn=loss_fn)
+		case _:
+			raise ValueError(f"Unknown schedule type '{schedule_type}' for PiPPy")
 
 
-def get_part(rank):
-	blocks_per_stage = len(model.blocks) // n_stages
-	if rank == 0:
-		return nn.Sequential(model.embed, *model.blocks[:blocks_per_stage]).cuda()
-	elif rank == n_procs - 1:
-		return nn.Sequential(*model.blocks[-blocks_per_stage:], model.head).cuda()
-	else:
-		return nn.Sequential(
-			*model.blocks[blocks_per_stage * rank : blocks_per_stage * (rank + 1)]
-		).cuda()
+def get_parts(rank, placement):
+	parts = []
+	blocks_per_stage = len(model.blocks) // len(placement)
+	start, end = 0, 0
+	for i, p in enumerate(placement):
+		end += blocks_per_stage + (1 if i < (len(model.blocks) % len(placement)) else 0)
+		if rank != p:
+			start = end
+			continue
+
+		if i == 0:
+			parts.append(nn.Sequential(model.embed, *model.blocks[start:end]).cuda())
+		elif i == len(placement) - 1:
+			parts.append(nn.Sequential(*model.blocks[start:end], model.head).cuda())
+		else:
+			parts.append(nn.Sequential(*model.blocks[start:end]).cuda())
+
+		start = end
+
+	return parts
+
+
+def find_stage_global_idx(rank, placement, local_idx):
+	cpt = 0
+	for i, p in enumerate(placement):
+		if p == rank:
+			if cpt == local_idx:
+				return i
+
+			cpt += 1
+
+	return None
 
 
 def pippy():
-	part = get_part(rank)
-	stage = PiPPy.PipelineStage(part, rank, n_stages, torch.cuda.current_device())
-	schedule = get_schedule(args.schedule, stage, n_stages, nmb)
+	placement = get_placement(args.schedule, world_size)
+	parts = get_parts(rank, placement)
+	n_stages = len(placement)
+	stages = [
+		PiPPy.PipelineStage(
+			p, find_stage_global_idx(rank, placement, i), n_stages, torch.cuda.current_device()
+		)
+		for i, p in enumerate(parts)
+	]
+	schedule = get_schedule(args.schedule, stages, nmb)
+
+	def get_args_kwargs():
+		input_args = []
+		input_kwargs = {}
+		if rank == placement[0]:
+			input_args.append(inputs.clone())
+		if rank == placement[-1]:
+			input_kwargs["target"] = targets.clone()
+
+		return input_args, input_kwargs
+
 	# Warmup
 	for _ in range(5):
-		if rank == 0:
-			schedule.step(inputs.clone())
-		elif rank == world_size - 1:
-			losses = []
-			_ = schedule.step(target=targets.clone(), losses=losses)
-		else:
-			_ = schedule.step()
+		input_args, input_kwargs = get_args_kwargs()
+		_ = schedule.step(*input_args, **input_kwargs)
 
 	torch.cuda.reset_peak_memory_stats()
 	with Timer() as timer:
-		for _ in range(args.niter):
-			if rank == 0:
-				schedule.step(inputs.clone())
-			elif rank == world_size - 1:
-				losses = []
-				_ = schedule.step(target=targets.clone(), losses=losses)
-			else:
-				_ = schedule.step()
+		for _ in range(args.niters):
+			input_args, input_kwargs = get_args_kwargs()
+			_ = schedule.step(*input_args, **input_kwargs)
 
 	return timer.time(), torch.cuda.max_memory_allocated() / 2**30
 
 
 def elf():
-	part = get_part(rank)
-	replace_linear_with_linear_dw(part, "cpu")
-	sources, dsts = MyPipe.get_sources_targets_sequential(list(range(world_size)))
+	placement = get_placement(args.schedule, world_size)
+	parts = get_parts(rank, placement)
+	for part in parts:
+		replace_linear_with_linear_dw(part, "cpu")
+
+	scheduler = args.schedule
+	if scheduler == "megatron":
+		scheduler = "1f1b"  # Not the same name
+
+	sources, dsts = MyPipe.get_sources_targets_sequential(placement)
 	pipe = MyPipe.Pipeline(
-		part, None, partitioner=False, schedule=args.schedule, sources=sources, targets=dsts
+		parts,
+		None,
+		partitioner=False,
+		schedule=scheduler,
+		placement=placement,
+		sources=sources,
+		targets=dsts,
 	)
 	# Warmup
 	for _ in range(5):
-		y, loss = pipe(inputs.clone(), targets.clone(), loss_fn)
+		y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=mb_size)
 
 	torch.cuda.reset_peak_memory_stats()
 	with Timer() as timer:
-		for _ in range(args.niter):
-			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn)
+		for _ in range(args.niters):
+			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=mb_size)
 
 	return timer.time(), torch.cuda.max_memory_allocated() / 2**30
 
@@ -157,6 +223,7 @@ if __name__ == "__main__":
 			"batch_size": batch_size,
 			"seq_len": seq_len,
 			"schedule": args.schedule,
+			"niters": args.niters,
 		}
 
 		wandb.init(
@@ -171,6 +238,7 @@ if __name__ == "__main__":
 		metrics = {
 			"run_id": args.run_id,
 			"pp_size": args.pp,
+			"n_blocks": len(model.blocks),
 			"parameters": sum(p.numel() for p in model.parameters()),
 			"torch_time": torch_time,
 			"elf_time": elf_time,

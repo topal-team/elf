@@ -1,9 +1,4 @@
-
 {
-    "metadata": {
-        "GPU": "V100"
-    },
-
     "model": {
         "hidden_dim": 2304,
         "seq_len": 1024,

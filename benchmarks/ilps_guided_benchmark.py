@@ -225,8 +225,7 @@ def main():
 		)
 
 		# Run base benchmark
-		if base_is_possible:  # 256 for zbh2
-			# Distribute blocks evenly, handling remainder
+		if base_is_possible:
 			balance = balanced_partition(n, world_size)
 			parts = get_handcrafted_imbalanced_partition(model, rank, list(range(world_size)), balance)
 			iter_time, all_peak_mems = run_benchmark(model, parts, args.base, 1, rank)

@@ -367,6 +367,7 @@ class Pipeline:
 		"""
 		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
 		check_schedule_validity(schedule)
+
 		if dist.get_rank() == 0:
 			logger.info(f"Schedule:\n{schedule_to_str(schedule)}")
 

@@ -13,6 +13,7 @@ SEQLEN=$(echo $CONFIG_NAME | grep -o "seqlen_[0-9]*" | cut -d_ -f2)
 RESULTS_DIR=$2
 NGPUS=$3
 NBLOCKS=$4
+SCHEDULER=$5
 
 # Run profiling
 echo "Running profiling..."
@@ -34,10 +35,10 @@ fi
 
 # Generate solutions
 echo "Generating solutions with $NBLOCKS blocks..."
-python ilps/runall.py --config $CONFIG_FILE --nblocks $NBLOCKS --output $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --processors $NGPUS
+python ilps/runall.py --config $CONFIG_FILE --nblocks $NBLOCKS --output $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --processors $NGPUS --scheduler $SCHEDULER
 
 # Run the benchmark
 echo "Running benchmark for sequence length $SEQLEN..."
-torchrun --nproc-per-node=$NGPUS benchmarks/ilps_guided_benchmark.py --restart --config_file $CONFIG_FILE --solution_file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --output_file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json
+torchrun --nproc-per-node=$NGPUS benchmarks/ilps_guided_benchmark.py --restart --config_file $CONFIG_FILE --solution_file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --output_file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base $SCHEDULER
 
 echo "Completed benchmark for sequence length $SEQLEN"

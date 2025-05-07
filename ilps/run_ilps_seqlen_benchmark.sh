@@ -16,6 +16,7 @@ MIN_SEQLEN=128
 MAX_SEQLEN=2048
 STEP=128
 NBLOCKS=16
+SCHEDULER="zbh2"
 
 # Parse arguments
 if [ $# -gt 1 ]; then
@@ -36,6 +37,10 @@ fi
 
 if [ $# -gt 5 ]; then
     NBLOCKS=$6
+fi
+
+if [ $# -gt 6 ]; then
+    SCHEDULER=$7
 fi
 
 # Check if the base config file exists
@@ -71,7 +76,7 @@ echo "Found $(echo "$SEQLEN_CONFIGS" | wc -l) sequence length configs to benchma
 for CONFIG_FILE in $SEQLEN_CONFIGS; do
     CONFIG_NAME=$(basename $CONFIG_FILE .json)
     SEQLEN=$(echo $CONFIG_NAME | grep -o "seqlen_[0-9]*" | cut -d_ -f2)
-    sbatch -C v100-32g --gpus 4 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS
+    sbatch -C v100-32g --gpus 4 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER
 done
 
 echo "All benchmark jobs submitted."

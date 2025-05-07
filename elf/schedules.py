@@ -231,6 +231,9 @@ def generate_full_remat_schedule(placement, n_micro_batches, signatures):
 	schedule = []
 	n_devices = max(placement) + 1
 
+	def remat_strategy(name, _):
+		return name == ""
+
 	# All ranks do afab
 	for rank in range(n_devices - 1):
 		ids = [i for i in range(len(placement)) if placement[i] == rank]
@@ -238,7 +241,13 @@ def generate_full_remat_schedule(placement, n_micro_batches, signatures):
 		for i in range(n_micro_batches):
 			for id_ in ids:
 				_add_forward_pass(
-					schedule, placement, id_, i, rank, signatures[id_], **{OpOptions.SAVE: False}
+					schedule,
+					placement,
+					id_,
+					i,
+					rank,
+					signatures[id_],
+					**{OpOptions.REMAT_STRATEGY: remat_strategy},
 				)
 		# All backward
 		for i in range(n_micro_batches):
@@ -480,6 +489,11 @@ def generate_zbv_schedule(placement, n_micro_batches, signatures):
 
 		for id_ in ids:
 			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
+
+	for i in range(stages_per_device):
+		assert fs[i] == bs[i] == ws[i] == n_micro_batches, (
+			f"Rank {rank}, stage {i}: f = {fs[i]}, b = {bs[i]}, w = {ws[i]} (expected {n_micro_batches})"
+		)
 
 	return schedule
 
