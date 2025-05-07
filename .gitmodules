@@ -1,0 +1,3 @@
+[submodule "pipeline-ilps"]
+	path = pipeline-ilps
+	url = git@github.com:Adrien-AM/pipeline-ilps.git

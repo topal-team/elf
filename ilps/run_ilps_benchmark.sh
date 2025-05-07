@@ -109,7 +109,7 @@ if [[ -f results/ilps-solutions/$CONFIG_NAME.json ]]; then
 fi
 
 for nblocks in $(seq $MIN_BLOCKS $STEP $MAX_BLOCKS) ; do
-    python ~/pipeline-ilps/runall.py --config results/regression/$CONFIG_NAME.json --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json --processors $NGPUS --time-limit 120 --scheduler $SCHEDULER --mem $MEMGPU
+    python pipeline-ilps/runall.py --config results/regression/$CONFIG_NAME.json --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json --processors $NGPUS --time-limit 120 --scheduler $SCHEDULER --mem $MEMGPU
 done
 
 echo "Solutions generated. To run the benchmark, run:"
