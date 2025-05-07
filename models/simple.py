@@ -3,8 +3,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+"""
+This is a model zoo for tests and benchmarks.
+Most model implement a get_sample(), get_target(), and loss_fn() method for better interoperability.
+"""
+
 
 class SimpleResNet(nn.Module):
+	"""
+	Regular, almost homogeneous ResNet with constant channel and image dimensions.
+	"""
+
 	def __init__(self, nblocks=12, channels=64, num_classes=10):
 		super(SimpleResNet, self).__init__()
 		self.channels = channels
@@ -62,6 +71,10 @@ class SimpleResNet(nn.Module):
 
 
 class ResBlock(nn.Module):
+	"""
+	Util for SimpleResNet.
+	"""
+
 	def __init__(self, in_channels, out_channels, stride=1):
 		super(ResBlock, self).__init__()
 		self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
@@ -83,6 +96,10 @@ class ResBlock(nn.Module):
 
 
 class SimpleCNN(nn.Module):
+	"""
+	Simple classification CNN with two convolutions and a ReLU activation.
+	"""
+
 	def __init__(self, channels=64):
 		super(SimpleCNN, self).__init__()
 		self.conv1 = nn.Conv2d(in_channels=3, out_channels=channels, kernel_size=3, stride=1, padding=1)
@@ -121,6 +138,10 @@ class SimpleCNN(nn.Module):
 
 
 class SimpleAttention(nn.Module):
+	"""
+	Simple attention layer with a single head.
+	"""
+
 	def __init__(self, hidden_dim):
 		super(SimpleAttention, self).__init__()
 		self.hidden_dim = hidden_dim
@@ -160,8 +181,15 @@ class SimpleAttention(nn.Module):
 
 
 class SimpleTransformer(nn.Module):
-	def __init__(self, input_dim, hidden_dim, n_blocks=4, seq_len=64):
+	"""
+	Simple transformer with a single head.
+	ffn_dim is optional and defaults to hidden_dim * 4.
+	"""
+
+	def __init__(self, input_dim, hidden_dim, n_blocks=4, seq_len=64, ffn_dim=None):
 		super(SimpleTransformer, self).__init__()
+
+		ffn_dim = ffn_dim or hidden_dim * 4
 
 		self.input_dim = input_dim
 		self.hidden_dim = hidden_dim
@@ -173,7 +201,10 @@ class SimpleTransformer(nn.Module):
 		for i in range(n_blocks):
 			self.blocks.append(
 				nn.Sequential(
-					SimpleAttention(hidden_dim), nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim)
+					SimpleAttention(hidden_dim),
+					nn.LayerNorm(hidden_dim),
+					FeedForward(hidden_dim, ffn_dim),
+					nn.LayerNorm(hidden_dim),
 				)
 			)
 			self.add_module(f"block_{i}", self.blocks[-1])
@@ -199,7 +230,26 @@ class SimpleTransformer(nn.Module):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
 
 
+class FeedForward(nn.Module):
+	"""
+	Util for transformers.
+	"""
+
+	def __init__(self, dim, ffn_dim):
+		super(FeedForward, self).__init__()
+		self.fc1 = nn.Linear(dim, ffn_dim)
+		self.gelu = nn.GELU()
+		self.fc2 = nn.Linear(ffn_dim, dim)
+
+	def forward(self, x):
+		return self.fc2(self.gelu(self.fc1(x)))
+
+
 class Attention(nn.Module):
+	"""
+	Util for transformers.
+	"""
+
 	def __init__(self, dim, dropout=0.1):
 		super().__init__()
 		self.dim = dim
@@ -215,6 +265,10 @@ class Attention(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
+	"""
+	Util for transformers.
+	"""
+
 	def __init__(self, dim, num_heads=4, dropout=0.1):
 		super().__init__()
 		assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -251,7 +305,11 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-	def __init__(self, dim, num_heads=4, dropout=0.1):
+	"""
+	Util for transformers.
+	"""
+
+	def __init__(self, dim, num_heads=4, dropout=0.1, ffn_dim=None):
 		super().__init__()
 		self.norm1 = nn.LayerNorm(dim)
 		self.norm2 = nn.LayerNorm(dim)
@@ -259,7 +317,8 @@ class TransformerBlock(nn.Module):
 		self.proj = nn.Linear(dim, dim)
 		self.dropout1 = nn.Dropout(dropout)
 		self.dropout2 = nn.Dropout(dropout)
-		self.mlp = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim))
+		ffn_dim = ffn_dim or dim * 4
+		self.mlp = FeedForward(dim, ffn_dim)
 
 	def forward(self, x):
 		residual = x
@@ -280,8 +339,17 @@ class TransformerBlock(nn.Module):
 
 
 class FullTransformer(nn.Module):
-	def __init__(self, input_dim, hidden_dim, n_blocks=4, seq_len=64, num_heads=4, dropout=0.1):
+	"""
+	Full decoder-only transformer architecture, with embedding and output head.
+	ffn_dim is optional and defaults to hidden_dim * 4.
+	"""
+
+	def __init__(
+		self, input_dim, hidden_dim, n_blocks=4, seq_len=64, num_heads=4, dropout=0.1, ffn_dim=None
+	):
 		super(FullTransformer, self).__init__()
+
+		ffn_dim = ffn_dim or hidden_dim * 4
 
 		self.input_dim = input_dim
 		self.hidden_dim = hidden_dim
@@ -291,7 +359,7 @@ class FullTransformer(nn.Module):
 		self.head = nn.Linear(hidden_dim, input_dim)
 		self.blocks = []
 		for i in range(n_blocks):
-			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout))
+			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout, ffn_dim))
 			self.add_module(f"block_{i}", self.blocks[-1])
 
 	def forward(self, x):
@@ -316,14 +384,21 @@ class FullTransformer(nn.Module):
 
 
 class ChainTransformer(nn.Module):
-	def __init__(self, hidden_dim, n_blocks=4, seq_len=64, num_heads=4, dropout=0.1):
+	"""
+	Homogeneous chain of transformer blocks.
+	ffn_dim is optional and defaults to hidden_dim * 4.
+	"""
+
+	def __init__(self, hidden_dim, n_blocks=4, seq_len=64, num_heads=4, dropout=0.1, ffn_dim=None):
 		super(ChainTransformer, self).__init__()
+
+		ffn_dim = ffn_dim or hidden_dim * 4
 
 		self.hidden_dim = hidden_dim
 		self.seq_len = seq_len
 		self.blocks = []
 		for i in range(n_blocks):
-			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout))
+			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout, ffn_dim))
 			self.add_module(f"block_{i}", self.blocks[-1])
 
 	def forward(self, x):

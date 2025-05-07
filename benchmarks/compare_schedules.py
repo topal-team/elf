@@ -133,16 +133,6 @@ if __name__ == "__main__":
 			targets=dsts,
 		)
 
-		if rank == 0:
-			available_mem = (
-				torch.cuda.get_device_properties(local_rank).total_memory - torch.cuda.memory_allocated()
-			)
-			print(f"Available memory: {available_mem / (2**30):.2f}GB")
-			print(f"Allocated memory: {torch.cuda.memory_allocated() / (2**30):.2f}GB")
-			print(
-				f"Occupied by parameters: {sum(p.numel() * p.element_size() for p in pipe.blocks[0].model.parameters()) / (2**30):.2f}GB"
-			)
-
 		# Warmup
 		if rank == 0:
 			print(f"{s} - Warming up")

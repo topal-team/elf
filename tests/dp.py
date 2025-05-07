@@ -237,7 +237,7 @@ if __name__ == "__main__":
 	parser.add_argument(
 		"--schedule",
 		"-s",
-		choices=["afab", "1f1b", "hanayo", "zbh1", "zbh2"],
+		choices=["afab", "1f1b", "hanayo", "zbh1", "zbh2", "zbv"],
 		default="1f1b",
 		required=False,
 	)
@@ -275,7 +275,7 @@ if __name__ == "__main__":
 	match args.schedule:
 		case "afab" | "1f1b":
 			placement = [i for i in range(args.pp)] * args.interleaving
-		case "hanayo":
+		case "hanayo" | "zbv":
 			placement = [i for i in range(args.pp)] + [i for i in reversed(range(args.pp))]
 			placement *= args.interleaving
 		case "zbh1" | "zbh2":
@@ -294,40 +294,42 @@ if __name__ == "__main__":
 		partitioner=args.partitioner,
 		dp=args.dp,
 	)
+	try:
+		train(pipe, gt, data, args.pp, args.dp)
 
-	train(pipe, gt, data, args.pp, args.dp)
+		sample = model.get_sample(32).cuda()
+		target = model.get_target(32).cuda()
+		if rank == 0 and sample.is_floating_point():
+			print(f"Sample given to pipe : mean = {sample.mean()}, std = {sample.std()}")
 
-	sample = model.get_sample(32).cuda()
-	target = model.get_target(32).cuda()
-	if rank == 0 and sample.is_floating_point():
-		print(f"Sample given to pipe : mean = {sample.mean()}, std = {sample.std()}")
-	y, _ = pipe(sample.clone(), target.clone(), loss_fn=model.loss_fn)
-	pipe.zero_grad(set_to_none=False)
-	gt.zero_grad(set_to_none=False)
+		split_size = (16 // args.dp) // (args.pp * 2)
+		y, _ = pipe(sample.clone(), target.clone(), loss_fn=model.loss_fn, split_size=split_size)
+		pipe.zero_grad(set_to_none=False)
+		gt.zero_grad(set_to_none=False)
 
-	block = pipe.blocks[0]
-	if rank < args.pp:
-		pipe_params, pipe_grads = get_all_parameters(block.model, block.pp_group)
+		block = pipe.blocks[0]
+		if rank < args.pp:
+			pipe_params, pipe_grads = get_all_parameters(block.model, block.pp_group)
 
-	if rank == 0:
-		if sample.is_floating_point():
-			print(f"Sample given to single gpu : mean = {sample.mean()}, std = {sample.std()}")
+		if rank == 0:
+			if sample.is_floating_point():
+				print(f"Sample given to single gpu : mean = {sample.mean()}, std = {sample.std()}")
 
-		check_model_parameters(gt, pipe_params, pipe_grads)
-		z = gt(sample.clone())
+			check_model_parameters(gt, pipe_params, pipe_grads)
+			z = gt(sample.clone())
 
-		if pipe.placement[-1] != 0:
-			y = torch.empty_like(z)
-			dist.recv(y, pipe.placement[-1])
+			if pipe.placement[-1] != 0:
+				y = torch.empty_like(z)
+				dist.recv(y, pipe.placement[-1])
+				torch.cuda.synchronize()
 
-		assert torch.allclose(y, z, rtol=relative_tolerance, atol=absolute_tolerance), (
-			f"Wrong output for pipelined model. Difference norm = {torch.linalg.norm(y - z)}"
-		)
-		print("Test passed successfully")
+			assert torch.allclose(y, z, rtol=relative_tolerance, atol=absolute_tolerance), (
+				f"Wrong output for pipelined model. Difference norm = {torch.linalg.norm(y - z)}"
+			)
+			print("Test passed successfully")
 
-	elif rank == pipe.placement[-1]:
-		dist.send(y, 0)
-
-	pipe.clear()
-
-	dist.destroy_process_group()
+		elif rank == pipe.placement[-1]:
+			dist.send(y, 0)
+	finally:
+		pipe.clear()
+		dist.destroy_process_group()

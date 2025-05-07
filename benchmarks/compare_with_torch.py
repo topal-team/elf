@@ -24,18 +24,23 @@ parser.add_argument(
 	default="zbv",
 	help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbv)",
 )
+parser.add_argument("--mb_size", type=int, default=2, help="Microbatch size")
+parser.add_argument("--seq_len", type=int, default=1024, help="Sequence length")
+parser.add_argument("--hidden_dim", type=int, default=2048, help="Hidden dimension")
+parser.add_argument("--nblocks", type=int, default=64, help="Number of blocks")
 parser.add_argument("--niters", type=int, default=10, help="Number of iterations")
 args = parser.parse_args()
 
-n_procs = args.pp
 nmb = args.pp * 2
-batch_size = nmb * 2
-mb_size = batch_size // nmb
-seq_len = 512
-model = SimpleTransformer(2000, 2048, 80, seq_len)
+batch_size = args.mb_size * nmb
+model = SimpleTransformer(2000, args.hidden_dim, args.nblocks, args.seq_len)
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
+
+assert args.nblocks >= args.pp, (
+	"Number of blocks must be greater than or equal to pipeline parallelism degree"
+)
 
 
 def get_placement(schedule_type, world_size):
@@ -177,12 +182,12 @@ def elf():
 	)
 	# Warmup
 	for _ in range(5):
-		y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=mb_size)
+		y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=args.mb_size)
 
 	torch.cuda.reset_peak_memory_stats()
 	with Timer() as timer:
 		for _ in range(args.niters):
-			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=mb_size)
+			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=args.mb_size)
 
 	return timer.time(), torch.cuda.max_memory_allocated() / 2**30
 
@@ -220,8 +225,8 @@ if __name__ == "__main__":
 		# Log config
 		config_dict = {
 			"pp_size": args.pp,
-			"batch_size": batch_size,
-			"seq_len": seq_len,
+			"batch_size": args.batch_size,
+			"seq_len": args.seq_len,
 			"schedule": args.schedule,
 			"niters": args.niters,
 		}
