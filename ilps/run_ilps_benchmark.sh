@@ -109,7 +109,9 @@ if [[ -f results/ilps-solutions/$CONFIG_NAME.json ]]; then
 fi
 
 for nblocks in $(seq $MIN_BLOCKS $STEP $MAX_BLOCKS) ; do
-    python pipeline-ilps/runall.py --config results/regression/$CONFIG_NAME.json --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json --processors $NGPUS --time-limit 120 --scheduler $SCHEDULER --mem $MEMGPU
+    python pipeline-ilps/runall.py --config results/regression/$CONFIG_NAME.json \
+                --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json \
+                --processors $NGPUS --time-limit 180 --scheduler $SCHEDULER --mem $MEMGPU --greedy
 done
 
 echo "Solutions generated. To run the benchmark, run:"
@@ -121,7 +123,8 @@ AVAILABLE_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 if [ $AVAILABLE_GPUS -ge $NGPUS ]; then
     echo "Found $AVAILABLE_GPUS GPUs, which is enough to run the benchmark with $NGPUS GPUs."
     echo "Executing benchmark..."
-    torchrun --nproc-per-node=$NGPUS benchmarks/ilps_guided_benchmark.py --restart --config_file $CONFIG_FILE --solution_file results/ilps-solutions/$CONFIG_NAME.json --output_file results/bench-ilps-$CONFIG_NAME.json --base $SCHEDULER
+    torchrun --nproc-per-node=$NGPUS benchmarks/ilps_guided_benchmark.py --restart \
+                 --config_file $CONFIG_FILE --solution_file results/ilps-solutions/$CONFIG_NAME.json --output_file results/bench-ilps-$CONFIG_NAME.json --base $SCHEDULER
     echo "Benchmark completed successfully."
 else
     echo "Not enough GPUs available. Found $AVAILABLE_GPUS, but need $NGPUS."

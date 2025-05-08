@@ -133,7 +133,7 @@ def process_solution(
 	if rank == 0:
 		print(f"{solution_type.capitalize()}:")
 
-	if solution_type in ["remat", "rematf"]:
+	if solution_type in ["remat", "rematf", "greedy"]:
 		balance = balanced_partition(n, world_size)
 		scheduler = FullRematScheduler(solution, base, balance)
 	elif solution_type in ["combined", "combinedf"]:
@@ -203,6 +203,7 @@ def main():
 		"balance",  # load balancing, no recomputation
 		"combined",  # load balancing, all recomputations enabled
 		"combinedf",  # load balancing, only forward recomputations enabled
+		"greedy",  # greedy method from "Reducing Activation Recomputation  in Large Transformer Models"
 	]
 
 	for n in ilp_solutions:
@@ -240,7 +241,7 @@ def main():
 				print(f"Base is not possible for n = {n}")
 
 		# Process other solution types
-		for solution_type in ["balance", "remat", "rematf", "combined", "combinedf"]:
+		for solution_type in types:
 			model.zero_grad()
 			model.cpu()
 
