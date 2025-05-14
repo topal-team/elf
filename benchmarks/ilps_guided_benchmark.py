@@ -88,10 +88,10 @@ def create_model(model_config: Dict, n: int) -> ChainTransformer:
 
 	model = ChainTransformer(hidden_size, n, seq_len, num_heads, dropout)
 	replace_linear_with_linear_dw(model, "cpu")
-	for param in model.parameters():
-		tensor = param.data.cuda()
-		dist.broadcast(tensor, src=0)
-		param.data = tensor.cpu()
+	# for param in model.parameters():
+	# 	tensor = param.data.cuda()
+	# 	dist.broadcast(tensor, src=0)
+	# 	param.data = tensor.cpu()
 	return model
 
 
