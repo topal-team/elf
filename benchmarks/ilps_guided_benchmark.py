@@ -7,7 +7,7 @@ This script benchmarks transformer model performance using different execution s
 execution time and peak memory usage for each strategy and reports the results.
 
 Usage:
-    torchrun --nproc-per-node=NUM_GPUS benchmarks/ilps_guided_benchmark.py --config_file CONFIG_FILE --solution_file SOLUTION_FILE --output_file OUTPUT_FILE [options]
+    torchrun --nproc-per-node=NUM_GPUS benchmarks/ilps_guided_benchmark.py --config_file CONFIG_FILE --solution_file SOLUTION_FILE --output_file OUTPUT_FILE --n N --solution_type SOLUTION_TYPE [options]
 
 Arguments:
     --restart: Start fresh by overwriting any existing output file
@@ -16,16 +16,18 @@ Arguments:
     --output_file: Path to write benchmark results
     --config_file: Path to the ILP config file with model hyperparameters
     --base: Base scheduler type (default: zbh2)
+    --n: Specific n value to benchmark
+    --solution_type: Specific solution type to benchmark (e.g., "remat", "balance", "combined")
 
 Note: This script must be run in a distributed setting with multiple GPUs.
 """
 
 import os
-import gc
 import sys
 import json
 import torch
 import torch.distributed as dist
+import datetime
 import argparse
 import logging
 import psutil
@@ -55,7 +57,7 @@ def setup_distributed() -> tuple[int, int]:
 	"""Initialize distributed training environment."""
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=1800))  # 30 minutes
 	return dist.get_rank(), dist.get_world_size()
 
 
@@ -133,15 +135,17 @@ def process_solution(
 	if rank == 0:
 		print(f"{solution_type.capitalize()}:")
 
-	if solution_type in ["remat", "rematf", "greedy"]:
-		balance = balanced_partition(n, world_size)
-		scheduler = FullRematScheduler(solution, base, balance)
-	elif solution_type in ["combined", "combinedf"]:
+	if solution_type in ["combined", "combinedf"]:
 		balance = [int(b) for b in solution["b"]]
 		scheduler = PartialRematScheduler(solution, base)
 	elif solution_type in ["balance"]:
 		balance = [int(b) for b in solution["b"]]
 		scheduler = base
+
+	# FullRemat, Greedy and Baselines are implemented with the FullRematScheduler
+	else:
+		balance = balanced_partition(n, world_size)
+		scheduler = FullRematScheduler(solution, base, balance)
 
 	parts = get_handcrafted_imbalanced_partition(model, rank, list(range(world_size)), balance)
 	return run_benchmark(model, parts, scheduler, rank=rank)
@@ -177,6 +181,10 @@ def main():
 		help="Path to the ILP config file with model hyperparameters",
 	)
 	parser.add_argument("--base", type=str, default="zbh2", help="Base scheduler type")
+	parser.add_argument("--n", type=int, required=True, help="Specific n value to benchmark")
+	parser.add_argument(
+		"--solution_type", type=str, required=True, help="Specific solution type to benchmark"
+	)
 	args = parser.parse_args()
 	setup_logging(args.log)
 
@@ -189,89 +197,67 @@ def main():
 	# Load solutions and results
 	with open(args.solution_file, "r") as f:
 		ilp_solutions = json.load(f)
-	results = load_results(args.output_file, args.restart)
 
 	# Load model hyperparameters from config file
 	model_config = load_model_config(args.config_file)
 	if rank == 0:
 		print(f"Using model config from {args.config_file}: {model_config}")
 
-	types = [
-		"base",  # equal balancing, no recomputation
-		"remat",  # equal balancing, all recomputations enabled
-		"rematf",  # equal balancing, only forward recomputations enabled
-		"balance",  # load balancing, no recomputation
-		"combined",  # load balancing, all recomputations enabled
-		"combinedf",  # load balancing, only forward recomputations enabled
-		"greedy",  # greedy method from "Reducing Activation Recomputation  in Large Transformer Models"
-	]
+	n = str(args.n)
+	if n not in ilp_solutions:
+		if rank == 0:
+			print(f"No solutions found for n = {n}")
+		return
 
-	for n in ilp_solutions:
-		if n in results and not args.restart:
-			continue
+	solutions = ilp_solutions[n]
+	if args.solution_type not in solutions:
+		if rank == 0:
+			print(f"No solution of type {args.solution_type} found for n = {n}")
+		return
 
-		n = int(n)
-		results[str(n)] = {key: {"time": 0.0, "peak_mems": [0.0]} for key in types}
-		solutions = ilp_solutions[str(n)]
+	# Create and initialize model
+	model = create_model(model_config, int(n))
+	log_model_info(model, int(n), rank)
 
-		# Create and initialize model
-		model = create_model(model_config, n)
-		log_model_info(model, n, rank)
+	# Process the specific solution type
+	model.zero_grad()
+	model.cpu()
 
-		# Check if base is possible
-		base_is_possible = (
-			all(all(sum(r) == 0 for r in remat_type) for remat_type in solutions["remat"].values())
-			if "remat" in solutions
-			else False
+	if rank == 0:
+		gpu_allocated = torch.cuda.memory_allocated() / (1024**3)
+		process = psutil.Process(os.getpid())
+		cpu_allocated = process.memory_info().rss / (1024**3)
+		print(
+			f"Memory allocated before {args.solution_type}: GPU {gpu_allocated:.2f}GB, CPU {cpu_allocated:.2f}GB"
 		)
 
-		# Run base benchmark
-		if base_is_possible:
-			balance = balanced_partition(n, world_size)
-			parts = get_handcrafted_imbalanced_partition(model, rank, list(range(world_size)), balance)
-			iter_time, all_peak_mems = run_benchmark(model, parts, args.base, 1, rank)
-			if rank == 0:
-				results[str(n)]["base"]["time"] = iter_time
-				results[str(n)]["base"]["peak_mems"] = [float(m) for m in all_peak_mems]
+	solution = solutions.get(args.solution_type)
+	try:
+		iter_time, peak_mems = process_solution(
+			model, solution, args.solution_type, args.base, rank, world_size, int(n)
+		)
 
-			del parts
+		if rank == 0 and iter_time is not None:
+			results = load_results(args.output_file, args.restart)
+			if n not in results:
+				results[n] = {}
 
-		else:
-			if rank == 0:
-				print(f"Base is not possible for n = {n}")
+			results[n][args.solution_type] = {
+				"time": iter_time,
+				"peak_mems": [float(m) for m in peak_mems],
+			}
 
-		# Process other solution types
-		for solution_type in types:
-			model.zero_grad()
-			model.cpu()
-
-			if rank == 0:
-				gpu_allocated = torch.cuda.memory_allocated() / (1024**3)
-				process = psutil.Process(os.getpid())
-				cpu_allocated = process.memory_info().rss / (1024**3)
-				print(
-					f"Memory allocated before {solution_type}: GPU {gpu_allocated:.2f}GB, CPU {cpu_allocated:.2f}GB"
-				)
-
-			solution = solutions.get(solution_type)
-			iter_time, peak_mems = process_solution(
-				model, solution, solution_type, args.base, rank, world_size, n
-			)
-
-			if rank == 0 and iter_time is not None:
-				results[str(n)][solution_type]["time"] = iter_time
-				results[str(n)][solution_type]["peak_mems"] = [float(m) for m in peak_mems]
-
-		# Save results
-		if rank == 0:
+			# Save results atomically using a temporary file
 			with open(args.output_file, "w") as f:
 				json.dump(results, f, indent=4)
 
-		# Cleanup
-		del model
-		torch.cuda.empty_cache()
-		gc.collect()
-		dist.barrier()
+	except torch.cuda.OutOfMemoryError:
+		if rank == 0:
+			print(f"Out of memory for {args.solution_type} with n = {n}")
+
+	except Exception as e:
+		if rank == 0:
+			print(f"Error processing {args.solution_type} with n = {n}: {str(e)}")
 
 	if dist.is_initialized():
 		dist.destroy_process_group()

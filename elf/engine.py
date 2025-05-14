@@ -170,7 +170,7 @@ class Engine:
 		# -- uncomment this for precise timings
 		# dist.barrier()
 		# torch.cuda.synchronize()
-		start = _time_start()
+		# start = _time_start()s
 
 		pipe_start = time.time()
 		warmup_time = None
@@ -189,7 +189,8 @@ class Engine:
 				# Warmup time is the time spent waiting for the first forward
 				# The first operation after that is the end of warmup
 				# torch.cuda.synchronize() # -- uncomment this for precise timings
-				warmup_time = _time_end(start)
+				# warmup_time = _time_end(start)
+				warmup_time = 0
 
 			# A computation will synchronize! We want to enqueue all possible communications before that
 			if op.op in [

@@ -16,7 +16,7 @@ def bench(model, parts, scheduler, gradient_accumulation=1):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
-	n_iterations = 15
+	n_iterations = 1
 
 	microbatch_size = 2 // gradient_accumulation
 	n_micro_batches = world_size * 2 * gradient_accumulation

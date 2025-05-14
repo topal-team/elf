@@ -29,6 +29,14 @@ parser.add_argument("--seq_len", type=int, default=1024, help="Sequence length")
 parser.add_argument("--hidden_dim", type=int, default=2048, help="Hidden dimension")
 parser.add_argument("--nblocks", type=int, default=64, help="Number of blocks")
 parser.add_argument("--niters", type=int, default=10, help="Number of iterations")
+parser.add_argument(
+	"--only",
+	type=str,
+	choices=["torch", "elf", "both"],
+	default="both",
+	help="Run only specified framework benchmark (torch, elf, or both)",
+)
+
 args = parser.parse_args()
 
 nmb = args.pp * 2
@@ -163,12 +171,14 @@ def pippy():
 def elf():
 	placement = get_placement(args.schedule, world_size)
 	parts = get_parts(rank, placement)
-	for part in parts:
-		replace_linear_with_linear_dw(part, "cpu")
 
 	scheduler = args.schedule
 	if scheduler == "megatron":
 		scheduler = "1f1b"  # Not the same name
+
+	for part in parts:
+		if scheduler in ["zbh1", "zbv"]:
+			replace_linear_with_linear_dw(part, "cpu")
 
 	sources, dsts = MyPipe.get_sources_targets_sequential(placement)
 	pipe = MyPipe.Pipeline(
@@ -225,7 +235,7 @@ if __name__ == "__main__":
 		# Log config
 		config_dict = {
 			"pp_size": args.pp,
-			"batch_size": args.batch_size,
+			"batch_size": batch_size,
 			"seq_len": args.seq_len,
 			"schedule": args.schedule,
 			"niters": args.niters,

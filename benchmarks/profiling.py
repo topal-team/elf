@@ -7,7 +7,6 @@ import torch.cuda.profiler as profiler
 from torch.cuda import cudart
 
 sys.path.append(".")
-from elf.zb_utils import replace_linear_with_linear_dw
 from models.simple import SimpleTransformer
 from elf import Pipeline
 
@@ -20,29 +19,34 @@ if __name__ == "__main__":
 	dist.init_process_group(backend="nccl")
 
 	# Create model and sample data
-	model = SimpleTransformer(4000, 2048, 8 * ws, 512)
-	replace_linear_with_linear_dw(model, "cuda")
-	sample = model.get_sample(32).cuda()
-	target = model.get_target(32).cuda()
+	model = SimpleTransformer(2000, 2048, 64, 1024)
+	nmb = ws * 2
+	mb_size = 2
+	batch_size = nmb * mb_size
+	# replace_linear_with_linear_dw(model, "cpu")
+	sample = model.get_sample(batch_size).cuda()
+	target = model.get_target(batch_size).cuda()
 	loss_fn = model.loss_fn
 
 	# Create pipeline
-	pipe = Pipeline(model, sample, schedule="zbh2")
+	pipe = Pipeline(model, sample, schedule="1f1b")
 	optimizer = torch.optim.Adam(pipe.parameters())
 
 	# Warmup iterations
 	for _ in range(3):
-		_ = pipe(sample, target, loss_fn)
+		_ = pipe(sample, target, loss_fn, split_size=mb_size)
 		optimizer.step()
+
+	torch.cuda.synchronize()
 
 	# Profile iterations
 	profiler.start()
 	cudart().cudaProfilerStart()
 
-	for i in range(5):
+	for i in range(30):
 		if rank == 0:
 			print(f"Iteration {i}")
-		_ = pipe(sample, target, loss_fn, profile=True)
+		_ = pipe(sample, target, loss_fn, split_size=mb_size, profile=True)
 		optimizer.step()
 
 	cudart().cudaProfilerStop()
