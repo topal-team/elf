@@ -17,6 +17,7 @@ MAX_SEQLEN=2048
 STEP=128
 NBLOCKS=16
 SCHEDULER="zbh2"
+MEMGPU=28000
 
 # Parse arguments
 if [ $# -gt 1 ]; then
@@ -41,6 +42,10 @@ fi
 
 if [ $# -gt 6 ]; then
     SCHEDULER=$7
+fi
+
+if [ $# -gt 7 ]; then
+    MEMGPU=$8
 fi
 
 # Check if the base config file exists
@@ -76,9 +81,9 @@ echo "Found $(echo "$SEQLEN_CONFIGS" | wc -l) sequence length configs to benchma
 for CONFIG_FILE in $SEQLEN_CONFIGS; do
     CONFIG_NAME=$(basename $CONFIG_FILE .json)
     SEQLEN=$(echo $CONFIG_NAME | grep -o "seqlen_[0-9]*" | cut -d_ -f2)
-    sbatch -C v100-32g --gpus 4 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER
+    sbatch -C h100 -A gdh@h100 --gpus 2 --time=00:45:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err jz.sh --no-python ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER $MEMGPU $NBLOCKS
 done
 
-echo "All benchmark jobs submitted."
-echo "In order to merge the results, run:"
+echo "All benchmark jobs enqueued, commands are appended to file $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh"
+echo "In order to merge the results afterwards, run:"
 echo "python ilps/merge_seqlen_results.py --results_dir $RESULTS_DIR --output_file $RESULTS_DIR/summary.json"

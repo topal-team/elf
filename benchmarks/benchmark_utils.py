@@ -12,7 +12,7 @@ from elf.zb_utils import LayerDW
 from elf import Pipeline, get_sources_targets_sequential
 
 
-def bench(model, parts, scheduler, gradient_accumulation=1):
+def bench(model, parts, scheduler, placement, gradient_accumulation=1):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
@@ -25,7 +25,6 @@ def bench(model, parts, scheduler, gradient_accumulation=1):
 	loss_fn = model.loss_fn
 
 	# Create pipeline
-	placement = list(range(world_size))
 	sources, dsts = get_sources_targets_sequential(placement)
 	pipe = Pipeline(
 		parts,
@@ -85,7 +84,7 @@ def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 	num_blocks = len(model.blocks)
 	num_ranks = len(placement)
 	parts = [None] * num_ranks
-	assert int(sum(factors)) == int(num_blocks)
+	assert int(sum(factors)) == int(num_blocks), f"Sum of factors ({sum(factors)}) does not equal number of blocks ({num_blocks})"
 
 	start_idx = 0
 	for i in range(num_ranks):

@@ -89,16 +89,24 @@ def main():
 	)
 
 	if args.output_script:
-		with open(args.output_script, "w") as f:
-			f.write("#!/bin/bash\n\n")
-			f.write(f"if [[ -f {args.output_file} ]]; then\n")
-			f.write(f"    echo '!! Warning: {args.output_file} already exists, deleting it.'\n")
-			f.write(f"    rm -f {args.output_file}\n")
-			f.write("fi\n\n")
-			f.write("# Generated benchmark job commands\n\n")
-			for cmd in commands:
-				f.write(f"{cmd}\n")
-		os.chmod(args.output_script, 0o755)
+		# Check if file exists
+		if os.path.exists(args.output_script):
+			# File exists, just append the commands
+			with open(args.output_script, "a") as f:
+				for cmd in commands:
+					f.write(f"{cmd}\n")
+		else:
+			# File doesn't exist, create it with header
+			with open(args.output_script, "w") as f:
+				f.write("#!/bin/bash\n\n")
+				f.write(f"if [[ -f {args.output_file} ]]; then\n")
+				f.write(f"    echo '!! Warning: {args.output_file} already exists, deleting it.'\n")
+				f.write(f"    rm -f {args.output_file}\n")
+				f.write("fi\n\n")
+				f.write("# Generated benchmark job commands\n\n")
+				for cmd in commands:
+					f.write(f"{cmd}\n")
+			os.chmod(args.output_script, 0o755)
 		print(f"Generated job script: {args.output_script}")
 	else:
 		for cmd in commands:

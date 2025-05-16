@@ -10,7 +10,7 @@
 # 5. Benchmarking execution strategies (ilps_guided_benchmark.py)
 #
 # Usage:
-#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME]
+#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE]
 #
 # Arguments:
 #   --config: Path to the configuration file with model hyperparameters
@@ -22,6 +22,7 @@
 #   --memgpu: GPU memory limit in MB (default: 24000)
 #   --account: SLURM account name
 #   --constraint: SLURM constraint (e.g., gpu_p5, gpu_p6)
+#   --regression-file: Path to existing regression file (if provided, skips profiling steps)
 #
 # Example:
 #   ./ilps/run_ilps_benchmark.sh --config ilps/configs/default.json --ngpus 4 --min-blocks 4 --max-blocks 16 --step 4
@@ -36,6 +37,7 @@ SCHEDULER="zbh2"
 MEMGPU=24000
 SLURM_ACCOUNT=""
 SLURM_CONSTRAINT=""
+REGRESSION_FILE=""
 
 # Parse named parameters
 while [[ $# -gt 0 ]]; do
@@ -76,6 +78,10 @@ while [[ $# -gt 0 ]]; do
             SLURM_CONSTRAINT="$2"
             shift 2
             ;;
+        --regression-file)
+            REGRESSION_FILE="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown parameter: $1"
             exit 1
@@ -86,13 +92,19 @@ done
 # Ensure config file is provided
 if [ -z "$CONFIG_FILE" ]; then
     echo "Error: No config file provided"
-    echo "Usage: $0 --config <config_file> [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME]"
+    echo "Usage: $0 --config <config_file> [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE]"
     exit 1
 fi
 
 # Check if the config file exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: Config file '$CONFIG_FILE' not found"
+    exit 1
+fi
+
+# Check if regression file exists if provided
+if [ ! -z "$REGRESSION_FILE" ] && [ ! -f "$REGRESSION_FILE" ]; then
+    echo "Error: Regression file '$REGRESSION_FILE' not found"
     exit 1
 fi
 
@@ -106,13 +118,15 @@ mkdir -p results/benchmarks
 # Function to setup environment based on GPU type
 setup_gpu_env() {
     export OMP_NUM_THREADS=4
+    export NCCL_P2P_DISABLE=1
+    export NCCL_IB_DISABLE=1
     
     if [[ "$SLURM_JOB_PARTITION" == "gpu_p5" ]]; then
         module load arch/a100
         source ~/scratch/venv-a100/bin/activate
         echo "Activated A100 virtual environment."
     elif [[ "$SLURM_JOB_PARTITION" == "gpu_p6" ]]; then
-        module load arch/h100 cuda/12.4.1
+        module load arch/h100 cuda/12.8.0
         source ~/work/venv-h100/bin/activate 
         echo "Activated H100 virtual environment."
     else
@@ -131,19 +145,24 @@ if [ ! -z "$SLURM_CONSTRAINT" ]; then
     SLURM_OPTS+="-C $SLURM_CONSTRAINT "
 fi
 
-# Run GPU-intensive profiling steps on an allocated node
-echo "Allocating node for GPU profiling..."
-srun $SLURM_OPTS --gpus=1 bash -c "
-    $(declare -f setup_gpu_env)
-    setup_gpu_env
-    python ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30
-    python ilps/regression.py --input_file results/profiling/$CONFIG_NAME.json --config_file $CONFIG_FILE --output_file results/regression/$CONFIG_NAME.json
-"
-srun $SLURM_OPTS --gpus=2 --ntasks=1 bash -c "
-    $(declare -f setup_gpu_env)
-    setup_gpu_env
-    torchrun --nproc-per-node=2 ilps/profiling-comms.py --config results/regression/$CONFIG_NAME.json
-"
+# Run GPU-intensive profiling steps only if no regression file is provided
+if [ -z "$REGRESSION_FILE" ]; then
+    echo "No regression file provided. Running profiling steps..."
+    srun --time=00:30:00 $SLURM_OPTS --gpus=1 bash -c "
+        $(declare -f setup_gpu_env)
+        setup_gpu_env
+        python ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30
+        python ilps/regression.py --input_file results/profiling/$CONFIG_NAME.json --config_file $CONFIG_FILE --output_file results/regression/$CONFIG_NAME.json
+    "
+    srun --time=00:10:00 $SLURM_OPTS --gpus=2 --ntasks=1 bash -c "
+        $(declare -f setup_gpu_env)
+        setup_gpu_env
+        torchrun --nproc-per-node=2 ilps/profiling-comms.py --config results/regression/$CONFIG_NAME.json
+    "
+    REGRESSION_FILE="results/regression/$CONFIG_NAME.json"
+else
+    echo "Using provided regression file: $REGRESSION_FILE"
+fi
 
 # Run ILP solving on the front node (no GPU needed)
 if [[ -f results/ilps-solutions/$CONFIG_NAME.json ]]; then
@@ -155,18 +174,23 @@ source ~/elf-dev/venv/bin/activate
 
 echo "Running ILP solving on front node..."
 for nblocks in $(seq $MIN_BLOCKS $STEP $MAX_BLOCKS) ; do
-    python pipeline-ilps/runall.py --config results/regression/$CONFIG_NAME.json \
+    python pipeline-ilps/runall.py --config $REGRESSION_FILE \
                 --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json \
                 --processors $NGPUS --time-limit 180 --scheduler $SCHEDULER --mem $MEMGPU --greedy
-    python pipeline-ilps/generate_baselines.py --config results/regression/$CONFIG_NAME.json \
+    python pipeline-ilps/generate_baselines.py --config $REGRESSION_FILE \
                 --output results/ilps-solutions/$CONFIG_NAME.json \
-                --processors $NGPUS --nblocks $nblocks
+                --processors $NGPUS --nblocks $nblocks --scheduler $SCHEDULER
 done
 
 echo "Solutions generated. Generating benchmark jobs..."
 
 # Generate benchmark job script
 BENCHMARK_SCRIPT="results/benchmarks/run_benchmarks_${CONFIG_NAME}.sh"
+if [ -f "$BENCHMARK_SCRIPT" ]; then
+    echo "!! Warning: $BENCHMARK_SCRIPT already exists, deleting it."
+    rm -f "$BENCHMARK_SCRIPT"
+fi
+
 python ilps/generate_benchmark_jobs.py \
     --solutions-file "results/ilps-solutions/$CONFIG_NAME.json" \
     --config-file "$CONFIG_FILE" \
