@@ -84,7 +84,9 @@ def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 	num_blocks = len(model.blocks)
 	num_ranks = len(placement)
 	parts = [None] * num_ranks
-	assert int(sum(factors)) == int(num_blocks), f"Sum of factors ({sum(factors)}) does not equal number of blocks ({num_blocks})"
+	assert int(sum(factors)) == int(num_blocks), (
+		f"Sum of factors ({sum(factors)}) does not equal number of blocks ({num_blocks})"
+	)
 
 	start_idx = 0
 	for i in range(num_ranks):

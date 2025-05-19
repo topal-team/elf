@@ -21,7 +21,7 @@
 #   --scheduler: Base scheduler type (default: zbh2)
 #   --memgpu: GPU memory limit in MB (default: 24000)
 #   --account: SLURM account name
-#   --constraint: SLURM constraint (e.g., gpu_p5, gpu_p6)
+#   --constraint: SLURM constraint (e.g., h100, v100-32g, ..)
 #   --regression-file: Path to existing regression file (if provided, skips profiling steps)
 #
 # Example:
@@ -118,8 +118,6 @@ mkdir -p results/benchmarks
 # Function to setup environment based on GPU type
 setup_gpu_env() {
     export OMP_NUM_THREADS=4
-    export NCCL_P2P_DISABLE=1
-    export NCCL_IB_DISABLE=1
     
     if [[ "$SLURM_JOB_PARTITION" == "gpu_p5" ]]; then
         module load arch/a100
@@ -202,8 +200,3 @@ python ilps/generate_benchmark_jobs.py \
 
 echo "Generated benchmark script: $BENCHMARK_SCRIPT"
 echo "To run the benchmarks, execute: $BENCHMARK_SCRIPT"
-
-# Run the benchmark script
-echo "Executing benchmarks..."
-# bash "$BENCHMARK_SCRIPT"
-echo "Benchmarks completed successfully."

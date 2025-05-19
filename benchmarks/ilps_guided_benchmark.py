@@ -5,6 +5,8 @@ Benchmarking script for ILPS-guided transformer model execution strategies.
 This script benchmarks transformer model performance using different execution strategies
 (balanced partitioning, recomputation, etc.) based on ILP solver solutions. It measures
 execution time and peak memory usage for each strategy and reports the results.
+The results are added to the output file, in the entry [n][solution_type] (that gets created if it doesn't exist).
+
 
 Usage:
     torchrun --nproc-per-node=NUM_GPUS benchmarks/ilps_guided_benchmark.py --config_file CONFIG_FILE --solution_file SOLUTION_FILE --output_file OUTPUT_FILE --n N --solution_type SOLUTION_TYPE [options]
@@ -108,13 +110,19 @@ def log_model_info(model: ChainTransformer, n: int, rank: int) -> None:
 
 
 def run_benchmark(
-	model: ChainTransformer, parts: Any, scheduler: str, placement: List[int], grad_acc: int = 1, rank: int = 0
+	model: ChainTransformer,
+	parts: Any,
+	scheduler: str,
+	placement: List[int],
+	grad_acc: int = 1,
+	rank: int = 0,
 ) -> tuple[float, List[float]]:
 	"""Run benchmark and return iteration time and peak memory usage."""
 	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, grad_acc)
 	if rank == 0:
 		print(f"\t{iter_time:.2f}s, Peak memory: {[f'{m:.2f}' for m in all_peak_mems]} GB")
 	return iter_time, all_peak_mems
+
 
 def get_placement(base: str, world_size: int) -> List[int]:
 	if base == "hanayo":
@@ -123,6 +131,7 @@ def get_placement(base: str, world_size: int) -> List[int]:
 		return [i for i in range(world_size)] * 2
 	else:
 		return [i for i in range(world_size)]
+
 
 def process_solution(
 	model: ChainTransformer,
@@ -134,12 +143,12 @@ def process_solution(
 	n: int,
 ) -> tuple[Optional[float], Optional[List[float]]]:
 	"""Process a single solution type and return benchmark results."""
-	
+
 	scheduler = solution.pop("scheduler", base)
 	placement = get_placement(scheduler, world_size)
 	if scheduler == "megatron":
 		scheduler = "1f1b"
-		
+
 	if solution is None:
 		if rank == 0:
 			print(f"No {solution_type} solution found for n = {n}")
@@ -274,6 +283,7 @@ def main():
 	# Print full stacktrace for any exceptions
 	except Exception as e:
 		import traceback
+
 		print(f"Error processing {args.solution_type} with n = {n}: {str(e)}")
 		print("Full stacktrace:")
 		traceback.print_exc()
