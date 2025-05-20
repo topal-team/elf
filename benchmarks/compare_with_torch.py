@@ -9,7 +9,7 @@ sys.path.append("./")
 from elf.zb_utils import replace_linear_with_linear_dw
 import elf.pipeline as MyPipe
 from elf.utils import Timer
-from models.simple import SimpleTransformer
+from models.simple import FullTransformer
 
 import torch.distributed.pipelining as PiPPy
 
@@ -26,8 +26,12 @@ parser.add_argument(
 )
 parser.add_argument("--mb_size", type=int, default=2, help="Microbatch size")
 parser.add_argument("--seq_len", type=int, default=1024, help="Sequence length")
+parser.add_argument("--input_dim", type=int, default=2000, required=False, help="input dimension")
 parser.add_argument("--hidden_dim", type=int, default=2048, help="Hidden dimension")
 parser.add_argument("--nblocks", type=int, default=64, help="Number of blocks")
+parser.add_argument("--nheads", type=int, default=32, required=False, help="number of attn heads")
+parser.add_argument("--dropout", type=float, default=0.1, required=False, help="dropout value")
+
 parser.add_argument("--niters", type=int, default=10, help="Number of iterations")
 parser.add_argument(
 	"--only",
@@ -41,7 +45,7 @@ args = parser.parse_args()
 
 nmb = args.pp * 2
 batch_size = args.mb_size * nmb
-model = SimpleTransformer(2000, args.hidden_dim, args.nblocks, args.seq_len)
+model = FullTransformer(args.input_dim, args.hidden_dim, args.nblocks, args.seq_len, args.nheads, args.dropout)
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
@@ -212,13 +216,19 @@ if __name__ == "__main__":
 	inputs = inputs.cuda()
 	targets = targets.cuda()
 
-	torch_time, torch_mem = pippy()
+	if args.only == "elf":
+		torch_time, torch_mem = (0.0, 0.0)
+	else:
+		torch_time, torch_mem = pippy()
 
 	dist.barrier()
 	torch.cuda.empty_cache()
 	torch.cuda.synchronize()
 
-	elf_time, elf_mem = elf()
+	if args.only == "torch":
+		elf_time, elf_mem = (0.0, 0.0)
+	else:
+		elf_time, elf_mem = elf()
 
 	# Gather memory stats from all GPUs
 	elf_mems = (
