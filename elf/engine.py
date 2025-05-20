@@ -265,7 +265,7 @@ class Engine:
 						loss, grad_fn = compute_loss(block, result[op.mb_id], microtargets[op.mb_id], loss_fn)
 						losses.append(loss)
 						grad_fns.append(grad_fn)
-						logger.debug(f"Finished forward of {block}") # "Computed loss = {loss.item()}"
+						logger.debug(f"Finished forward of {block}")  # "Computed loss = {loss.item()}"
 					else:
 						logger.warning(f"Tried to compute loss on a non-last block {block}")
 						continue
