@@ -59,7 +59,7 @@ assert args.nblocks >= args.pp, (
 
 def get_placement(schedule_type, world_size):
 	match schedule_type:
-		case "1f1b" | "zbh1" | "afab":
+		case "1f1b" | "zbh1" | "afab" | "zbh2" :
 			placement = list(range(world_size))
 		case "megatron":
 			placement = list(range(world_size)) * 2
@@ -183,7 +183,7 @@ def elf():
 		scheduler = "1f1b"  # Not the same name
 
 	for part in parts:
-		if scheduler in ["zbh1", "zbv"]:
+		if scheduler in ["zbh1", "zbv", "zbh2"]:
 			replace_linear_with_linear_dw(part, "cpu")
 
 	sources, dsts = MyPipe.get_sources_targets_sequential(placement)
@@ -232,6 +232,7 @@ if __name__ == "__main__":
 	else:
 		elf_time, elf_mem = elf()
 
+
 	# Gather memory stats from all GPUs
 	elf_mems = (
 		[torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
@@ -279,5 +280,9 @@ if __name__ == "__main__":
 		wandb.log(metrics)
 		wandb.finish()
 
+	del model
+	del inputs
+	del targets
+	
 	if dist.is_initialized():
 		dist.destroy_process_group()
