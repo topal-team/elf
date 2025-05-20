@@ -45,7 +45,9 @@ args = parser.parse_args()
 
 nmb = args.pp * 2
 batch_size = args.mb_size * nmb
-model = FullTransformer(args.input_dim, args.hidden_dim, args.nblocks, args.seq_len, args.nheads, args.dropout)
+model = FullTransformer(
+	args.input_dim, args.hidden_dim, args.nblocks, args.seq_len, args.nheads, args.dropout
+)
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn

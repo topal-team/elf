@@ -18,6 +18,7 @@ logger = logging.getLogger("engine")
 
 precise_timings = os.environ.get("ELF_TIMINGS", False)
 
+
 def _fake_p2p(data):
 	"""
 	Simulates P2P communication by creating a fake work.
