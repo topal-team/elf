@@ -15,6 +15,8 @@ import logging
 
 logger = logging.getLogger("engine")
 
+import os
+precise_timings = os.environ.get("ELF_TIMINGS", False)
 
 def _fake_p2p(data):
 	"""
@@ -76,6 +78,9 @@ class Engine:
 		self.rank = self.blocks[0].rank if blocks else None
 		for b in self.blocks:
 			assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
+		if precise_timings and self.rank == 0:
+			logger.info("Using precise timings")
+
 		self.id_to_block = {b.id: b for b in self.blocks}
 		self.comms = {}
 
@@ -167,10 +172,10 @@ class Engine:
 
 		grad_fns = deque()
 
-		# -- uncomment this for precise timings
-		# dist.barrier()
-		# torch.cuda.synchronize()
-		# start = _time_start()s
+		if precise_timings:
+			dist.barrier()
+			torch.cuda.synchronize()
+			start = _time_start()
 
 		pipe_start = time.time()
 		warmup_time = None
@@ -188,9 +193,10 @@ class Engine:
 			if warmup_time is None and op.op != OperationType.RECV_FORWARD:
 				# Warmup time is the time spent waiting for the first forward
 				# The first operation after that is the end of warmup
-				# torch.cuda.synchronize() # -- uncomment this for precise timings
-				# warmup_time = _time_end(start)
 				warmup_time = 0
+				if precise_timings:
+					torch.cuda.synchronize()
+					warmup_time = _time_end(start)
 
 			# A computation will synchronize! We want to enqueue all possible communications before that
 			if op.op in [
@@ -299,12 +305,13 @@ class Engine:
 		logger.debug(f"[Rank {self.rank}] - Finished execution")
 
 		self._run_comms()  # finish all comms
-		# torch.cuda.synchronize() # -- uncomment this for precise timings
+		if precise_timings:
+			torch.cuda.synchronize()
 		cooldown_start = time.time()
 
-		# -- uncomment this for precise timings
-		# dist.barrier()
-		# torch.cuda.synchronize()
+		if precise_timings:
+			dist.barrier()
+			torch.cuda.synchronize()
 
 		pipe_end = time.time()
 
