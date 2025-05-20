@@ -12,10 +12,10 @@ from .scheduling import OperationType, OpOptions
 from .utils import Timer, op_to_str
 
 import logging
+import os
 
 logger = logging.getLogger("engine")
 
-import os
 precise_timings = os.environ.get("ELF_TIMINGS", False)
 
 def _fake_p2p(data):
