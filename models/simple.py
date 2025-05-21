@@ -196,6 +196,7 @@ class SimpleFastAttention(nn.Module):
 		self.key = nn.Linear(hidden_dim, hidden_dim)
 		self.value = nn.Linear(hidden_dim, hidden_dim)
 		self.softmax = nn.Softmax(dim=-1)
+		self.sdp_backend = sdp_backend
 
 	def forward(self, inputs):
 		# Linear projections
@@ -318,9 +319,10 @@ class FastAttention(nn.Module):
 		self.dim = dim
 		self.scale = 1.0 / math.sqrt(self.dim)
 		self.dropout = nn.Dropout(dropout)
+		self.sdp_backend = sdp_backend
 
 	def forward(self, q, k, v):
-		with sdpa_kernel(backends=[SDPBackend.__dict__[sdp_backend]]):
+		with sdpa_kernel(backends=[SDPBackend.__dict__[self.sdp_backend]]):
 			context = F.scaled_dot_product_attention(q, k, v)
 			return context
 
