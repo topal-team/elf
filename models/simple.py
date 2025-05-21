@@ -520,7 +520,7 @@ if __name__ == "__main__":
 
 	sdp_backend = "FLASH_ATTENTION"
 	if sdp_backend in ["FLASH_ATTENTION", "MATH"]:
-		dtype = torch.bfloat16
+		dtype = torch.float16
 	else:
 		dtype = torch.float32
 
@@ -531,6 +531,7 @@ if __name__ == "__main__":
 	n_blocks = 4
 	embed_dim = num_heads * head_dim
 	hidden_dim = embed_dim
+
 
 	model = (
 		FullTransformer(
@@ -545,8 +546,8 @@ if __name__ == "__main__":
 		.to(dtype)
 	)
 
-	# g = torch.fx.symbolic_trace(model).graph
-	# g.print_tabular()
+	g = torch.fx.symbolic_trace(model).graph
+	g.print_tabular()
 
 	sample = model.get_sample(batch_size).to(device)  # keep as long for embedding
 	target = model.get_target(batch_size).to(device)
@@ -575,8 +576,8 @@ if __name__ == "__main__":
 		.to(dtype)
 	)
 
-	# g = torch.fx.symbolic_trace(model).graph
-	# g.print_tabular()
+	g = torch.fx.symbolic_trace(model).graph
+	g.print_tabular()
 
 	sample = model.get_sample(batch_size).to(device).to(dtype)  # keep as long for embedding
 	target = model.get_target(batch_size).to(device).to(dtype)
@@ -585,6 +586,7 @@ if __name__ == "__main__":
 		output = model(sample)
 		loss = model.loss_fn(output, target)
 		loss.backward()
+
 
 	with TimerGPU() as timer:
 		for _ in range(10):
