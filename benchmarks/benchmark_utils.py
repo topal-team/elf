@@ -80,6 +80,15 @@ def bench(model, parts, scheduler, placement, gradient_accumulation=1):
 	return iter_time, all_peak_mems
 
 
+def meta_to_gpu(model):
+	model.to_empty(device="cuda")
+	for param in model.parameters():
+		if hasattr(param, "reset_parameters"):
+			param.reset_parameters()
+
+	return model
+
+
 def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 	num_blocks = len(model.blocks)
 	num_ranks = len(placement)
@@ -102,7 +111,9 @@ def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 
 		start_idx = end_idx
 
-	return [parts[i] for i, p in enumerate(placement) if p == rank]
+	parts = [parts[i] for i, p in enumerate(placement) if p == rank]
+	parts = [meta_to_gpu(p) for p in parts]
+	return parts
 
 
 def find(sched, optype, block_id, mb_id):

@@ -88,8 +88,12 @@ def create_model(model_config: Dict, n: int) -> ChainTransformer:
 	num_heads = model_config["n_heads"]
 	dropout = model_config["dropout"]
 
-	model = ChainTransformer(hidden_size, n, seq_len, num_heads, dropout)
-	replace_linear_with_linear_dw(model, "cpu")
+	print(f"Rank {dist.get_rank()}: creating model...", flush=True)
+	with torch.device("meta"):
+		model = ChainTransformer(hidden_size, n, seq_len, num_heads, dropout)
+	print(f"Rank {dist.get_rank()}: model created.", flush=True)
+	replace_linear_with_linear_dw(model, "meta")
+	print(f"Rank {dist.get_rank()}: linear replaced with linear_dw.", flush=True)
 	# for param in model.parameters():
 	# 	tensor = param.data.cuda()
 	# 	dist.broadcast(tensor, src=0)
@@ -243,10 +247,6 @@ def main():
 	model = create_model(model_config, int(n))
 	log_model_info(model, int(n), rank)
 
-	# Process the specific solution type
-	model.zero_grad()
-	model.cpu()
-
 	if rank == 0:
 		gpu_allocated = torch.cuda.memory_allocated() / (1024**3)
 		process = psutil.Process(os.getpid())
@@ -277,7 +277,6 @@ def main():
 
 	except torch.cuda.OutOfMemoryError:
 		print(f"Out of memory for {args.solution_type} with n = {n}")
-		dist.destroy_process_group()
 		sys.exit(1)
 
 	# Print full stacktrace for any exceptions
@@ -287,6 +286,7 @@ def main():
 		print(f"Error processing {args.solution_type} with n = {n}: {str(e)}")
 		print("Full stacktrace:")
 		traceback.print_exc()
+		sys.exit(1)
 
 	if dist.is_initialized():
 		dist.destroy_process_group()
