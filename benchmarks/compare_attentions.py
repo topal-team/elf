@@ -1,7 +1,7 @@
 
 import os
 import sys
-sys.path.append('../')
+sys.path.append('.')
 
 from models.simple import FullTransformer, ChainTransformer
 from elf.utils import TimerGPU
