@@ -182,7 +182,7 @@ class PipelineBlock:
 		self.remat_manager = RematManager(self)
 
 	def __str__(self) -> str:
-		return f"[Layer {self.id} : GPU {self.rank}]"
+		return f"Rank {self.rank} - Layer {self.id}"
 
 	def forward(self, mb_id, **options):
 		"""
@@ -195,6 +195,7 @@ class PipelineBlock:
 		# Gather all variables needed for forward
 		inputs = []
 		for input_var in self.input_variables:
+			logger.debug(f"{self} - Waiting for {input_var}")
 			x = input_var.wait_and_pop(mb_id)
 
 			if x.is_floating_point():
@@ -632,8 +633,10 @@ class PipelineBlock:
 		# Maybe we should time this and add to compute time, but it's probably negligible
 		output_grads = []
 		for output_var in self.output_variables:
+			logger.debug(f"{self} - Waiting for {output_var[0]}")
 			grad_accumulator = output_var[0].wait_and_pop(mb_id)
 			for dst in output_var[1:]:
+				logger.debug(f"{self} - Waiting for {dst}")
 				grad = dst.wait_and_pop(mb_id)
 				grad_accumulator += grad
 			output_grads.append(grad_accumulator)

@@ -120,7 +120,7 @@ class Pipeline:
 		:param target: targets
 		:type target: torch.Tensor
 		:param loss_fn: loss function to be used. We recommend using torch's built-in loss functions, but you can pass any function that matches the signature. Be careful, the loss is computed on each micro-batch, then averaged over the batch dimension. Depending on the loss function, this may not be equivalent to computing the loss on the full batch.
-		:type loss_fn: Function (Tensor, Tensor) -> Tensor
+		:type loss_fn: Function (Tensor,Tensor) -> Tensor
 		:param split_size: either one size for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or a list of possibly different micro batch sizes. In that case the sum of the sizes must be equal to the batch size. Default value is (batch_size // number of gpus)
 		:type split_size: int or List[int]
 		:param profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation

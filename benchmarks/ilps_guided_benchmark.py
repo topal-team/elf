@@ -5,6 +5,8 @@ Benchmarking script for ILPS-guided transformer model execution strategies.
 This script benchmarks transformer model performance using different execution strategies
 (balanced partitioning, recomputation, etc.) based on ILP solver solutions. It measures
 execution time and peak memory usage for each strategy and reports the results.
+The results are added to the output file, in the entry [n][solution_type] (that gets created if it doesn't exist).
+
 
 Usage:
     torchrun --nproc-per-node=NUM_GPUS benchmarks/ilps_guided_benchmark.py --config_file CONFIG_FILE --solution_file SOLUTION_FILE --output_file OUTPUT_FILE --n N --solution_type SOLUTION_TYPE [options]
@@ -57,7 +59,7 @@ def setup_distributed() -> tuple[int, int]:
 	"""Initialize distributed training environment."""
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=1800))  # 30 minutes
+	dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=300))  # 5 minutes
 	return dist.get_rank(), dist.get_world_size()
 
 
@@ -86,8 +88,12 @@ def create_model(model_config: Dict, n: int) -> ChainTransformer:
 	num_heads = model_config["n_heads"]
 	dropout = model_config["dropout"]
 
-	model = ChainTransformer(hidden_size, n, seq_len, num_heads, dropout)
-	replace_linear_with_linear_dw(model, "cpu")
+	print(f"Rank {dist.get_rank()}: creating model...", flush=True)
+	with torch.device("meta"):
+		model = ChainTransformer(hidden_size, n, seq_len, num_heads, dropout)
+	print(f"Rank {dist.get_rank()}: model created.", flush=True)
+	replace_linear_with_linear_dw(model, "meta")
+	print(f"Rank {dist.get_rank()}: linear replaced with linear_dw.", flush=True)
 	# for param in model.parameters():
 	# 	tensor = param.data.cuda()
 	# 	dist.broadcast(tensor, src=0)
@@ -108,13 +114,27 @@ def log_model_info(model: ChainTransformer, n: int, rank: int) -> None:
 
 
 def run_benchmark(
-	model: ChainTransformer, parts: Any, scheduler: str, grad_acc: int = 1, rank: int = 0
+	model: ChainTransformer,
+	parts: Any,
+	scheduler: str,
+	placement: List[int],
+	grad_acc: int = 1,
+	rank: int = 0,
 ) -> tuple[float, List[float]]:
 	"""Run benchmark and return iteration time and peak memory usage."""
-	iter_time, all_peak_mems = bench(model, parts, scheduler, grad_acc)
+	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, grad_acc)
 	if rank == 0:
 		print(f"\t{iter_time:.2f}s, Peak memory: {[f'{m:.2f}' for m in all_peak_mems]} GB")
 	return iter_time, all_peak_mems
+
+
+def get_placement(base: str, world_size: int) -> List[int]:
+	if base == "hanayo":
+		return [i for i in range(world_size)] + list(reversed([i for i in range(world_size)]))
+	elif base == "megatron":
+		return [i for i in range(world_size)] * 2
+	else:
+		return [i for i in range(world_size)]
 
 
 def process_solution(
@@ -127,6 +147,12 @@ def process_solution(
 	n: int,
 ) -> tuple[Optional[float], Optional[List[float]]]:
 	"""Process a single solution type and return benchmark results."""
+
+	scheduler = solution.pop("scheduler", base)
+	placement = get_placement(scheduler, world_size)
+	if scheduler == "megatron":
+		scheduler = "1f1b"
+
 	if solution is None:
 		if rank == 0:
 			print(f"No {solution_type} solution found for n = {n}")
@@ -137,25 +163,27 @@ def process_solution(
 
 	if solution_type in ["combined", "combinedf"]:
 		balance = [int(b) for b in solution["b"]]
-		scheduler = PartialRematScheduler(solution, base)
+		scheduler = PartialRematScheduler(solution, scheduler)
+
 	elif solution_type in ["balance"]:
 		balance = [int(b) for b in solution["b"]]
-		scheduler = base
 
 	# FullRemat, Greedy and Baselines are implemented with the FullRematScheduler
 	else:
-		balance = balanced_partition(n, world_size)
-		scheduler = FullRematScheduler(solution, base, balance)
+		balance = balanced_partition(n, placement)
+		scheduler = FullRematScheduler(solution, scheduler, balance)
 
-	parts = get_handcrafted_imbalanced_partition(model, rank, list(range(world_size)), balance)
-	return run_benchmark(model, parts, scheduler, rank=rank)
+	parts = get_handcrafted_imbalanced_partition(model, rank, placement, balance)
+	return run_benchmark(model, parts, scheduler, placement, rank=rank)
 
 
-def balanced_partition(n: int, world_size: int) -> List[int]:
+def balanced_partition(n: int, placement: List[int]) -> List[int]:
 	"""Distribute blocks evenly, handling remainder."""
-	blocks_per_gpu = n // world_size
-	remainder = n % world_size
-	return [blocks_per_gpu + (1 if i < remainder else 0) for i in range(world_size)]
+	if n < len(placement):
+		logging.getLogger().warning(f"n = {n} is less than the number of GPUs = {len(placement)}")
+	blocks_per_gpu = n // len(placement)
+	remainder = n % len(placement)
+	return [blocks_per_gpu + (1 if i < remainder else 0) for i in range(len(placement))]
 
 
 def main():
@@ -219,10 +247,6 @@ def main():
 	model = create_model(model_config, int(n))
 	log_model_info(model, int(n), rank)
 
-	# Process the specific solution type
-	model.zero_grad()
-	model.cpu()
-
 	if rank == 0:
 		gpu_allocated = torch.cuda.memory_allocated() / (1024**3)
 		process = psutil.Process(os.getpid())
@@ -252,12 +276,17 @@ def main():
 				json.dump(results, f, indent=4)
 
 	except torch.cuda.OutOfMemoryError:
-		if rank == 0:
-			print(f"Out of memory for {args.solution_type} with n = {n}")
+		print(f"Out of memory for {args.solution_type} with n = {n}")
+		sys.exit(1)
 
+	# Print full stacktrace for any exceptions
 	except Exception as e:
-		if rank == 0:
-			print(f"Error processing {args.solution_type} with n = {n}: {str(e)}")
+		import traceback
+
+		print(f"Error processing {args.solution_type} with n = {n}: {str(e)}")
+		print("Full stacktrace:")
+		traceback.print_exc()
+		sys.exit(1)
 
 	if dist.is_initialized():
 		dist.destroy_process_group()

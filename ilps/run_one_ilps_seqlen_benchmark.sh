@@ -1,19 +1,15 @@
 #!/bin/bash
 
-#SBATCH --account=hyb@v100
-#SBATCH --time=01:00:00
-#SBATCH --exclusive
-
-source ~/elf-dev/venv/bin/activate
-export OMP_NUM_THREADS=4
-
 CONFIG_FILE=$1
 CONFIG_NAME=$(basename $CONFIG_FILE .json)
 SEQLEN=$(echo $CONFIG_NAME | grep -o "seqlen_[0-9]*" | cut -d_ -f2)
+BASE_CONFIG_NAME=$(echo $CONFIG_NAME | sed 's/_seqlen_[0-9]*$//')
 RESULTS_DIR=$2
 NGPUS=$3
 NBLOCKS=$4
 SCHEDULER=$5
+MEMGPU=$6
+NBLOCKS=$7
 
 # Run profiling
 echo "Running profiling..."
@@ -35,10 +31,13 @@ fi
 
 # Generate solutions
 echo "Generating solutions with $NBLOCKS blocks..."
-python ilps/runall.py --config $CONFIG_FILE --nblocks $NBLOCKS --output $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --processors $NGPUS --scheduler $SCHEDULER
+python pipeline-ilps/runall.py --config $CONFIG_FILE --nblocks $NBLOCKS --output $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --processors $NGPUS --scheduler $SCHEDULER --mem $MEMGPU
+python pipeline-ilps/generate_baselines.py --config $CONFIG_FILE --output $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --processors $NGPUS --nblocks $NBLOCKS --scheduler $SCHEDULER
+
+python ilps/generate_benchmark_jobs.py --solutions-file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --config-file $CONFIG_FILE --output-file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base-scheduler $SCHEDULER --ngpus $NGPUS --slurm-opts "-A gdh@h100 -C h100 --gpus $NGPUS --time=01:00:00" --output-script $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh
 
 # Run the benchmark
-echo "Running benchmark for sequence length $SEQLEN..."
-torchrun --nproc-per-node=$NGPUS benchmarks/ilps_guided_benchmark.py --restart --config_file $CONFIG_FILE --solution_file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --output_file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base $SCHEDULER
+# echo "Running benchmark for sequence length $SEQLEN..."
+# torchrun --nproc-per-node=$NGPUS benchmarks/ilps_guided_benchmark.py --restart --config_file $CONFIG_FILE --solution_file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --output_file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base $SCHEDULER --n $NBLOCKS
 
-echo "Completed benchmark for sequence length $SEQLEN"
+# echo "Completed benchmark for sequence length $SEQLEN"

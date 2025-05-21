@@ -132,8 +132,8 @@ class LayerDW(nn.Module):
 
 
 class LinearDW(nn.Linear, LayerDW):
-	def __init__(self, in_features, out_features, bias=True):
-		super(LinearDW, self).__init__(in_features, out_features, bias)
+	def __init__(self, *args, **kwargs):
+		super(LinearDW, self).__init__(*args, **kwargs)
 
 		# Execution order:
 		# LinearDW.forward -> LinearDX.forward -> LinearDX.backward -> LinearDW.backward
@@ -181,12 +181,12 @@ def replace_linear_with_linear_dw(model, device):
 			else:
 				parent = model.get_submodule(name[: name.rfind(".")])
 			child = name.split(".")[-1]
-			new_module = LinearDW(module.in_features, module.out_features, module.bias is not None).to(
-				device
+			new_module = LinearDW(
+				module.in_features, module.out_features, module.bias is not None, device="meta"
 			)
-			new_module.weight.data = module.weight.data  # avoid copying data
+			new_module.weight = module.weight  # avoid copying data
 			if module.bias is not None:
-				new_module.bias.data = module.bias.data
+				new_module.bias = module.bias
 			setattr(parent, child, new_module)
 
 

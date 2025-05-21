@@ -156,41 +156,44 @@ def resolve_one_pair(ops1, ops2):
 	# Find consecutive complementary operations in ops1
 	for i in range(len(ops1) - 1):
 		op1 = ops1[i]
-		op2 = ops1[i + 1]
-		if op1.op not in comm_types or op2.op not in comm_types:
+		if op1.op not in comm_types:
 			continue
-
-		# If it's already batched, there is no issue here ; we can skip
-		if (
-			op1.options.get(OpOptions.BATCHED_COMM, None) is not None
-			or op2.options.get(OpOptions.BATCHED_COMM, None) is not None
-		):
-			continue
-
-		# Check if operations are complementary
-		if op2.op in complementary(op1.op):
-			op3 = find_matching_op(op2)
-			op4 = find_matching_op(op1)
-
-			if ops2.index(op3) > ops2.index(op4):
-				# Not blocking ! That's the regular (send/recv) (recv/send) pattern
+		for j in range(i + 1, len(ops2) - 1):
+			op2 = ops1[j]
+			if op2.op not in comm_types:
 				continue
 
-			# If op1 and op2 are not batched, op3 and op4 should not be batched either
-			assert (
-				op3.options.get(OpOptions.BATCHED_COMM, None) is None
-				and op4.options.get(OpOptions.BATCHED_COMM, None) is None
-			), "Operations should not be batched already"
+			# If it's already batched, there is no issue here ; we can skip
+			if (
+				op1.options.get(OpOptions.BATCHED_COMM, None) is not None
+				or op2.options.get(OpOptions.BATCHED_COMM, None) is not None
+			):
+				continue
 
-			id_ = (rank1, rank2, i + 1)  # Unique id for pair + batch
-			if not dist.is_initialized() or dist.get_rank() == 0:
-				logger.debug(
-					f"Marked operations for batched communication: {op1}, {op2}, {op3}, {op4} with id {id_}"
-				)
-			op1.options[OpOptions.BATCHED_COMM] = id_
-			op2.options[OpOptions.BATCHED_COMM] = id_
-			op3.options[OpOptions.BATCHED_COMM] = id_
-			op4.options[OpOptions.BATCHED_COMM] = id_
+			# Check if operations are complementary
+			if op2.op in complementary(op1.op):
+				op3 = find_matching_op(op2)
+				op4 = find_matching_op(op1)
+
+				if ops2.index(op3) > ops2.index(op4):
+					# Not blocking ! That's the regular (send/recv) (recv/send) pattern
+					continue
+
+				# If op1 and op2 are not batched, op3 and op4 should not be batched either
+				assert (
+					op3.options.get(OpOptions.BATCHED_COMM, None) is None
+					and op4.options.get(OpOptions.BATCHED_COMM, None) is None
+				), "Operations should not be batched already"
+
+				id_ = (rank1, rank2, i + 1, j + 1)  # Unique id for pair + batch
+				if not dist.is_initialized() or dist.get_rank() == 0:
+					logger.debug(
+						f"Marked operations for batched communication: {op1}, {op2}, {op3}, {op4} with id {id_}"
+					)
+				op1.options[OpOptions.BATCHED_COMM] = id_
+				op2.options[OpOptions.BATCHED_COMM] = id_
+				op3.options[OpOptions.BATCHED_COMM] = id_
+				op4.options[OpOptions.BATCHED_COMM] = id_
 
 
 def get_peer(op):
@@ -279,7 +282,10 @@ def schedule_to_str(schedule, print_comms=False):
 		ops_str = " ".join(
 			filter(
 				lambda s: s != "",
-				[f"{shorten(op)}{op.mb_id if op.mb_id is not None else ''}" for op in rank_ops],
+				[
+					f"{shorten(op)}{op.block_id}-{op.mb_id if op.mb_id is not None else ''}"
+					for op in rank_ops
+				],
 			)
 		)
 		lines.append(f"Rank {rank}: {ops_str}")

@@ -109,10 +109,10 @@ class Engine:
 			if any(c.op.__name__ == "isend" for c in comms) and any(
 				c.op.__name__ == "irecv" for c in comms
 			):
-				if len(comms) > 1:
-					logger.debug(
-						f"Rank {self.rank} - Running batched communications with id {id_}: {[op_to_str(c) for c in comms]}"
-					)
+				assert len(comms) > 1, "Was this condition useful after all?"
+				logger.debug(
+					f"Rank {self.rank} - Running batched communications with id {id_}: {[op_to_str(c) for c in comms]}"
+				)
 				works.extend(dist.batch_isend_irecv(comms))
 
 				self.comms[id_] = []
@@ -120,7 +120,8 @@ class Engine:
 		for w in works:
 			w.wait()
 
-		logger.debug(f"Rank {self.rank} - Finished batched communications")
+		if works:
+			logger.debug(f"Rank {self.rank} - Finished batched communications")
 
 		# Clean up
 		keys = list(self.comms.keys())
@@ -187,7 +188,7 @@ class Engine:
 			if block is None:
 				continue  # not my job
 
-			logger.debug(f"Computing {op} on block {block}")
+			logger.debug(f"Rank {self.rank} - Computing {op} on block {block}")
 
 			if profile:
 				torch.cuda.nvtx.range_push(f"{block}:{op}")
@@ -265,7 +266,7 @@ class Engine:
 						loss, grad_fn = compute_loss(block, result[op.mb_id], microtargets[op.mb_id], loss_fn)
 						losses.append(loss)
 						grad_fns.append(grad_fn)
-						logger.debug(f"Finished forward of {block}")  # "Computed loss = {loss.item()}"
+						logger.debug(f"Rank {self.rank} - Finished forward of {block}")
 					else:
 						logger.warning(f"Tried to compute loss on a non-last block {block}")
 						continue
@@ -303,7 +304,7 @@ class Engine:
 			if profile:
 				torch.cuda.nvtx.range_pop()
 
-		logger.debug(f"[Rank {self.rank}] - Finished execution")
+		logger.debug(f"Rank {self.rank} - Finished execution")
 
 		self._run_comms()  # finish all comms
 		if precise_timings:

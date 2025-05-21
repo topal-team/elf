@@ -45,9 +45,10 @@ args = parser.parse_args()
 
 nmb = args.pp * 2
 batch_size = args.mb_size * nmb
-model = FullTransformer(
-	args.input_dim, args.hidden_dim, args.nblocks, args.seq_len, args.nheads, args.dropout
-)
+with torch.device("meta"):
+	model = FullTransformer(
+		args.input_dim, args.hidden_dim, args.nblocks, args.seq_len, args.nheads, args.dropout
+	)
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
@@ -55,6 +56,20 @@ loss_fn = model.loss_fn
 assert args.nblocks >= args.pp, (
 	"Number of blocks must be greater than or equal to pipeline parallelism degree"
 )
+
+
+def reset_parameters(module):
+	for c in module.children():
+		if getattr(c, "reset_parameters", False):
+			c.reset_parameters()
+		else:
+			reset_parameters(c)
+
+
+def send_meta_to_device(model, device="cuda"):
+	model.to_empty(device=device)
+	reset_parameters(model)
+	return model
 
 
 def get_placement(schedule_type, world_size):
@@ -115,11 +130,11 @@ def get_parts(rank, placement):
 			continue
 
 		if i == 0:
-			parts.append(nn.Sequential(model.embed, *model.blocks[start:end]).cuda())
+			parts.append(send_meta_to_device(nn.Sequential(model.embed, *model.blocks[start:end])))
 		elif i == len(placement) - 1:
-			parts.append(nn.Sequential(*model.blocks[start:end], model.head).cuda())
+			parts.append(send_meta_to_device(nn.Sequential(*model.blocks[start:end], model.head)))
 		else:
-			parts.append(nn.Sequential(*model.blocks[start:end]).cuda())
+			parts.append(send_meta_to_device(nn.Sequential(*model.blocks[start:end])))
 
 		start = end
 

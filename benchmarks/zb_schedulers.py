@@ -34,12 +34,12 @@ class FullRematScheduler(SchedulerBase):
 		self.mbs = self.round_to_int(mbs)
 		self.factors = factors
 
-	def round_to_int(self, mbs):
-		for key in mbs:
-			for i in range(len(mbs[key])):
-				mbs[key][i] = [round(x) for x in mbs[key][i]]
+	def round_to_int(self, solution):
+		for key in solution:
+			for i in range(len(solution[key])):
+				solution[key][i] = [round(x) for x in solution[key][i]]
 
-		return mbs
+		return solution
 
 	def __call__(self, placement, nmb, signatures):
 		sched = self.base_scheduler(placement, nmb, signatures)
