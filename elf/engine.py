@@ -316,11 +316,13 @@ class Engine:
 
 		pipe_end = time.time()
 
+
 		compute_time = 0
 		all_events = {}
-		for block in self.blocks:
-			compute_time += sum([f.time() for f in block.compute_time])
-			all_events.update({timer.name: timer.time() for timer in block.compute_time})
+		if precise_timings:
+			for block in self.blocks:
+				compute_time += sum([f.time() for f in block.compute_time])
+				all_events.update({timer.name: timer.time() for timer in block.compute_time})
 
 		stats = {
 			"total": pipe_end - pipe_start,
