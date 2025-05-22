@@ -317,7 +317,6 @@ class Engine:
 
 		pipe_end = time.time()
 
-
 		compute_time = 0
 		all_events = {}
 		if precise_timings:

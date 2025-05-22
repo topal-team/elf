@@ -332,7 +332,7 @@ class MultiHeadAttention(nn.Module):
 	Util for transformers.
 	"""
 
-	def __init__(self, dim, num_heads=4, dropout=0.1, sdp_backend="FLASH_ATTENTION"):
+	def __init__(self, dim, num_heads=4, dropout=0.1, sdp_backend=None):
 		super().__init__()
 		assert dim % num_heads == 0, "dim must be divisible by num_heads"
 
@@ -495,16 +495,18 @@ class ChainTransformer(nn.Module):
 			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout, ffn_dim, sdp_backend))
 			self.add_module(f"block_{i}", self.blocks[-1])
 
+		print(f"Using {sdp_backend if sdp_backend is not None else 'default'} backend for attention")
+
 	def forward(self, x):
 		for b in self.blocks:
 			x = b(x)
 		return x
 
-	def get_sample(self, batch_size):
-		return torch.randn(batch_size, self.seq_len, self.hidden_dim)
+	def get_sample(self, batch_size, dtype=torch.float32):
+		return torch.randn(batch_size, self.seq_len, self.hidden_dim, dtype=dtype)
 
-	def get_target(self, batch_size):
-		return self.get_sample(batch_size)
+	def get_target(self, batch_size, dtype=torch.float32):
+		return self.get_sample(batch_size, dtype)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
@@ -531,7 +533,6 @@ if __name__ == "__main__":
 	n_blocks = 4
 	embed_dim = num_heads * head_dim
 	hidden_dim = embed_dim
-
 
 	model = (
 		FullTransformer(
@@ -586,7 +587,6 @@ if __name__ == "__main__":
 		output = model(sample)
 		loss = model.loss_fn(output, target)
 		loss.backward()
-
 
 	with TimerGPU() as timer:
 		for _ in range(10):

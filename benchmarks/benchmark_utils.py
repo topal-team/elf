@@ -12,14 +12,14 @@ from elf.zb_utils import LayerDW
 from elf import Pipeline, get_sources_targets_sequential
 
 
-def bench(model, parts, scheduler, placement, gradient_accumulation=1):
+def bench(model, parts, scheduler, placement, dtype=torch.float32):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
 	n_iterations = 20
 
-	microbatch_size = 2 // gradient_accumulation
-	n_micro_batches = world_size * 2 * gradient_accumulation
+	microbatch_size = 2
+	n_micro_batches = world_size * 2
 	batch_size = microbatch_size * n_micro_batches
 
 	loss_fn = model.loss_fn
@@ -38,8 +38,8 @@ def bench(model, parts, scheduler, placement, gradient_accumulation=1):
 
 	# test_correctness(model, pipe)
 
-	inputs = model.get_sample(batch_size)
-	targets = model.get_target(batch_size)
+	inputs = model.get_sample(batch_size, dtype)
+	targets = model.get_target(batch_size, dtype)
 
 	# Warmup iterations
 	for _ in range(3):
@@ -59,8 +59,8 @@ def bench(model, parts, scheduler, placement, gradient_accumulation=1):
 	start.record()
 	for i in range(n_iterations):
 		model.zero_grad()
-		inputs = model.get_sample(batch_size)
-		targets = model.get_target(batch_size)
+		inputs = model.get_sample(batch_size, dtype)
+		targets = model.get_target(batch_size, dtype)
 		_ = pipe(inputs, targets, loss_fn, split_size=microbatch_size)
 
 	dist.barrier()

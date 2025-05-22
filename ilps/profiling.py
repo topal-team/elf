@@ -35,6 +35,19 @@ from elf.utils import Timer
 default_config = {"hidden_dim": 4096, "seq_len": 1024, "num_heads": 32, "dropout": 0.1}
 
 
+def get_precision(precision: str) -> torch.dtype:
+	"""Get the precision from the precision string."""
+	match precision:
+		case "fp32":
+			return torch.float32
+		case "fp16":
+			return torch.float16
+		case "bf16":
+			return torch.bfloat16
+		case _:
+			raise ValueError(f"Invalid precision: {precision}")
+
+
 def parse_args():
 	parser = argparse.ArgumentParser(
 		description="Measure transformer performance with different configurations"
@@ -68,6 +81,12 @@ def parse_args():
 		default=100,
 		help="Number of iterations to run for each configuration (default: 100)",
 	)
+	parser.add_argument(
+		"--sdp-backend", "-sdp", type=str, default="None", help="SDP backend to use (default: None)"
+	)
+	parser.add_argument(
+		"--precision", "-p", type=str, default="fp32", help="Precision to use (default: fp32)"
+	)
 	return parser.parse_args()
 
 
@@ -95,15 +114,21 @@ def bparams(model):
 			module.backward(0)
 
 
-def create_model(n_blocks, config):
+def create_model(n_blocks, config, sdp_backend, precision):
 	model = ChainTransformer(
-		config["hidden_dim"], n_blocks, config["seq_len"], config["num_heads"], config["dropout"]
+		config["hidden_dim"],
+		n_blocks,
+		config["seq_len"],
+		config["num_heads"],
+		config["dropout"],
+		sdp_backend=sdp_backend,
+		precision=precision,
 	).cuda()
 	replace_linear_with_linear_dw(model, "cuda:0")
 	return model
 
 
-def measure_times(model, batch_size, n_iter):
+def measure_times(model, batch_size, n_iter, precision):
 	start_mem = torch.cuda.memory_allocated()
 	end_mem = torch.cuda.memory_allocated()
 	n_blocks = model.num_blocks if hasattr(model, "num_blocks") else len(model.blocks)
@@ -116,7 +141,7 @@ def measure_times(model, batch_size, n_iter):
 	print(f"Param size per block: {param_size_per_block:.3f}MB / block")
 
 	# Warmup
-	sample = model.get_sample(batch_size).cuda()
+	sample = model.get_sample(batch_size, precision).cuda()
 	for _ in range(10):
 		y = model(sample)
 		y.sum().backward()
@@ -129,7 +154,7 @@ def measure_times(model, batch_size, n_iter):
 	mems = [0, 0, 0]
 
 	for i in range(n_iter):
-		sample = model.get_sample(batch_size).cuda()
+		sample = model.get_sample(batch_size, precision).cuda()
 		start_mem = torch.cuda.memory_allocated()
 		with Timer() as t:
 			y = model(sample)
@@ -166,10 +191,10 @@ def measure_times(model, batch_size, n_iter):
 	return avg_times, avg_mems_per_block_batch, param_size_per_block
 
 
-def measure_memory_only(model, batch_size):
+def measure_memory_only(model, batch_size, precision):
 	"""Separate function to measure only Mfp and Mbp without doing timing measurements"""
 	n_blocks = len(model.blocks)
-	sample = model.get_sample(batch_size).cuda()
+	sample = model.get_sample(batch_size, precision).cuda()
 
 	# Warmup for initial param grads allocations
 	y = model(sample)
@@ -203,7 +228,7 @@ def measure_memory_only(model, batch_size):
 			layer.clear()
 
 	torch.cuda.empty_cache()
-	sample = model.get_sample(batch_size).cuda()
+	sample = model.get_sample(batch_size, precision).cuda()
 
 	# Measure Mbp (memory for gradients)
 	start_mem = torch.cuda.memory_allocated()
@@ -245,6 +270,8 @@ def main():
 	args = parse_args()
 	config = load_config(args.config)
 
+	precision = get_precision(args.precision)
+
 	# Parse block sizes and batch sizes from command line
 	block_sizes = [int(x) for x in args.blocks.split(",")]
 	batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
@@ -272,8 +299,8 @@ def main():
 	n = block_sizes[0]
 	bs = batch_sizes[0]
 	print(f"\nMeasuring memory for {n} blocks, batch size {bs}:")
-	model = create_model(n, config)
-	mfp, mbp = measure_memory_only(model, bs)
+	model = create_model(n, config, args.sdp_backend, precision)
+	mfp, mbp = measure_memory_only(model, bs, precision)
 	stats["mfp_per_block_batch"] = mfp
 	stats["mbp_per_block_batch"] = mbp
 
@@ -283,8 +310,8 @@ def main():
 		for bs in batch_sizes:
 			print(f"\nMeasuring for {n} blocks, batch size {bs}:")
 			try:
-				model = create_model(n, config)
-				times, mems, param_size_per_block = measure_times(model, bs, n_iter)
+				model = create_model(n, config, args.sdp_backend, precision)
+				times, mems, param_size_per_block = measure_times(model, bs, n_iter, precision)
 
 				stats["no_recompute"]["times"].append(times)
 				stats["no_recompute"]["features"].append([n, bs])
@@ -299,9 +326,9 @@ def main():
 		for bs in batch_sizes:
 			print(f"\nMeasuring recompute for {n} blocks, batch size {bs}:")
 			try:
-				model = create_model(n, config)
+				model = create_model(n, config, args.sdp_backend, precision)
 				model = apply_checkpointing(model)
-				times, mems, param_size_per_block = measure_times(model, bs, n_iter)
+				times, mems, param_size_per_block = measure_times(model, bs, n_iter, precision)
 				stats["recompute"]["times"].append(times)
 				stats["recompute"]["features"].append([n, bs])
 				stats["recompute"]["memory"].append(mems)

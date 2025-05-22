@@ -81,7 +81,9 @@ def load_model_config(config_file: str) -> Dict:
 	return config["model"]
 
 
-def create_model(model_config: Dict, n: int) -> ChainTransformer:
+def create_model(
+	model_config: Dict, n: int, sdp_backend: str, precision: torch.dtype
+) -> ChainTransformer:
 	"""Create and initialize the model."""
 	hidden_size = model_config["hidden_dim"]
 	seq_len = model_config["seq_len"]
@@ -89,7 +91,9 @@ def create_model(model_config: Dict, n: int) -> ChainTransformer:
 	dropout = model_config["dropout"]
 
 	with torch.device("meta"):
-		model = ChainTransformer(hidden_size, n, seq_len, num_heads, dropout)
+		model = ChainTransformer(
+			hidden_size, n, seq_len, num_heads, dropout, sdp_backend=sdp_backend
+		).to(precision)
 
 	replace_linear_with_linear_dw(model, "meta")
 	return model
@@ -112,11 +116,11 @@ def run_benchmark(
 	parts: Any,
 	scheduler: str,
 	placement: List[int],
-	grad_acc: int = 1,
+	dtype: torch.dtype,
 	rank: int = 0,
 ) -> tuple[float, List[float]]:
 	"""Run benchmark and return iteration time and peak memory usage."""
-	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, grad_acc)
+	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, dtype)
 	if rank == 0:
 		print(f"\t{iter_time:.2f}s, Peak memory: {[f'{m:.2f}' for m in all_peak_mems]} GB")
 	return iter_time, all_peak_mems
@@ -139,6 +143,7 @@ def process_solution(
 	rank: int,
 	world_size: int,
 	n: int,
+	dtype: torch.dtype,
 ) -> tuple[Optional[float], Optional[List[float]]]:
 	"""Process a single solution type and return benchmark results."""
 
@@ -168,7 +173,7 @@ def process_solution(
 		scheduler = FullRematScheduler(solution, scheduler, balance)
 
 	parts = get_handcrafted_imbalanced_partition(model, rank, placement, balance)
-	return run_benchmark(model, parts, scheduler, placement, rank=rank)
+	return run_benchmark(model, parts, scheduler, placement, dtype, rank=rank)
 
 
 def balanced_partition(n: int, placement: List[int]) -> List[int]:
@@ -178,6 +183,19 @@ def balanced_partition(n: int, placement: List[int]) -> List[int]:
 	blocks_per_gpu = n // len(placement)
 	remainder = n % len(placement)
 	return [blocks_per_gpu + (1 if i < remainder else 0) for i in range(len(placement))]
+
+
+def get_precision(precision: str) -> torch.dtype:
+	"""Get the precision from the precision string."""
+	match precision:
+		case "fp32":
+			return torch.float32
+		case "fp16":
+			return torch.float16
+		case "bf16":
+			return torch.bfloat16
+		case _:
+			raise ValueError(f"Invalid precision: {precision}")
 
 
 def main():
@@ -207,10 +225,13 @@ def main():
 	parser.add_argument(
 		"--solution_type", type=str, required=True, help="Specific solution type to benchmark"
 	)
+	parser.add_argument("--sdp_backend", type=str, default=None, help="SDP backend")
+	parser.add_argument("--precision", type=str, default="fp32", help="Precision")
 	args = parser.parse_args()
 	setup_logging(args.log)
 
 	rank, world_size = setup_distributed()
+	precision = get_precision(args.precision)
 
 	# Ensure output directory exists
 	if rank == 0:
@@ -238,7 +259,7 @@ def main():
 		return
 
 	# Create and initialize model
-	model = create_model(model_config, int(n))
+	model = create_model(model_config, int(n), args.sdp_backend, precision)
 	log_model_info(model, int(n), rank)
 
 	if rank == 0:
@@ -252,7 +273,7 @@ def main():
 	solution = solutions.get(args.solution_type)
 	try:
 		iter_time, peak_mems = process_solution(
-			model, solution, args.solution_type, args.base, rank, world_size, int(n)
+			model, solution, args.solution_type, args.base, rank, world_size, int(n), precision
 		)
 
 		if rank == 0 and iter_time is not None:

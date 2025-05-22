@@ -17,6 +17,8 @@ def generate_job_commands(
 	base_scheduler: str,
 	ngpus: int = 1,
 	slurm_opts: str = "",
+	sdp_backend: str = "None",
+	precision: str = "fp32",
 ) -> List[str]:
 	"""Generate SLURM job commands for each n value and solution type."""
 	with open(solutions_file, "r") as f:
@@ -37,8 +39,11 @@ def generate_job_commands(
 				f"--output_file {output_file} "
 				f"--base {base_scheduler} "
 				f"--n {n} "
-				f"--solution_type {solution_type}"
+				f"--solution_type {solution_type} "
+				f"--precision {precision} "
 			)
+			if sdp_backend != "None":
+				cmd += f"--sdp-backend {sdp_backend}"
 
 			# Create the sbatch command that uses jz.sh
 			sbatch_cmd = (
@@ -64,6 +69,8 @@ def main():
 	parser.add_argument("--ngpus", type=int, default=1, help="Number of GPUs to use per job")
 	parser.add_argument("--slurm-opts", default="", help="Additional SLURM options")
 	parser.add_argument("--output-script", help="Path to output shell script")
+	parser.add_argument("--sdp-backend", default="None", help="SDP backend")
+	parser.add_argument("--precision", default="fp32", help="Precision")
 	args = parser.parse_args()
 
 	# Create logs directory if it doesn't exist

@@ -16,7 +16,7 @@ from torch.cuda import cudart
 import torch.nn as nn
 
 import argparse
-import time
+
 
 def meta_to_gpu(model):
 	model.to_empty(device="cuda")
@@ -26,8 +26,10 @@ def meta_to_gpu(model):
 
 	return model
 
+
 def get_blocks(rank, placements, model):
 	return [b for (i, b) in zip(placements, model.blocks) if i == rank]
+
 
 def get_grouped_blocks(rank, placement):
 	num_blocks = len(model.blocks)
@@ -37,7 +39,7 @@ def get_grouped_blocks(rank, placement):
 	blocks_per_stage = len(model.blocks) // len(placement)
 	start_idx = 0
 	for i in range(num_ranks):
-		end_idx = start_idx + blocks_per_stage 
+		end_idx = start_idx + blocks_per_stage
 
 		if isinstance(model, FullTransformer) and i == 0:
 			parts[i] = torch.nn.Sequential(model.embed, *model.blocks[start_idx:end_idx])
@@ -80,11 +82,11 @@ if __name__ == "__main__":
 	batch_size = nmb * mb_size
 
 	num_heads = 32
-	seq_len = 1024 
+	seq_len = 1024
 	head_dim = 128
 	n_blocks = 8
 	embed_dim = num_heads * head_dim
-	hidden_dim = embed_dim #4096
+	hidden_dim = embed_dim  # 4096
 	placements = [0, 1, 2, 3, 4, 5, 6, 7][:4]
 	print(args.sdp_backend)
 
@@ -122,22 +124,22 @@ if __name__ == "__main__":
 				sdp_backend=args.sdp_backend,
 			).to(dtype)
 
-	print('HOHO Model created!')
+	print("HOHO Model created!")
 	sample = model.get_sample(batch_size).to(device)  # keep as long for embedding
-	if args.transformer_type == 'chain':
+	if args.transformer_type == "chain":
 		sample = sample.to(dtype)
 
 	target = model.get_target(batch_size).to(device)
 	if args.transformer_type == "chain":
 		target = target.to(dtype)
 
-	print('Samples/targets are created!')
+	print("Samples/targets are created!")
 
 	# rank_blocks = get_blocks(rank, placements, model)
 	rank_blocks = get_grouped_blocks(rank, placements)
 	sources, targets = get_sources_targets_sequential(placements)
 
-	print('Blocks are moved to GPUs!')
+	print("Blocks are moved to GPUs!")
 
 	pipe = Pipeline(
 		rank_blocks,
