@@ -7,15 +7,7 @@ This script reads the solutions file and generates SLURM job commands for each c
 import json
 import argparse
 import os
-from typing import Dict, List, Set
-
-
-def get_solution_types(solutions: Dict) -> Set[str]:
-	"""Extract all unique solution types from the solutions file."""
-	types = set()
-	for n in solutions:
-		types.update(solutions[n].keys())
-	return types
+from typing import List
 
 
 def generate_job_commands(
@@ -30,37 +22,35 @@ def generate_job_commands(
 	with open(solutions_file, "r") as f:
 		solutions = json.load(f)
 
-	solution_types = get_solution_types(solutions)
 	commands = []
 
 	for n in solutions:
-		for solution_type in solution_types:
-			if solution_type in solutions[n]:
-				# Create a unique job name
-				job_name = f"{n}_{solution_type}"
+		for solution_type in solutions[n]:
+			# Create a unique job name
+			job_name = f"{n}_{solution_type}"
 
-				# Create the command that will be run by jz.sh
-				cmd = (
-					f"benchmarks/ilps_guided_benchmark.py "
-					f"--config_file {config_file} "
-					f"--solution_file {solutions_file} "
-					f"--output_file {output_file} "
-					f"--base {base_scheduler} "
-					f"--n {n} "
-					f"--solution_type {solution_type}"
-				)
+			# Create the command that will be run by jz.sh
+			cmd = (
+				f"benchmarks/ilps_guided_benchmark.py "
+				f"--config_file {config_file} "
+				f"--solution_file {solutions_file} "
+				f"--output_file {output_file} "
+				f"--base {base_scheduler} "
+				f"--n {n} "
+				f"--solution_type {solution_type}"
+			)
 
-				# Create the sbatch command that uses jz.sh
-				sbatch_cmd = (
-					f"sbatch {slurm_opts} "
-					f"--job-name={job_name} "
-					f"--output=logs/{job_name}.out "
-					f"--error=logs/{job_name}.err "
-					f"--gpus={ngpus} "
-					f"--time=00:45:00 "
-					f"jz.sh {cmd}"
-				)
-				commands.append(sbatch_cmd)
+			# Create the sbatch command that uses jz.sh
+			sbatch_cmd = (
+				f"sbatch {slurm_opts} "
+				f"--job-name={job_name} "
+				f"--output=logs/{job_name}.out "
+				f"--error=logs/{job_name}.err "
+				f"--gpus={ngpus} "
+				f"--time=00:45:00 "
+				f"jz.sh {cmd}"
+			)
+			commands.append(sbatch_cmd)
 
 	return commands
 

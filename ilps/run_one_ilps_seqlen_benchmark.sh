@@ -10,6 +10,7 @@ NBLOCKS=$4
 SCHEDULER=$5
 MEMGPU=$6
 NBLOCKS=$7
+SLURM_OPTS="$8 $9 $10 $11"
 
 # Run profiling
 echo "Running profiling..."
@@ -34,7 +35,12 @@ echo "Generating solutions with $NBLOCKS blocks..."
 python pipeline-ilps/runall.py --config $CONFIG_FILE --nblocks $NBLOCKS --output $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --processors $NGPUS --scheduler $SCHEDULER --mem $MEMGPU
 python pipeline-ilps/generate_baselines.py --config $CONFIG_FILE --output $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --processors $NGPUS --nblocks $NBLOCKS --scheduler $SCHEDULER
 
-python ilps/generate_benchmark_jobs.py --solutions-file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --config-file $CONFIG_FILE --output-file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base-scheduler $SCHEDULER --ngpus $NGPUS --slurm-opts "-A gdh@h100 -C h100 --gpus $NGPUS --time=01:00:00" --output-script $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh
+# Add default SLURM options if none provided
+if [ -z "$SLURM_OPTS" ]; then
+    SLURM_OPTS="-A gdh@h100 -C h100"
+fi
+
+python ilps/generate_benchmark_jobs.py --solutions-file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --config-file $CONFIG_FILE --output-file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base-scheduler $SCHEDULER --ngpus $NGPUS --slurm-opts "$SLURM_OPTS" --output-script $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh
 
 # Run the benchmark
 # echo "Running benchmark for sequence length $SEQLEN..."

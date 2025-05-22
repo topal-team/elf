@@ -149,7 +149,7 @@ if [ -z "$REGRESSION_FILE" ]; then
     srun --time=00:30:00 $SLURM_OPTS --gpus=1 bash -c "
         $(declare -f setup_gpu_env)
         setup_gpu_env
-        python ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30
+        python -u ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30
         python ilps/regression.py --input_file results/profiling/$CONFIG_NAME.json --config_file $CONFIG_FILE --output_file results/regression/$CONFIG_NAME.json
     "
     srun --time=00:10:00 $SLURM_OPTS --gpus=2 --ntasks=1 bash -c "
@@ -172,9 +172,9 @@ source ~/elf-dev/venv/bin/activate
 
 echo "Running ILP solving on front node..."
 for nblocks in $(seq $MIN_BLOCKS $STEP $MAX_BLOCKS) ; do
-    python pipeline-ilps/runall.py --config $REGRESSION_FILE \
-                --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json \
-                --processors $NGPUS --time-limit 180 --scheduler $SCHEDULER --mem $MEMGPU --greedy
+    # python pipeline-ilps/runall.py --config $REGRESSION_FILE \
+    #             --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json \
+    #             --processors $NGPUS --time-limit 600 --scheduler $SCHEDULER --mem $MEMGPU --greedy
     python pipeline-ilps/generate_baselines.py --config $REGRESSION_FILE \
                 --output results/ilps-solutions/$CONFIG_NAME.json \
                 --processors $NGPUS --nblocks $nblocks --scheduler $SCHEDULER
@@ -199,4 +199,3 @@ python ilps/generate_benchmark_jobs.py \
     --output-script "$BENCHMARK_SCRIPT"
 
 echo "Generated benchmark script: $BENCHMARK_SCRIPT"
-echo "To run the benchmarks, execute: $BENCHMARK_SCRIPT"

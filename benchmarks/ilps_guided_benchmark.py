@@ -88,16 +88,10 @@ def create_model(model_config: Dict, n: int) -> ChainTransformer:
 	num_heads = model_config["n_heads"]
 	dropout = model_config["dropout"]
 
-	print(f"Rank {dist.get_rank()}: creating model...", flush=True)
 	with torch.device("meta"):
 		model = ChainTransformer(hidden_size, n, seq_len, num_heads, dropout)
-	print(f"Rank {dist.get_rank()}: model created.", flush=True)
+
 	replace_linear_with_linear_dw(model, "meta")
-	print(f"Rank {dist.get_rank()}: linear replaced with linear_dw.", flush=True)
-	# for param in model.parameters():
-	# 	tensor = param.data.cuda()
-	# 	dist.broadcast(tensor, src=0)
-	# 	param.data = tensor.cpu()
 	return model
 
 
@@ -276,14 +270,14 @@ def main():
 				json.dump(results, f, indent=4)
 
 	except torch.cuda.OutOfMemoryError:
-		print(f"Out of memory for {args.solution_type} with n = {n}")
+		print(f"Out of memory on rank {rank} for {args.solution_type} with n = {n}")
 		sys.exit(1)
 
 	# Print full stacktrace for any exceptions
 	except Exception as e:
 		import traceback
 
-		print(f"Error processing {args.solution_type} with n = {n}: {str(e)}")
+		print(f"Error on rank {rank} processing {args.solution_type} with n = {n}: {str(e)}")
 		print("Full stacktrace:")
 		traceback.print_exc()
 		sys.exit(1)
