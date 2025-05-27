@@ -10,7 +10,7 @@
 # 5. Benchmarking execution strategies (ilps_guided_benchmark.py)
 #
 # Usage:
-#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE]
+#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE] [--sdp-backend BACKEND]
 #
 # Arguments:
 #   --config: Path to the configuration file with model hyperparameters
@@ -23,7 +23,7 @@
 #   --account: SLURM account name
 #   --constraint: SLURM constraint (e.g., h100, v100-32g, ..)
 #   --regression-file: Path to existing regression file (if provided, skips profiling steps)
-#
+#   --sdp-backend: Attention backend (default: None)
 # Example:
 #   ./ilps/run_ilps_benchmark.sh --config ilps/configs/default.json --ngpus 4 --min-blocks 4 --max-blocks 16 --step 4
 
@@ -188,7 +188,7 @@ done
 echo "Solutions generated. Generating benchmark jobs..."
 
 # Generate benchmark job script
-BENCHMARK_SCRIPT="results/benchmarks/run_benchmarks_${CONFIG_NAME}.sh"
+BENCHMARK_SCRIPT="results/run_benchmarks_${CONFIG_NAME}.sh"
 if [ -f "$BENCHMARK_SCRIPT" ]; then
     echo "!! Warning: $BENCHMARK_SCRIPT already exists, deleting it."
     rm -f "$BENCHMARK_SCRIPT"

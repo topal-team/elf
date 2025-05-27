@@ -1,5 +1,24 @@
 #!/bin/bash
 
+# Run the benchmark for different sequence lengths
+#
+# Usage:
+#   ./ilps/run_ilps_seqlen_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-seqlen N] [--max-seqlen N] [--step N] [--nblocks N] [--scheduler NAME] [--memgpu N] [--sdp-backend BACKEND] [--precision PRECISION] [--account NAME] [--constraint NAME]
+#
+# Arguments:
+#   --config: Path to the base configuration file
+#   --ngpus: Number of GPUs to use for benchmarking (default: 4)
+#   --min-seqlen: Minimum sequence length to test (default: 128)
+#   --max-seqlen: Maximum sequence length to test (default: 2048)
+#   --step: Step size for sequence length increments (default: 128)
+#   --nblocks: Number of transformer blocks (default: 16)
+#   --scheduler: Base scheduler type (default: zbh2)
+#   --memgpu: GPU memory limit in MB (default: 28000)
+#   --sdp-backend: Attention backend (default: None)
+#   --precision: Precision (default: fp32)
+#   --account: SLURM account name
+#   --constraint: SLURM constraint (e.g., h100, v100-32g, ..)
+
 # Default values
 BASE_CONFIG_FILE=""
 NGPUS=4
@@ -95,7 +114,7 @@ if [ ! -z "$SLURM_CONSTRAINT" ]; then
 fi
 
 BASE_CONFIG_NAME=$(basename $BASE_CONFIG_FILE .json)
-RESULTS_DIR="results/seqlen_benchmark"
+RESULTS_DIR="results/seqlen_benchmarks"
 
 # Create the results directory if it doesn't exist
 mkdir -p $RESULTS_DIR

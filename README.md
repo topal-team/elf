@@ -24,8 +24,9 @@ There are several arguments to modify its behaviour :
   - ``"afab"``: [GPipe](https://arxiv.org/pdf/1811.06965v5)
   - ``"1f1b"``: [1F1B](https://arxiv.org/pdf/1806.03377)
   - ``"hanayo"``: [Hanayo](https://arxiv.org/pdf/2308.15762)
-  - ``"zbh1"``: [ZBH1](https://arxiv.org/pdf/2401.10241)
-  - ``"zbh2"``: [ZBH2](https://arxiv.org/pdf/2401.10241)
+  - ``"zbh1"``: [ZB-H1](https://arxiv.org/pdf/2401.10241)
+  - ``"zbh2"``: [ZB-H2](https://arxiv.org/pdf/2401.10241)
+  - ``"zbv"``: [ZB-V](https://arxiv.org/pdf/2401.10241)
   - ``"full_remat"``: Full Remat : GPipe with rematerialization of every micro-batch / 1f1b on the last rank
 - ``dp`` is the data parallelism degree. One pipeline will be replicated ``dp`` times.
 
@@ -55,6 +56,7 @@ You can run multiple pipelines at once with different data by specifying the arg
 ## Running tests and benchmarks
 
 Environment setup on some clusters is described in `docs`.
+- [Jean-Zay](docs/jean-zay.md)
 - [Helios](docs/helios.md)
 
 ### Tests
@@ -68,3 +70,5 @@ Some of them require at least 2 GPUs.
 ### Benchmarks
 
 Some benchmarks are available in ``benchmarks/``. They are used to measure and compare the performance of the pipeline.
+
+The benchmarks using ILPs and comparing them with baselines are located in the ``ilps/`` directory. For more information please refer to the corresponding [README](ilps/README.md).
