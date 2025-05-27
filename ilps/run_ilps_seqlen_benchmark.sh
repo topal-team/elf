@@ -49,20 +49,20 @@ while [[ $# -gt 0 ]]; do
             MEMGPU="$2"
             shift 2
             ;;
-        --constraint)
-            SLURM_CONSTRAINT="$2"
-            shift 2
-            ;;
-        --account)
-            SLURM_ACCOUNT="$2"
-            shift 2
-            ;;
         --sdp-backend)
             SDP_BACKEND="$2"
             shift 2
             ;;
         --precision)
             PRECISION="$2"
+            shift 2
+            ;;
+        --constraint)
+            SLURM_CONSTRAINT="$2"
+            shift 2
+            ;;
+        --account)
+            SLURM_ACCOUNT="$2"
             shift 2
             ;;
         *)
@@ -121,7 +121,7 @@ echo "Found $(echo "$SEQLEN_CONFIGS" | wc -l) sequence length configs to benchma
 for CONFIG_FILE in $SEQLEN_CONFIGS; do
     CONFIG_NAME=$(basename $CONFIG_FILE .json)
     SEQLEN=$(echo $CONFIG_NAME | grep -o "seqlen_[0-9]*" | cut -d_ -f2)
-    sbatch $SLURM_OPTS --gpus 2 --time=00:45:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err jz.sh --no-python ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER $MEMGPU $NBLOCKS $SLURM_OPTS $SDP_BACKEND $PRECISION
+    sbatch $SLURM_OPTS --gpus 2 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err jz.sh --no-python ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER $MEMGPU $NBLOCKS $SLURM_OPTS $SDP_BACKEND $PRECISION
 done
 
 echo "All benchmark jobs enqueued, commands are appended to file $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh"

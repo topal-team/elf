@@ -26,6 +26,19 @@ import torch
 import torch.distributed as dist
 
 
+def get_precision(precision: str) -> torch.dtype:
+	"""Get the precision from the precision string."""
+	match precision:
+		case "fp32":
+			return torch.float32
+		case "fp16":
+			return torch.float16
+		case "bf16":
+			return torch.bfloat16
+		case _:
+			raise ValueError(f"Invalid precision: {precision}")
+
+
 def parse_args():
 	parser = argparse.ArgumentParser(description="Measure communication time between GPUs")
 	parser.add_argument(
@@ -44,6 +57,9 @@ def parse_args():
 	)
 	parser.add_argument(
 		"--iterations", type=int, default=1000, help="Number of iterations for timing (default: 1000)"
+	)
+	parser.add_argument(
+		"--precision", type=str, default="fp32", help="Precision to use (default: fp32)"
 	)
 	return parser.parse_args()
 
@@ -85,7 +101,9 @@ def main():
 
 	microbatch_size = args.microbatch_size
 
-	x = torch.randn(microbatch_size, seq_len, hidden_size, device="cuda")
+	x = torch.randn(
+		microbatch_size, seq_len, hidden_size, dtype=get_precision(args.precision), device="cuda"
+	)
 	# Ensure all GPUs are synchronized before starting
 	dist.barrier()
 	torch.cuda.synchronize()
@@ -159,7 +177,7 @@ def main():
 			with open(output_file, "w") as f:
 				json.dump(config, f, indent=2)
 
-			print(f"Updated Tcomm value ({config['Tcomm']:.6f} s) in {output_file}")
+			print(f"Updated Tcomm value ({config['Tcomm']:.6f} ms) in {output_file}")
 		except Exception as e:
 			print(f"Error updating configuration file: {e}")
 

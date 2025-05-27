@@ -226,7 +226,7 @@ def main():
 		"--solution_type", type=str, required=True, help="Specific solution type to benchmark"
 	)
 	parser.add_argument("--sdp_backend", type=str, default=None, help="SDP backend")
-	parser.add_argument("--precision", type=str, default="fp32", help="Precision")
+	parser.add_argument("--precision", type=str, default="fp32", help="Precision (dtype)")
 	args = parser.parse_args()
 	setup_logging(args.log)
 

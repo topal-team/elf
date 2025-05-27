@@ -53,11 +53,13 @@ mbp_data = data["mbp_per_block_batch"]
 X_no_recomp = np.array(no_recompute_data["features"])
 y_no_recomp = np.array(no_recompute_data["times"])
 mem_no_recomp = np.array(no_recompute_data["memory"])
+peak_mem_no_recomp = np.array(no_recompute_data["peak_memory"])
 param_size_per_block = np.array(no_recompute_data["param_size_per_block"])
 
 X_recomp = np.array(recompute_data["features"])
 y_recomp = np.array(recompute_data["times"])
 mem_recomp = np.array(recompute_data["memory"])
+peak_mem_recomp = np.array(recompute_data["peak_memory"])
 
 # Create interaction feature manually (n_blocks * batch_size)
 X_poly_no_recomp = np.array([X_no_recomp[:, 0] * X_no_recomp[:, 1]]).T
@@ -84,6 +86,10 @@ for i, name in enumerate(["Mf", "Mb", "Mw"]):
 for i, name in enumerate(["Mfsr", "Mbsr", "Mwsr"]):
 	config[name] = float(np.mean(mem_recomp[:, i]))
 
+# Update peak memory metrics
+config["PeakF"] = float(np.mean(peak_mem_no_recomp))
+config["PeakFsr"] = float(np.mean(peak_mem_recomp))
+
 # Run regression for timing metrics and update config
 print("\nRegression analysis:")
 # For no recomputation
@@ -108,6 +114,8 @@ for i, name in enumerate(["Tfsr", "Tbsr", "Twsr"]):
 print("\nMemory metrics:")
 print(f"Mfp: {config['Mfp']} MB/block/batch")
 print(f"Mbp: {config['Mbp']} MB/block/batch")
+print(f"PeakF: {config['PeakF']} MB/block/batch")
+print(f"PeakFsr: {config['PeakFsr']} MB/block/batch")
 
 # Save the updated configuration
 output_file = args.output_file if args.output_file else args.config_file

@@ -10,13 +10,13 @@ NBLOCKS=$4
 SCHEDULER=$5
 MEMGPU=$6
 NBLOCKS=$7
-SLURM_OPTS="$8 $9 $10 $11"
-SDP_BACKEND=$12
-PRECISION=$13
+SLURM_OPTS="$8 $9 ${10} ${11}"
+SDP_BACKEND=${12}
+PRECISION=${13}
 
 # Run profiling
-echo "Running profiling..."
-python ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30
+echo "Running profiling...: python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30 --sdp-backend $SDP_BACKEND --precision $PRECISION"
+python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30 --sdp-backend $SDP_BACKEND --precision $PRECISION
 
 # Run regression
 echo "Running regression..."
@@ -24,7 +24,7 @@ python ilps/regression.py --input_file $RESULTS_DIR/profiling_${CONFIG_NAME}.jso
 
 # Run communication profiling
 echo "Running communication profiling..."
-torchrun --nproc-per-node=2 ilps/profiling-comms.py --config $CONFIG_FILE
+torchrun --nproc-per-node=2 ilps/profiling-comms.py --config $CONFIG_FILE --precision $PRECISION
 
 # Clean up any existing solutions file
 if [[ -f $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json ]]; then
@@ -41,6 +41,7 @@ python pipeline-ilps/generate_baselines.py --config $CONFIG_FILE --output $RESUL
 if [ -z "$SLURM_OPTS" ]; then
     SLURM_OPTS="-A gdh@h100 -C h100"
 fi
+
 
 python ilps/generate_benchmark_jobs.py --solutions-file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --config-file $CONFIG_FILE --output-file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base-scheduler $SCHEDULER --ngpus $NGPUS --slurm-opts "$SLURM_OPTS" --output-script $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh --sdp-backend $SDP_BACKEND --precision $PRECISION
 

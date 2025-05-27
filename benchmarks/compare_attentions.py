@@ -32,7 +32,6 @@ def get_blocks(rank, placements, model):
 
 
 def get_grouped_blocks(rank, placement):
-	num_blocks = len(model.blocks)
 	num_ranks = len(placement)
 	parts = [None] * num_ranks
 

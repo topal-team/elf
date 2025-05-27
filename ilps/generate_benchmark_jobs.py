@@ -24,12 +24,16 @@ def generate_job_commands(
 	with open(solutions_file, "r") as f:
 		solutions = json.load(f)
 
+	with open(config_file, "r") as f:
+		config = json.load(f)
+		seqlen = config["model"]["seq_len"]
+
 	commands = []
 
 	for n in solutions:
 		for solution_type in solutions[n]:
 			# Create a unique job name
-			job_name = f"{n}_{solution_type}"
+			job_name = f"{n}_{solution_type}_{seqlen}"
 
 			# Create the command that will be run by jz.sh
 			cmd = (
@@ -42,8 +46,8 @@ def generate_job_commands(
 				f"--solution_type {solution_type} "
 				f"--precision {precision} "
 			)
-			if sdp_backend != "None":
-				cmd += f"--sdp-backend {sdp_backend}"
+			if sdp_backend:
+				cmd += f"--sdp_backend {sdp_backend}"
 
 			# Create the sbatch command that uses jz.sh
 			sbatch_cmd = (
@@ -69,7 +73,7 @@ def main():
 	parser.add_argument("--ngpus", type=int, default=1, help="Number of GPUs to use per job")
 	parser.add_argument("--slurm-opts", default="", help="Additional SLURM options")
 	parser.add_argument("--output-script", help="Path to output shell script")
-	parser.add_argument("--sdp-backend", default="None", help="SDP backend")
+	parser.add_argument("--sdp-backend", default=None, help="SDP backend")
 	parser.add_argument("--precision", default="fp32", help="Precision")
 	args = parser.parse_args()
 
@@ -83,6 +87,8 @@ def main():
 		args.base_scheduler,
 		args.ngpus,
 		args.slurm_opts,
+		args.sdp_backend,
+		args.precision,
 	)
 
 	if args.output_script:

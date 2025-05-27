@@ -495,8 +495,6 @@ class ChainTransformer(nn.Module):
 			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout, ffn_dim, sdp_backend))
 			self.add_module(f"block_{i}", self.blocks[-1])
 
-		print(f"Using {sdp_backend if sdp_backend is not None else 'default'} backend for attention")
-
 	def forward(self, x):
 		for b in self.blocks:
 			x = b(x)

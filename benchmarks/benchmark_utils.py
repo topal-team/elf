@@ -58,6 +58,7 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32):
 
 	start.record()
 	for i in range(n_iterations):
+		torch.cuda.reset_peak_memory_stats()
 		model.zero_grad()
 		inputs = model.get_sample(batch_size, dtype)
 		targets = model.get_target(batch_size, dtype)
