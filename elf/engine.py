@@ -309,10 +309,11 @@ class Engine:
 		self._run_comms()  # finish all comms
 		if precise_timings:
 			torch.cuda.synchronize()
+
 		cooldown_start = time.time()
 
 		if precise_timings:
-			dist.barrier()
+			# dist.barrier()
 			torch.cuda.synchronize()
 
 		pipe_end = time.time()

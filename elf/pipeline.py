@@ -86,7 +86,7 @@ class Pipeline:
 
 		if placement == "auto":
 			pp = ws // dp
-			placement = self._get_default_placement(schedule, pp)
+			placement = Pipeline._get_default_placement(schedule, pp)
 		elif isinstance(placement, str):
 			placement = list(map(int, placement.split(",")))
 
@@ -292,7 +292,8 @@ class Pipeline:
 			if worker in dist.get_process_group_ranks(pp_group):
 				dist.send_object_list([self.named_parameters()], dst=worker, group=pp_group)
 
-	def _get_default_placement(self, schedule, pp):
+	@staticmethod
+	def _get_default_placement(schedule, pp):
 		if schedule == "hanayo":
 			return [i for i in range(pp)] + list(reversed([i for i in range(pp)]))
 		else:
