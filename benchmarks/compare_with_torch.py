@@ -17,17 +17,17 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--pp", type=int, default=4, help="Pipeline parallelism degree")
-parser.add_argument("--run_id", type=str, default="", help="Run ID")
+parser.add_argument("--run-id", type=str, default="", help="Run ID")
 parser.add_argument(
 	"--schedule",
 	type=str,
 	default="zbv",
 	help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbv)",
 )
-parser.add_argument("--mb_size", type=int, default=2, help="Microbatch size")
-parser.add_argument("--seq_len", type=int, default=1024, help="Sequence length")
-parser.add_argument("--input_dim", type=int, default=2000, required=False, help="input dimension")
-parser.add_argument("--hidden_dim", type=int, default=2048, help="Hidden dimension")
+parser.add_argument("--mb-size", type=int, default=2, help="Microbatch size")
+parser.add_argument("--seq-len", type=int, default=1024, help="Sequence length")
+parser.add_argument("--input-dim", type=int, default=2000, required=False, help="input dimension")
+parser.add_argument("--hidden-dim", type=int, default=2048, help="Hidden dimension")
 parser.add_argument("--nblocks", type=int, default=64, help="Number of blocks")
 parser.add_argument("--nheads", type=int, default=32, required=False, help="number of attn heads")
 parser.add_argument("--dropout", type=float, default=0.1, required=False, help="dropout value")

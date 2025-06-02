@@ -7,12 +7,12 @@ the profiling.py script. It extracts timing and memory coefficients for model ex
 and updates the configuration file with these values for ILP solvers.
 
 Usage:
-    python ilps/regression.py --input_file INPUT_FILE --config_file CONFIG_FILE [--output_file OUTPUT_FILE]
+    python ilps/regression.py --input-file INPUT_FILE --config-file CONFIG_FILE [--output-file OUTPUT_FILE]
 
 Arguments:
-    --input_file: Path to the input JSON file with profiling data
-    --config_file: Path to the configuration file to update (default: ilps/configs/default.json)
-    --output_file: Path to save the updated configuration file (defaults to overwriting config_file)
+    --input-file: Path to the input JSON file
+    --config-file: Path to the configuration file to update (default: ilps/configs/default.json)
+    --output-file: Path to save the updated configuration file (defaults to overwriting config-file)
 """
 
 import json
@@ -23,17 +23,17 @@ from sklearn.linear_model import LinearRegression
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description="Run regression analysis on stats file")
-parser.add_argument("--input_file", type=str, help="Path to the input JSON file")
+parser.add_argument("--input-file", type=str, help="Path to the input JSON file")
 parser.add_argument(
-	"--config_file",
+	"--config-file",
 	type=str,
 	default="ilps/configs/default.json",
 	help="Path to the configuration file to update",
 )
 parser.add_argument(
-	"--output_file",
+	"--output-file",
 	type=str,
-	help="Path to save the updated configuration file (defaults to overwriting config_file)",
+	help="Path to save the updated configuration file (defaults to overwriting config-file)",
 )
 args = parser.parse_args()
 

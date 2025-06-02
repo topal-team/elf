@@ -38,12 +38,12 @@ def generate_job_commands(
 			# Create the command that will be run by jz.sh
 			cmd = (
 				f"benchmarks/ilps_guided_benchmark.py "
-				f"--config_file {config_file} "
-				f"--solution_file {solutions_file} "
-				f"--output_file {output_file} "
+				f"--config-file {config_file} "
+				f"--solution-file {solutions_file} "
+				f"--output-file {output_file} "
 				f"--base {base_scheduler} "
 				f"--n {n} "
-				f"--solution_type {solution_type} "
+				f"--solution-type {solution_type} "
 				f"--precision {precision} "
 			)
 			if sdp_backend:

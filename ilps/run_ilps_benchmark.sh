@@ -148,16 +148,22 @@ if [ ! -z "$SLURM_CONSTRAINT" ]; then
     SLURM_OPTS+="-C $SLURM_CONSTRAINT "
 fi
 
+BACKEND_OPTIONS=""
+if [ ! -z "$SDP_BACKEND" ]; then
+    BACKEND_OPTIONS="--sdp-backend $SDP_BACKEND"
+fi
+
 # Run GPU-intensive profiling steps only if no regression file is provided
 if [ -z "$REGRESSION_FILE" ]; then
     echo "No regression file provided. Running profiling steps..."
-    srun --time=00:30:00 $SLURM_OPTS --gpus=1 bash -c "
+    srun --time=00:45:00 $SLURM_OPTS --gpus=1 bash -c "
         $(declare -f setup_gpu_env)
         setup_gpu_env
-        python -u ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30 --sdp-backend $SDP_BACKEND
-        python ilps/regression.py --input_file results/profiling/$CONFIG_NAME.json --config_file $CONFIG_FILE --output_file results/regression/$CONFIG_NAME.json
+        python -u ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30 $BACKEND_OPTIONS
+        python ilps/regression.py --input-file results/profiling/$CONFIG_NAME.json --config-file $CONFIG_FILE --output-file results/regression/$CONFIG_NAME.json
     "
-    srun --time=00:10:00 $SLURM_OPTS --gpus=2 --ntasks=1 bash -c "
+    # This is run in exclusive mode to ensure that no one is using the same socket (why can't torchrun find another socket available?)
+    srun --time=00:10:00 $SLURM_OPTS --gpus=2 --ntasks=1 --exclusive bash -c "
         $(declare -f setup_gpu_env)
         setup_gpu_env
         torchrun --nproc-per-node=2 ilps/profiling-comms.py --config results/regression/$CONFIG_NAME.json
@@ -179,7 +185,7 @@ echo "Running ILP solving on front node..."
 for nblocks in $(seq $MIN_BLOCKS $STEP $MAX_BLOCKS) ; do
     python pipeline-ilps/runall.py --config $REGRESSION_FILE \
                 --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json \
-                --processors $NGPUS --time-limit 600 --scheduler $SCHEDULER --mem $MEMGPU
+                --processors $NGPUS --time-limit 1800 --scheduler $SCHEDULER --mem $MEMGPU
     python pipeline-ilps/generate_baselines.py --config $REGRESSION_FILE \
                 --output results/ilps-solutions/$CONFIG_NAME.json \
                 --processors $NGPUS --nblocks $nblocks --scheduler $SCHEDULER
@@ -202,6 +208,6 @@ python ilps/generate_benchmark_jobs.py \
     --ngpus "$NGPUS" \
     --slurm-opts "$SLURM_OPTS" \
     --output-script "$BENCHMARK_SCRIPT" \
-    --sdp-backend "$SDP_BACKEND"
+    $BACKEND_OPTIONS
 
 echo "Generated benchmark script: $BENCHMARK_SCRIPT"

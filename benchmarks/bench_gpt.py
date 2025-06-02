@@ -43,8 +43,8 @@ if __name__ == "__main__":
 		default="tiny",
 		help="Model size to benchmark",
 	)
-	parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-	parser.add_argument("--seq_len", type=int, default=512, help="Sequence length")
+	parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
+	parser.add_argument("--seq-len", type=int, default=512, help="Sequence length")
 	parser.add_argument(
 		"--log", choices=["debug", "info", "none"], default="info", help="Logging level"
 	)

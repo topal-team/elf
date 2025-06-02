@@ -98,7 +98,7 @@ def parse_args():
 	parser.add_argument(
 		"--partitioner", choices=["naive", "constrained", "metis", "dagP"], default="naive"
 	)
-	parser.add_argument("--run_id", type=str, default="", help="Run ID")
+	parser.add_argument("--run-id", type=str, default="", help="Run ID")
 	args = parser.parse_args()
 	match args.log:
 		case "none":

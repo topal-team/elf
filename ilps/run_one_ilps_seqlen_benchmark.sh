@@ -11,16 +11,21 @@ SCHEDULER=$5
 MEMGPU=$6
 NBLOCKS=$7
 SLURM_OPTS="$8 $9 ${10} ${11}"
-SDP_BACKEND=${12}
-PRECISION=${13}
+PRECISION=${12}
+SDP_BACKEND=${13}
+
+BACKEND_OPTIONS=""
+if [ ! -z "$SDP_BACKEND" ]; then
+    BACKEND_OPTIONS="--sdp-backend $SDP_BACKEND"
+fi
 
 # Run profiling
-echo "Running profiling...: python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30 --sdp-backend $SDP_BACKEND --precision $PRECISION"
-python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30 --sdp-backend $SDP_BACKEND --precision $PRECISION
+echo "Running profiling...: python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30 $BACKEND_OPTIONS --precision $PRECISION"
+python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30 $BACKEND_OPTIONS --precision $PRECISION
 
 # Run regression
 echo "Running regression..."
-python ilps/regression.py --input_file $RESULTS_DIR/profiling_${CONFIG_NAME}.json --config_file $CONFIG_FILE
+python ilps/regression.py --input-file $RESULTS_DIR/profiling_${CONFIG_NAME}.json --config-file $CONFIG_FILE
 
 # Run communication profiling
 echo "Running communication profiling..."
@@ -43,7 +48,7 @@ if [ -z "$SLURM_OPTS" ]; then
 fi
 
 
-python ilps/generate_benchmark_jobs.py --solutions-file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --config-file $CONFIG_FILE --output-file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base-scheduler $SCHEDULER --ngpus $NGPUS --slurm-opts "$SLURM_OPTS" --output-script $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh --sdp-backend $SDP_BACKEND --precision $PRECISION
+python ilps/generate_benchmark_jobs.py --solutions-file $RESULTS_DIR/ilps-solutions_${CONFIG_NAME}.json --config-file $CONFIG_FILE --output-file $RESULTS_DIR/bench-ilps-${CONFIG_NAME}.json --base-scheduler $SCHEDULER --ngpus $NGPUS --slurm-opts "$SLURM_OPTS" --output-script $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh $BACKEND_OPTIONS --precision $PRECISION
 
 # Run the benchmark
 # echo "Running benchmark for sequence length $SEQLEN..."

@@ -121,7 +121,7 @@ mkdir -p $RESULTS_DIR
 
 # Generate configs with different sequence lengths
 echo "Generating configs with different sequence lengths..."
-python ilps/generate_seqlen_configs.py --base_config $BASE_CONFIG_FILE --min_seqlen $MIN_SEQLEN --max_seqlen $MAX_SEQLEN --step $STEP
+python ilps/generate_seqlen_configs.py --base-config $BASE_CONFIG_FILE --min-seqlen $MIN_SEQLEN --max-seqlen $MAX_SEQLEN --step $STEP
 
 # Find all generated configs
 CONFIG_DIR=$(dirname $BASE_CONFIG_FILE)
@@ -140,7 +140,7 @@ echo "Found $(echo "$SEQLEN_CONFIGS" | wc -l) sequence length configs to benchma
 for CONFIG_FILE in $SEQLEN_CONFIGS; do
     CONFIG_NAME=$(basename $CONFIG_FILE .json)
     SEQLEN=$(echo $CONFIG_NAME | grep -o "seqlen_[0-9]*" | cut -d_ -f2)
-    sbatch $SLURM_OPTS --gpus 2 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err jz.sh --no-python ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER $MEMGPU $NBLOCKS $SLURM_OPTS $SDP_BACKEND $PRECISION
+    sbatch $SLURM_OPTS --gpus 2 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err jz.sh --no-python ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER $MEMGPU $NBLOCKS $SLURM_OPTS $PRECISION $SDP_BACKEND
 done
 
 echo "All benchmark jobs enqueued, commands are appended to file $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh"

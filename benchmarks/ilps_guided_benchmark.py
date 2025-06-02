@@ -39,7 +39,7 @@ sys.path.append(".")
 from elf.zb_utils import replace_linear_with_linear_dw
 from models.simple import ChainTransformer, FullTransformer  # noqa: F401
 from benchmarks.benchmark_utils import bench, get_handcrafted_imbalanced_partition
-from benchmarks.zb_schedulers import FullRematScheduler, PartialRematScheduler
+from benchmarks.zb_schedulers import FullRematScheduler, GreedyScheduler, PartialRematScheduler
 
 logging.basicConfig(level=logging.INFO)
 
@@ -167,6 +167,10 @@ def process_solution(
 	elif solution_type in ["balance"]:
 		balance = [int(b) for b in solution["b"]]
 
+	elif solution_type in ["greedy"]:
+		balance = balanced_partition(n, placement)
+		scheduler = GreedyScheduler(solution, balance)
+
 	# FullRemat, Greedy and Baselines are implemented with the FullRematScheduler
 	else:
 		balance = balanced_partition(n, placement)
@@ -203,19 +207,19 @@ def main():
 	parser.add_argument("--restart", action="store_true", default=False)
 	parser.add_argument("--log", choices=["info", "debug", "none"], default="none")
 	parser.add_argument(
-		"--solution_file",
+		"--solution-file",
 		type=str,
 		default="results/ilps-solutions/default.json",
 		help="Path to the solution file",
 	)
 	parser.add_argument(
-		"--output_file",
+		"--output-file",
 		type=str,
 		default="results/bench-ilps-default.json",
 		help="Path to the output file",
 	)
 	parser.add_argument(
-		"--config_file",
+		"--config-file",
 		type=str,
 		default="ilps/configs/default.json",
 		help="Path to the ILP config file with model hyperparameters",
@@ -223,9 +227,9 @@ def main():
 	parser.add_argument("--base", type=str, default="zbh2", help="Base scheduler type")
 	parser.add_argument("--n", type=int, required=True, help="Specific n value to benchmark")
 	parser.add_argument(
-		"--solution_type", type=str, required=True, help="Specific solution type to benchmark"
+		"--solution-type", type=str, required=True, help="Specific solution type to benchmark"
 	)
-	parser.add_argument("--sdp_backend", type=str, default=None, help="SDP backend")
+	parser.add_argument("--sdp-backend", type=str, default=None, help="SDP backend")
 	parser.add_argument("--precision", type=str, default="fp32", help="Precision (dtype)")
 	args = parser.parse_args()
 	setup_logging(args.log)

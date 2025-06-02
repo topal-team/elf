@@ -1,8 +1,10 @@
+import copy
 import sys
 
 sys.path.append(".")
 from elf.pipeline import Pipeline
 from elf.scheduling import OpOptions, OperationType, Operation
+from elf.schedules import _add_forward_pass, _add_backward_pass, _add_backward_params
 from models.simple import Attention, TransformerBlock
 
 
@@ -230,3 +232,44 @@ class PartialRematScheduler(SchedulerBase):
 				self._insert_recompute_operation(
 					sched, op.block_id, op.mb_id, op.rank, OperationType.RECOMPUTE_BACKWARD_INPUTS
 				)
+
+
+class GreedyScheduler:
+	"""Scheduler for the greedy solution"""
+
+	def __init__(self, solution, factors):
+		self.solution = solution
+		self.factors = factors
+
+	def __call__(self, placement, nmb, signatures):
+		"""
+		Args:
+			placement: placement of the model
+			nmb: number of microbatches
+			signatures: signatures of the model
+		"""
+		# Hack: create a new scheduler on the fly, that uses the schedule given from the greedy solution
+		order = self.solution["order"]
+
+		def new_base_scheduler(placement, nmb, signatures):
+			schedule = []
+			for block_id, optype, mb_id in order:
+				match optype:
+					case "f":
+						_add_forward_pass(
+							schedule, placement, block_id, mb_id, placement[block_id], signatures[block_id]
+						)
+					case "b":
+						_add_backward_pass(
+							schedule, placement, block_id, mb_id, placement[block_id], signatures[block_id]
+						)
+					case "w":
+						_add_backward_params(schedule, block_id, mb_id, placement[block_id])
+
+			return schedule
+
+		# Then reuse the FullRematScheduler to add the recomputation operations
+		mbs = copy.copy(self.solution)
+		del mbs["order"]
+		remat_scheduler = FullRematScheduler(mbs, new_base_scheduler, self.factors)
+		return remat_scheduler(placement, nmb, signatures)

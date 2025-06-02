@@ -61,9 +61,9 @@ def parse_args():
 		"--dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"]
 	)
 	parser.add_argument(
-		"--sdp_backend", type=str, default=None, choices=[None, "FLASH_ATTENTION", "MATH"]
+		"--sdp-backend", type=str, default=None, choices=[None, "FLASH_ATTENTION", "MATH"]
 	)
-	parser.add_argument("--transformer_type", type=str, default="chain", choices=["full", "chain"])
+	parser.add_argument("--transformer-type", type=str, default="chain", choices=["full", "chain"])
 	return parser.parse_args()
 
 

@@ -55,9 +55,9 @@ def generate_seqlen_configs(base_config_path, min_seqlen, max_seqlen, step):
 
 def main():
 	parser = argparse.ArgumentParser(description="Generate configs with different sequence lengths")
-	parser.add_argument("--base_config", required=True, help="Path to the base config file")
-	parser.add_argument("--min_seqlen", type=int, default=128, help="Minimum sequence length")
-	parser.add_argument("--max_seqlen", type=int, default=8192, help="Maximum sequence length")
+	parser.add_argument("--base-config", required=True, help="Path to the base config file")
+	parser.add_argument("--min-seqlen", type=int, default=128, help="Minimum sequence length")
+	parser.add_argument("--max-seqlen", type=int, default=8192, help="Maximum sequence length")
 	parser.add_argument(
 		"--step", type=int, default=128, help="Step size for sequence length increments"
 	)

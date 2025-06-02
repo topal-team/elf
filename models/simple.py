@@ -203,7 +203,7 @@ class SimpleFastAttention(nn.Module):
 		Q = self.query(inputs).unsqueeze(1)
 		K = self.key(inputs).unsqueeze(1)
 		V = self.value(inputs).unsqueeze(1)
-		with sdpa_kernel(backends=[SDPBackend.__dict__[sdp_backend]]):
+		with sdpa_kernel(backends=[SDPBackend.__dict__[self.sdp_backend]]):
 			context = F.scaled_dot_product_attention(Q, K, V).squeeze(1)
 			return context
 
@@ -510,10 +510,10 @@ class ChainTransformer(nn.Module):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
 
 
-if __name__ == "__main__":
+def main():
 	import sys
 
-	sys.path.append("../")
+	sys.path.append(".")
 	from elf.utils import TimerGPU
 
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -592,3 +592,7 @@ if __name__ == "__main__":
 			loss = model.loss_fn(output, target)
 			loss.backward()
 	print(f"Forward and backward pass completed: {timer.time()}")
+
+
+if __name__ == "__main__":
+	main()
