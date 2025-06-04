@@ -155,9 +155,9 @@ class SimpleAttention(nn.Module):
 
 	def forward(self, inputs):
 		# Linear projections
-		Q = self.query(inputs).unsqueeze(1)
-		K = self.key(inputs).unsqueeze(1)
-		V = self.value(inputs).unsqueeze(1)
+		Q = self.query(inputs)
+		K = self.key(inputs)
+		V = self.value(inputs)
 
 		# Compute attention scores
 		scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(
