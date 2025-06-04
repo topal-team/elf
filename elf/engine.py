@@ -188,7 +188,7 @@ class Engine:
 			if block is None:
 				continue  # not my job
 
-			logger.debug(f"Rank {self.rank} - Computing {op} on block {block}")
+			logger.debug(f"Rank {self.rank} - Executing {op}")
 
 			if profile:
 				torch.cuda.nvtx.range_push(f"{block}:{op}")
@@ -207,6 +207,7 @@ class Engine:
 				OperationType.BACKWARD_PARAMS,
 			]:
 				self._run_comms()
+
 
 			match op.op:
 				case OperationType.FORWARD:

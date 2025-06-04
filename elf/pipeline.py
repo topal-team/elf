@@ -3,6 +3,7 @@ Pipeline API and setup
 """
 
 import os
+from local.schedule_to_graph import reorder_communications
 import torch
 import shutil
 import torch.distributed as dist
@@ -12,7 +13,7 @@ from .block import PipelineBlock
 from .schedules import *
 from .engine import Engine
 from .utils import *
-from .scheduling import mark_batched_comms, schedule_to_str, check_schedule_validity
+from .scheduling import schedule_to_str, check_schedule_validity
 from .zb_utils import LayerDW
 from .partitioners import partition_graph
 from .partitioners.utils import Signature
@@ -372,7 +373,6 @@ class Pipeline:
 		if dist.get_rank() == 0:
 			logger.info(f"Schedule:\n{schedule_to_str(schedule)}")
 
-		mark_batched_comms(schedule, self.placement)
 
 		# Remove all operations that are not ours
 		ids = list(

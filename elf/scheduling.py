@@ -284,6 +284,7 @@ def schedule_to_str(schedule, print_comms=False):
 				lambda s: s != "",
 				[
 					f"{shorten(op)}{op.block_id}-{op.mb_id if op.mb_id is not None else ''}"
+					+ (f"({get_peer(op)})" if op.op in comm_types else "")
 					for op in rank_ops
 				],
 			)

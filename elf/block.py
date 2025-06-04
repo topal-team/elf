@@ -459,7 +459,7 @@ class PipelineBlock:
 			return
 
 		# If some metadata is missing, it should be received from the previous block before actual data
-		if any(not var.metadata for var in self.input_variables):
+		if any(not var.metadata and var.peer == src for var in self.input_variables):
 			self._receive_metadata(src)
 
 		recvs = []
