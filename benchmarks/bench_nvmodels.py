@@ -83,8 +83,11 @@ def get_model_sample_target(model, batch_size):
 				mlp_ratio=4.0,
 			).cpu()
 			shape = (batch_size, 2 * 934, 45, 90)
-			sample = (model.img_to_seq_pixel(torch.randn(shape)), torch.randn((batch_size,)))
-			target = model.img_to_seq_pixel(torch.randn(shape))
+			sample = (
+				model.img_to_seq_pixel(torch.randn(shape, device="cuda")),
+				torch.randn((batch_size,), device="cuda"),
+			)
+			target = model.img_to_seq_pixel(torch.randn(shape, device="cuda"))
 
 	replace_layer_with_layer_dw(model, "cpu")
 	return model, sample, target

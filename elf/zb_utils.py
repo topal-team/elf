@@ -133,7 +133,9 @@ class LayerDW(nn.Module):
 
 class LinearDW(nn.Linear, LayerDW):
 	def __init__(self, linear, *args, **kwargs):
-		super(LinearDW, self).__init__(linear.in_features, linear.out_features, linear.bias is not None, *args, **kwargs)
+		super(LinearDW, self).__init__(
+			linear.in_features, linear.out_features, linear.bias is not None, *args, **kwargs
+		)
 		self.weight.data = linear.weight.data
 		if linear.bias is not None:
 			self.bias.data = linear.bias.data

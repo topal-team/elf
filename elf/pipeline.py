@@ -373,7 +373,6 @@ class Pipeline:
 		if dist.get_rank() == 0:
 			logger.info(f"Schedule:\n{schedule_to_str(schedule)}")
 
-
 		# Remove all operations that are not ours
 		ids = list(
 			map(lambda b: b.id, self.blocks)
