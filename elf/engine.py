@@ -208,7 +208,6 @@ class Engine:
 			]:
 				self._run_comms()
 
-
 			match op.op:
 				case OperationType.FORWARD:
 					y = block.forward(op.mb_id, **op.options)
