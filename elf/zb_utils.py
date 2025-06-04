@@ -186,9 +186,7 @@ def replace_linear_with_linear_dw(model, device):
 			else:
 				parent = model.get_submodule(name[: name.rfind(".")])
 			child = name.split(".")[-1]
-			new_module = LinearDW(
-				module, device=device
-			)
+			new_module = LinearDW(module, device=device)
 			new_module.weight = module.weight  # avoid copying data
 			if module.bias is not None:
 				new_module.bias = module.bias
