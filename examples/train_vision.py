@@ -63,7 +63,7 @@ if __name__ == "__main__":
 	assert config.pipeline.dp * config.pipeline.pp == ws, "dp * pp must be equal to world size"
 
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
 	# Define hyperparameters
 	num_epochs = config.train.epochs

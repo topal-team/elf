@@ -118,7 +118,7 @@ def main():
 	rank = int(os.environ.get("RANK", 0))
 	local_rank = int(os.environ.get("LOCAL_RANK", 0))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=300))
+	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"), timeout=datetime.timedelta(seconds=300))
 
 	batch_size = dist.get_world_size() * 1
 

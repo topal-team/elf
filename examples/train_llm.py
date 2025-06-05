@@ -164,7 +164,7 @@ if __name__ == "__main__":
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	ws = int(os.getenv("WORLD_SIZE"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
 	main()
 

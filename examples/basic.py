@@ -16,7 +16,7 @@ if __name__ == "__main__":
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
 	model = resnet50()
 	sample = torch.randn((8, 3, 224, 224)).cuda()
