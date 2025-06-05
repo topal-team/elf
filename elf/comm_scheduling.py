@@ -177,7 +177,7 @@ class DirectedGraph:
 
 def topological_sort(graph: DirectedGraph) -> List[int]:
 	"""
-	Sort the nodes of the graph topologically.
+	Sort the nodes of the graph topologically (in reverse order).
 	Nodes that are connected by bidirectional edges are forced to be consecutive in the output.
 	"""
 
