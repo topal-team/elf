@@ -59,7 +59,11 @@ def setup_distributed() -> tuple[int, int]:
 	"""Initialize distributed training environment."""
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"), timeout=datetime.timedelta(seconds=300))  # 5 minutes
+	dist.init_process_group(
+		backend="nccl",
+		device_id=torch.device(f"cuda:{local_rank}"),
+		timeout=datetime.timedelta(seconds=300),
+	)  # 5 minutes
 	return dist.get_rank(), dist.get_world_size()
 
 
