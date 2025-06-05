@@ -62,11 +62,11 @@ class SimpleResNet(nn.Module):
 
 		return x
 
-	def get_sample(self, batch_size):
-		return torch.randn(batch_size, 3, 224, 224)
+	def get_sample(self, batch_size, dtype=torch.float32):
+		return torch.randn(batch_size, 3, 224, 224, dtype=dtype)
 
-	def get_target(self, batch_size):
-		return torch.randint(0, self.fc.out_features, (batch_size,))
+	def get_target(self, batch_size, dtype=torch.int64):
+		return torch.randint(0, self.fc.out_features, (batch_size,), dtype=dtype)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
@@ -129,11 +129,11 @@ class SimpleCNN(nn.Module):
 		x = self.fc2(x)
 		return x
 
-	def get_sample(self, batch_size):
-		return torch.randn(batch_size, 3, 224, 224)
+	def get_sample(self, batch_size, dtype=torch.float32):
+		return torch.randn(batch_size, 3, 224, 224, dtype=dtype)
 
-	def get_target(self, batch_size):
-		return torch.randint(0, 10, (batch_size,))
+	def get_target(self, batch_size, dtype=torch.int64):
+		return torch.randint(0, 10, (batch_size,), dtype=dtype)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
@@ -172,11 +172,11 @@ class SimpleAttention(nn.Module):
 
 		return context
 
-	def get_sample(self, batch_size):
-		return torch.randn(batch_size, 64, self.hidden_dim)
+	def get_sample(self, batch_size, dtype=torch.float32):
+		return torch.randn(batch_size, 64, self.hidden_dim, dtype=dtype)
 
-	def get_target(self, batch_size):
-		return self.get_sample(batch_size)  # same
+	def get_target(self, batch_size, dtype=torch.float32):
+		return self.get_sample(batch_size, dtype)  # same
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
@@ -207,11 +207,11 @@ class SimpleFastAttention(nn.Module):
 			context = F.scaled_dot_product_attention(Q, K, V).squeeze(1)
 			return context
 
-	def get_sample(self, batch_size):
-		return torch.randn(batch_size, 64, self.hidden_dim)
+	def get_sample(self, batch_size, dtype=torch.float32):
+		return torch.randn(batch_size, 64, self.hidden_dim, dtype=dtype)
 
-	def get_target(self, batch_size):
-		return self.get_sample(batch_size)  # same
+	def get_target(self, batch_size, dtype=torch.float32):
+		return self.get_sample(batch_size, dtype)  # same
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
@@ -267,11 +267,11 @@ class SimpleTransformer(nn.Module):
 		x = self.head(x)
 		return x
 
-	def get_sample(self, batch_size):
-		return torch.randint(0, self.input_dim, (batch_size, self.seq_len))
+	def get_sample(self, batch_size, dtype=torch.int64):
+		return torch.randint(0, self.input_dim, (batch_size, self.seq_len), dtype=dtype)
 
-	def get_target(self, batch_size):
-		return self.get_sample(batch_size)
+	def get_target(self, batch_size, dtype=torch.int64):
+		return self.get_sample(batch_size, dtype)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		pred = pred.view(-1, self.input_dim)  # flatten seq dim
@@ -369,11 +369,11 @@ class MultiHeadAttention(nn.Module):
 
 		return out
 
-	def get_sample(self, batch_size):
-		return torch.randn(batch_size, 64, self.hidden_dim)
+	def get_sample(self, batch_size, dtype=torch.float32):
+		return torch.randn(batch_size, 64, self.hidden_dim, dtype=dtype)
 
-	def get_target(self, batch_size):
-		return self.get_sample(batch_size)  # same
+	def get_target(self, batch_size, dtype=torch.float32):
+		return self.get_sample(batch_size, dtype)  # same
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
@@ -456,11 +456,11 @@ class FullTransformer(nn.Module):
 		x = self.head(x)
 		return x
 
-	def get_sample(self, batch_size):
-		return torch.randint(0, self.input_dim, (batch_size, self.seq_len))
+	def get_sample(self, batch_size, dtype=torch.int64):
+		return torch.randint(0, self.input_dim, (batch_size, self.seq_len), dtype=dtype)
 
-	def get_target(self, batch_size):
-		return self.get_sample(batch_size)
+	def get_target(self, batch_size, dtype=torch.int64):
+		return self.get_sample(batch_size, dtype)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		pred = pred.view(-1, self.input_dim)  # flatten seq dim

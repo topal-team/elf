@@ -297,6 +297,8 @@ class Pipeline:
 	def _get_default_placement(schedule, pp):
 		if schedule == "hanayo":
 			return [i for i in range(pp)] + list(reversed([i for i in range(pp)]))
+		elif schedule == "megatron":
+			return [i for i in range(pp)] * 2
 		else:
 			return [i for i in range(pp)]
 
@@ -335,9 +337,9 @@ class Pipeline:
 		if not isinstance(schedule, str):
 			return schedule
 		match schedule.lower():
-			case "afab":
+			case "afab" | "gpipe":
 				return generate_afab_schedule
-			case "1f1b":
+			case "1f1b" | "megatron":
 				return generate_1f1b_schedule
 			case "hanayo":
 				return generate_hanayo_schedule

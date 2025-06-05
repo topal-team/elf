@@ -536,7 +536,7 @@ class PipelineBlock:
 		:type batch_size: int
 		"""
 		for p in self.model.parameters():
-			if p.requires_grad:
+			if p.requires_grad and p.grad is not None:
 				p.grad.data /= batch_size
 
 	def _receive_metadata(self, src):
