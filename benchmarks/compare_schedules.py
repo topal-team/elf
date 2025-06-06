@@ -4,6 +4,7 @@ import gc
 import sys
 from datetime import timedelta
 from argparse import ArgumentParser
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -19,14 +20,6 @@ import logging
 
 logger = logging.getLogger("benchmark")
 logging.basicConfig(level=logging.INFO)
-
-
-def medians(times):
-	meds = {}
-	for t in times[0].keys():
-		values = list(map(lambda x: x[t], times))
-		meds[t] = sorted(values)[len(values) // 2]
-	return meds
 
 
 if __name__ == "__main__":
@@ -53,6 +46,9 @@ if __name__ == "__main__":
 		default="results/compare_schedules.json",
 		required=False,
 		help="output file",
+	)
+	parser.add_argument(
+		"--ntrials", type=int, default=10, required=False, help="number of trials to run for error bars"
 	)
 	args = parser.parse_args()
 	match args.log:
@@ -86,7 +82,7 @@ if __name__ == "__main__":
 		("Hanayo 1W", list(range(world_size)) + list(reversed(range(world_size))), "hanayo"),
 		("Hanayo 2W", (list(range(world_size)) + list(reversed(range(world_size)))) * 2, "hanayo"),
 		("Hanayo 4W", (list(range(world_size)) + list(reversed(range(world_size)))) * 4, "hanayo"),
-		("Full Remat", list(range(world_size)), "full_remat"),
+		# ("Full Remat", list(range(world_size)), "full_remat"),
 		("ZBH1", list(range(world_size)), "zbh1"),
 		("ZBH2", list(range(world_size)), "zbh2"),
 		("ZBV", list(range(world_size)) + list(reversed(range(world_size))), "zbv"),
@@ -138,6 +134,7 @@ if __name__ == "__main__":
 		# Warmup
 		if rank == 0:
 			print(f"{s} - Warming up")
+
 		for i in range(3):
 			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=split_size)
 			del y, loss
@@ -150,52 +147,49 @@ if __name__ == "__main__":
 		dist.barrier()
 		torch.cuda.synchronize()
 
-		stats = []
-		with Timer() as timer:
-			for i in range(n_iterations):
-				model.zero_grad()
-				inputs = model.get_sample(batch_size)  # should we include input allocation in the stats?
-				targets = model.get_target(batch_size)
-				y = pipe(inputs, targets, loss_fn, split_size=split_size)
-				stats.append(pipe.stats)
-			dist.barrier()
+		trial_times = []
+		for trial in range(args.ntrials):
+			stats = []
+			with Timer() as timer:
+				for i in range(n_iterations):
+					model.zero_grad()
+					inputs = model.get_sample(batch_size)
+					targets = model.get_target(batch_size)
+					y = pipe(inputs, targets, loss_fn, split_size=split_size)
+					stats.append(pipe.stats)
 
-		mems = [torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
-		dist.gather(
-			torch.tensor(torch.cuda.max_memory_allocated() / (2**30), device=local_rank), mems, 0
-		)
+				dist.barrier()
+				torch.cuda.synchronize()
 
-		median_times = medians(stats)
-		itimes = [{} for _ in range(world_size)] if rank == 0 else None
-		dist.gather_object(median_times, itimes, 0)
+			trial_times.append(timer.time())
 
 		if rank == 0:
-			iteration_times = [f"{it['total']:.2f}" for it in itimes]
-			idle_times = [f"{it['idle']:.2f}" for it in itimes]
-			idle_percentages = [f"{it['idle'] / it['total'] * 100:.1f}" for it in itimes]
-			peak_mems = [f"{m.item():.2f}" for m in mems]
+			mean_time = np.mean(trial_times)
+			std_time = np.std(trial_times)
+			mean_throughput = n_iterations * batch_size / mean_time
+			std_throughput = mean_throughput * (std_time / mean_time)
+
 			print(f"{s}:")
-			print(f"\tIteration times: {iteration_times} s")
-			print(f"\tIdle times: {idle_times} s ({idle_percentages}%)")
 			print(
-				f"\tTotal time ({n_iterations} iterations): {timer.time():.2f}s - Throughput: {(n_iterations * batch_size / timer.time()):.2f} seq/s, Time / iter: {timer.time() / n_iterations:.2f}s"
+				f"\tTotal time ({n_iterations} iterations, {args.ntrials} trials): {mean_time:.2f} ± {std_time:.2f}s"
 			)
-			print(f"\tPeak memories: {peak_mems} GB")
+			print(f"\tThroughput: {mean_throughput:.2f} ± {std_throughput:.2f} seq/s")
+			print(f"\tTime per iter: {mean_time / n_iterations:.2f} ± {std_time / n_iterations:.2f}s")
 
 			results[s] = {
 				"placement": placement,
 				"schedule": schedule,
-				"iteration_times": iteration_times,
-				"idle_times": idle_times,
-				"peak_mems": peak_mems,
-				"total_time": timer.time(),
-				"throughput": n_iterations * batch_size / timer.time(),
-				"time_per_iter": timer.time() / n_iterations,
+				"total_time_mean": mean_time,
+				"total_time_std": std_time,
+				"throughput_mean": mean_throughput,
+				"throughput_std": std_throughput,
+				"time_per_iter_mean": mean_time / n_iterations,
+				"time_per_iter_std": std_time / n_iterations,
 			}
 
 		pipe.clear()
 		model.zero_grad(set_to_none=True)
-		del pipe, y, inputs, targets, median_times, mems, itimes
+		del pipe, y, inputs, targets
 		gc.collect()
 		torch.cuda.empty_cache()
 

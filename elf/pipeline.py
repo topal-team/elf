@@ -295,7 +295,7 @@ class Pipeline:
 
 	@staticmethod
 	def _get_default_placement(schedule, pp):
-		if schedule == "hanayo":
+		if schedule == "hanayo" or schedule == "zbv":
 			return [i for i in range(pp)] + list(reversed([i for i in range(pp)]))
 		elif schedule == "megatron":
 			return [i for i in range(pp)] * 2
@@ -372,7 +372,7 @@ class Pipeline:
 		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
 		check_schedule_validity(schedule)
 
-		schedule = reorder_communications(schedule)
+		schedule = reorder_communications(schedule, strategy="smart")
 
 		if dist.get_rank() == 0:
 			logger.info(f"Schedule:\n{schedule_to_str(schedule)}")

@@ -378,6 +378,11 @@ def generate_zbv_schedule(placement, n_micro_batches, signatures):
 	n_devices = max(placement) + 1
 	stages_per_device = len(placement) // n_devices
 
+	if n_micro_batches != len(placement) * 2:
+		logger.warning(
+			f"ZBV schedule is only tested for nmb = 2 * n_devices, got {n_micro_batches}. The schedule may be incorrect."
+		)
+
 	for rank in range(n_devices):
 		fs = [0] * stages_per_device
 		bs = [0] * stages_per_device
