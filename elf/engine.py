@@ -8,8 +8,8 @@ import torch.distributed as dist
 from collections import deque, OrderedDict
 import time
 
-from .scheduling import OperationType, OpOptions
-from .utils import Timer, op_to_str
+from .scheduling import OperationType
+from .utils import Timer
 
 import logging
 import os
@@ -83,51 +83,6 @@ class Engine:
 			logger.info("Using precise timings")
 
 		self.id_to_block = {b.id: b for b in self.blocks}
-		self.comms = {}
-
-	def _add_comm(self, comm, id_):
-		if not comm:
-			return
-
-		if id_ not in self.comms:
-			self.comms[id_] = []
-		self.comms[id_].extend(comm)
-
-	def _run_comms(self):
-		"""
-		Run all currently batched communications for this device
-		Internal function, this should not be used by the user
-		"""
-		if len(self.comms) == 0:
-			return
-
-		works = []
-
-		# Enqueue everything
-		for id_, comms in self.comms.items():
-			# We only run batched communications if we have both send and receive
-			if any(c.op.__name__ == "isend" for c in comms) and any(
-				c.op.__name__ == "irecv" for c in comms
-			):
-				assert len(comms) > 1, "Was this condition useful after all?"
-				logger.debug(
-					f"Rank {self.rank} - Running batched communications with id {id_}: {[op_to_str(c) for c in comms]}"
-				)
-				works.extend(dist.batch_isend_irecv(comms))
-
-				self.comms[id_] = []
-
-		for w in works:
-			w.wait()
-
-		if works:
-			logger.debug(f"Rank {self.rank} - Finished batched communications")
-
-		# Clean up
-		keys = list(self.comms.keys())
-		for k in keys:
-			if len(self.comms[k]) == 0:
-				del self.comms[k]
 
 	def train_step(self, batch, target, loss_fn, schedule, mb_sizes, profile=False):
 		"""
@@ -200,14 +155,6 @@ class Engine:
 					torch.cuda.synchronize()
 					warmup_time = _time_end(start)
 
-			# A computation will synchronize! We want to enqueue all possible communications before that
-			if op.op in [
-				OperationType.FORWARD,
-				OperationType.BACKWARD_INPUTS,
-				OperationType.BACKWARD_PARAMS,
-			]:
-				self._run_comms()
-
 			match op.op:
 				case OperationType.FORWARD:
 					y = block.forward(op.mb_id, **op.options)
@@ -233,8 +180,7 @@ class Engine:
 						dst_block = self.id_to_block.get(op.options.get("dst"))
 						_transfer_forward(block, dst_block, op.mb_id)
 
-					comm = block.send_forward(op.mb_id, **op.options)
-					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
+					block.send_forward(op.mb_id, **op.options)
 
 				case OperationType.SEND_BACKWARD:
 					if op.options.get("dst") in self.id_to_block:
@@ -242,8 +188,7 @@ class Engine:
 						dst_block = self.id_to_block.get(op.options.get("dst"))
 						_transfer_backward(block, dst_block, op.mb_id)
 
-					comm = block.send_backward(op.mb_id, **op.options)
-					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
+					block.send_backward(op.mb_id, **op.options)
 
 				case OperationType.RECV_FORWARD:
 					if block.is_first:
@@ -251,12 +196,10 @@ class Engine:
 						for mb, var in zip(microbatch, block.input_variables):
 							var.set(var.to_process, op.mb_id, _fake_p2p(mb))
 
-					comm = block.recv_forward(op.mb_id, mb_sizes[op.mb_id], **op.options)
-					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
+					block.recv_forward(op.mb_id, mb_sizes[op.mb_id], **op.options)
 
 				case OperationType.RECV_BACKWARD:
-					comm = block.recv_backward(op.mb_id, mb_sizes[op.mb_id], **op.options)
-					self._add_comm(comm, op.options.get(OpOptions.BATCHED_COMM))
+					block.recv_backward(op.mb_id, mb_sizes[op.mb_id], **op.options)
 
 				case OperationType.LOSS_FORWARD:
 					if block.is_last:
@@ -306,7 +249,6 @@ class Engine:
 
 		logger.debug(f"Rank {self.rank} - Finished execution")
 
-		self._run_comms()  # finish all comms
 		if precise_timings:
 			torch.cuda.synchronize()
 

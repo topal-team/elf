@@ -387,15 +387,12 @@ class PipelineBlock:
 		Send one activation to the next layer in the model
 
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		dst = options.get("dst")
 
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		sends = []
 		for var in self.output_variables:
 			for target in var:
 				# only perform communications for that dst
@@ -407,27 +404,19 @@ class PipelineBlock:
 				outputs = target.get(target.to_send, mb_id).contiguous()
 
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
-				if options.get(OpOptions.BATCHED_COMM):
-					sends.append(dist.P2POp(dist.isend, outputs, rank, group=self.pp_group))
-				else:
-					logger.debug(f"{self} - Sending outputs to rank {rank}")
-					dist.isend(outputs, rank, group=self.pp_group)
-
-		return sends  # if not batched, sends is still empty and therefore Falsy
+				logger.debug(f"{self} - Sending outputs to rank {rank}")
+				dist.isend(outputs, rank, group=self.pp_group)
 
 	def send_backward(self, mb_id, **options):
 		"""
 		Send one gradient tensor to the previous layer in the model
 
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		dst = options.get("dst")
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		sends = []
 		for var in self.input_variables:
 			if var.peer != dst:
 				continue
@@ -435,13 +424,8 @@ class PipelineBlock:
 			grads = var.get(var.to_send, mb_id).contiguous()
 
 			rank = self.placement[dst]
-			if options.get(OpOptions.BATCHED_COMM):
-				sends.append(dist.P2POp(dist.isend, grads, rank, group=self.pp_group))
-			else:
-				logger.debug(f"{self} - Sending gradients to rank {rank}")
-				dist.isend(grads, rank, group=self.pp_group)
-
-		return sends  # if not batched, sends is still empty and therefore Falsy
+			logger.debug(f"{self} - Sending gradients to rank {rank}")
+			dist.isend(grads, rank, group=self.pp_group)
 
 	def recv_forward(self, mb_id, mb_size, **options):
 		"""
@@ -450,8 +434,6 @@ class PipelineBlock:
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		src = options.get("src")
 
@@ -462,7 +444,6 @@ class PipelineBlock:
 		if any(not var.metadata and var.peer == src for var in self.input_variables):
 			self._receive_metadata(src)
 
-		recvs = []
 		# We couple buffer and work objects for now so that we can wait at the right moment
 		for var in self.input_variables:
 			if var.peer != src:
@@ -471,16 +452,10 @@ class PipelineBlock:
 			buffer = var.metadata.get_buffer(mb_size)
 
 			rank = self.placement[src]
-			if options.get(OpOptions.BATCHED_COMM):
-				recvs.append(dist.P2POp(dist.irecv, buffer, rank, group=self.pp_group))
-				work = None
-			else:
-				logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
-				work = dist.irecv(buffer, rank, group=self.pp_group)
+			logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
+			work = dist.irecv(buffer, rank, group=self.pp_group)
 
 			var.set(var.to_process, mb_id, (work, buffer.requires_grad_(True)))
-
-		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
 	def recv_backward(self, mb_id, mb_size, **options):
 		"""
@@ -489,15 +464,12 @@ class PipelineBlock:
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		src = options.get("src")
 
 		if src is None or self.placement[src] == self.rank:
 			return
 
-		recvs = []
 		for var in self.output_variables:
 			for target in var:
 				if target.peer != src:
@@ -506,16 +478,10 @@ class PipelineBlock:
 				buffer = target.metadata.get_buffer(mb_size)
 
 				rank = self.placement[src]
-				if options.get(OpOptions.BATCHED_COMM):
-					recvs.append(dist.P2POp(dist.irecv, buffer, rank, group=self.pp_group))
-					work = None
-				else:
-					logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
-					work = dist.irecv(buffer, rank, group=self.pp_group)
+				logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
+				work = dist.irecv(buffer, rank, group=self.pp_group)
 
 				target.set(target.to_process, mb_id, (work, buffer))
-
-		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
 	def all_reduce_param_grads(self, **options):
 		"""

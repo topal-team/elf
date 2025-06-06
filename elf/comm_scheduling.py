@@ -5,7 +5,7 @@ Static analysis of communications to avoid deadlocks, using a dependency graph r
 from typing import List, Tuple, Set, Dict
 from collections import defaultdict
 
-from .scheduling import OperationType, get_peer, matching, comm_types, Operation
+from .scheduling import OperationType, get_peer, matching, comm_types, compute_types, Operation
 
 
 class DirectedGraph:
@@ -238,6 +238,122 @@ def topological_sort(graph: DirectedGraph) -> List[int]:
 	return result
 
 
+def smart_topological_sort(graph: DirectedGraph, schedule: List[Operation]) -> List[int]:
+	"""
+	Topological sort using simulation of execution.
+	We use a step mechanism to try to synchronize communications when both send and recv are ready.
+	"""
+	node_to_op = {i: op for i, op in enumerate(schedule)}
+	op_to_node = {op: i for i, op in enumerate(schedule)}
+	out_degree = [0] * graph.num_nodes
+	pairings = {}  # match send to corresponding recv
+
+	for node in range(graph.num_nodes):
+		out_degree[node] = graph.get_out_degree(node)
+
+		for neighbor in graph.get_predecessors(node):
+			if graph.has_bidirectional_edge(node, neighbor):
+				pairings[node] = neighbor
+
+	rank_ops = {}
+	for op in schedule:
+		if op.rank not in rank_ops:
+			rank_ops[op.rank] = []
+		rank_ops[op.rank].append(op)
+
+	result = []
+
+	def is_ready(node: int) -> bool:
+		# Computes are ready when all dependencies are satisfied
+		# Communications are ready when both send and recv are ready
+		return out_degree[node] == 0 or (
+			node in pairings and out_degree[node] <= 1 and out_degree[pairings[node]] <= 1
+		)
+
+	def process_node(node: int):
+		# Mark a node as processed (added to the result), and update the dependency count of its predecessors
+		result.append(node)
+		for neighbor in graph.get_predecessors(node):
+			out_degree[neighbor] -= 1
+
+		out_degree[node] = -1
+
+	# Pre-schedule all ops that don't have any dependencies (that's recv_forward on rank 0)
+	to_process = [i for i, op in enumerate(schedule) if is_ready(i)]
+	for i in to_process:
+		process_node(i)
+
+	step = 0
+	while True:
+		step += 1
+
+		# Before each timestep, we schedule all communications that are ready
+		# We add send and recv together in the results, to force them to be consecutive
+		comms_to_process = []
+		for rank, ops in rank_ops.items():
+			ready_ops = [op for op in ops if is_ready(op_to_node[op])]
+			send_ops = [
+				op for op in ready_ops if op.op in {OperationType.SEND_FORWARD, OperationType.SEND_BACKWARD}
+			]
+
+			for send_op in send_ops:
+				send_node = op_to_node[send_op]
+
+				# Will be processed later
+				if send_node not in pairings:
+					continue
+
+				comms_to_process.append(send_node)
+				rank_ops[rank].remove(send_op)
+
+				recv_node = pairings[send_node]
+				recv_op = node_to_op[recv_node]
+				rank_ops[recv_op.rank].remove(recv_op)
+				comms_to_process.append(recv_node)
+
+		for comm in comms_to_process:
+			process_node(comm)
+
+		# Then we do the actual timestep: find the next computation to be done, and execute it
+		for rank, ops in rank_ops.items():
+			ready_ops = [op for op in ops if is_ready(op_to_node[op])]
+
+			# Special cases: comms with no peer (fake p2p), loss_forward, loss_backward and other stuff should be added and skipped in a loop
+			# If we don't do this, the timestep will be desynchronized on different processors
+			skippable_ops = [
+				op for op in ready_ops if op.op not in compute_types and op_to_node[op] not in pairings
+			]
+			while len(skippable_ops) > 0:
+				for op in skippable_ops:
+					process_node(op_to_node[op])
+					rank_ops[rank].remove(op)
+
+				ready_ops = [op for op in ops if is_ready(op_to_node[op])]
+				skippable_ops = [
+					op for op in ready_ops if op.op not in compute_types and op_to_node[op] not in pairings
+				]
+
+			# And finally we do the computation
+			for op in ready_ops:
+				if op.op in compute_types:
+					process_node(op_to_node[op])
+					rank_ops[rank].remove(op)
+					break
+
+		# If we processed all ops, we're done
+		if len(result) == len(schedule):
+			break
+
+	# Check that the schedule is valid (acyclic)
+	for i, op in enumerate(result):
+		for j in range(i + 1, len(result)):
+			assert not graph.has_unidirectional_edge(i, j), (
+				"Backward edge found in the toposort! The schedule with reordered communications can hang."
+			)
+
+	return result
+
+
 def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[int, Operation]]:
 	"""
 	Convert a schedule into a directed graph representation.
@@ -337,7 +453,7 @@ def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[in
 	return graph, node_to_op
 
 
-def reorder_communications(schedule: List[Operation]) -> List[Operation]:
+def reorder_communications(schedule: List[Operation], strategy: str = "smart") -> List[Operation]:
 	"""
 	Reorder communications in the schedule to break all dependency cycles.
 
@@ -347,6 +463,11 @@ def reorder_communications(schedule: List[Operation]) -> List[Operation]:
 	:rtype: List[Operation]
 	"""
 	graph, node_to_op = schedule_to_graph(schedule)
-	topo_order = topological_sort(graph)
+
+	if strategy == "smart":
+		topo_order = smart_topological_sort(graph, schedule)
+	else:
+		topo_order = topological_sort(graph)
+
 	new_schedule = [node_to_op[i] for i in topo_order]
 	return new_schedule

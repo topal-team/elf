@@ -42,12 +42,12 @@ comm_types = {
 	OperationType.SEND_BACKWARD,
 }
 
+
+# Note: if you want to include "Loss Forward" and "Loss Backward" in the compute types, check the smart toposorting algorithm; those 2 specially need to be skipped
 compute_types = {
 	OperationType.FORWARD,
 	OperationType.BACKWARD_INPUTS,
 	OperationType.BACKWARD_PARAMS,
-	OperationType.LOSS_FORWARD,
-	OperationType.LOSS_BACKWARD,
 	OperationType.RECOMPUTE_FORWARD,
 	OperationType.RECOMPUTE_BACKWARD_INPUTS,
 }
@@ -69,7 +69,6 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	# for forward, it's a boolean to save the activations or not
 	SAVE = auto()
 
-	BATCHED_COMM = auto()
 	OFFLOAD_DW = auto()
 
 
