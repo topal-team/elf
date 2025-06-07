@@ -266,6 +266,7 @@ if __name__ == "__main__":
 			"seq_len": args.seq_len,
 			"schedule": args.schedule,
 			"niters": args.niters,
+			"nblocks": args.nblocks,
 		}
 
 		wandb.init(

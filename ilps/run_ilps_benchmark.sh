@@ -204,7 +204,6 @@ python ilps/generate_benchmark_jobs.py \
     --solutions-file "results/ilps-solutions/$CONFIG_NAME.json" \
     --config-file "$CONFIG_FILE" \
     --output-file "results/bench-ilps-$CONFIG_NAME.json" \
-    --base-scheduler "$SCHEDULER" \
     --ngpus "$NGPUS" \
     --slurm-opts "$SLURM_OPTS" \
     --output-script "$BENCHMARK_SCRIPT" \
