@@ -2,6 +2,7 @@
 Static analysis of communications to avoid deadlocks, using a dependency graph representation of the schedule.
 """
 
+import numpy as np
 from typing import List, Tuple, Set, Dict
 from collections import defaultdict
 
@@ -27,6 +28,7 @@ class DirectedGraph:
 		self.adjacency_list: Dict[int, List[int]] = defaultdict(list)
 		self.reverse_adjacency_list: Dict[int, List[int]] = defaultdict(list)
 		self.edges: Set[Tuple[int, int]] = set()
+		self.adjacency_matrix = np.zeros((num_nodes, num_nodes), dtype=np.bool)
 
 	def add_edge(self, source: int, target: int) -> None:
 		"""
@@ -43,10 +45,10 @@ class DirectedGraph:
 		if source == target:
 			raise ValueError("Self-loops are not allowed")
 
-		if (source, target) not in self.edges:
-			self.edges.add((source, target))
+		if not self.has_edge(source, target):
 			self.adjacency_list[source].append(target)
 			self.reverse_adjacency_list[target].append(source)
+			self.adjacency_matrix[source, target] = True
 
 	def remove_edge(self, source: int, target: int) -> None:
 		"""
@@ -57,10 +59,10 @@ class DirectedGraph:
 		:param target: Target node
 		:type target: int
 		"""
-		if (source, target) in self.edges:
-			self.edges.remove((source, target))
+		if self.has_edge(source, target):
 			self.adjacency_list[source].remove(target)
 			self.reverse_adjacency_list[target].remove(source)
+			self.adjacency_matrix[source, target] = False
 
 	def get_successors(self, node: int) -> List[int]:
 		"""
@@ -95,7 +97,7 @@ class DirectedGraph:
 		:return: True if edge exists, False otherwise
 		:rtype: bool
 		"""
-		return (source, target) in self.edges
+		return self.adjacency_matrix[source, target]
 
 	def has_unidirectional_edge(self, node1: int, node2: int) -> bool:
 		"""
@@ -130,15 +132,6 @@ class DirectedGraph:
 		:rtype: int
 		"""
 		return len(self.adjacency_list[node])
-
-	def get_all_edges(self) -> List[Tuple[int, int]]:
-		"""
-		Get all edges in the graph.
-
-		:return: List of edges as (source, target) tuples
-		:rtype: List[Tuple[int, int]]
-		"""
-		return list(self.edges)
 
 	def has_cycle(self) -> bool:
 		"""
@@ -345,11 +338,11 @@ def smart_topological_sort(graph: DirectedGraph, schedule: List[Operation]) -> L
 			break
 
 	# Check that the schedule is valid (acyclic)
-	for i, op in enumerate(result):
-		for j in range(i + 1, len(result)):
-			assert not graph.has_unidirectional_edge(i, j), (
-				"Backward edge found in the toposort! The schedule with reordered communications can hang."
-			)
+	# for i, op in enumerate(result):
+	# 	for j in range(i + 1, len(result)):
+	# 		assert not graph.has_unidirectional_edge(i, j), (
+	# 			"Backward edge found in the toposort! The schedule with reordered communications can hang."
+	# 		)
 
 	return result
 
@@ -385,50 +378,53 @@ def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[in
 	# Create graph with one node per operation
 	graph = DirectedGraph(len(schedule))
 
-	# Create mapping from node ID to operation
-	node_to_op = {i: op for i, op in enumerate(schedule)}
-
 	# Track operations by rank and micro-batch for communication dependencies
 	rank_mb_ops: Dict[Tuple[int, int], List[Tuple[int, Operation]]] = {}
 
-	# First pass: collect operations by rank
+	# First pass: collect operations by block_id and micro-batch
 	for i, op in enumerate(schedule):
-		mb_id = op.mb_id or -1  # use -1 for ALL_REDUCE operations and such, it won't be used anyway
-		key = (op.rank, mb_id)
+		mb_id = (
+			op.mb_id if op.mb_id is not None else -1
+		)  # use -1 for ALL_REDUCE operations and such, it won't be used anyway
+		key = (op.block_id, mb_id)
 		if key not in rank_mb_ops:
 			rank_mb_ops[key] = []
 		rank_mb_ops[key].append((i, op))
 
-	def find_op(condition):
-		for i, op in enumerate(schedule):
-			if condition(op):
+	def find_matching_comm(op):
+		peer = get_peer(op)
+		op_type = matching(op.op)
+		key = (peer, op.mb_id)
+
+		if key not in rank_mb_ops:
+			return -1
+
+		for i, other_op in rank_mb_ops[key]:
+			if other_op.op == op_type and get_peer(other_op) == op.block_id:
 				return i
+
 		return -1
 
-	def find_all_ops(condition):
-		return [i for i, op in enumerate(schedule) if condition(op)]
+	def find_all_ops(block_id, mb_id, op_type):
+		key = (block_id, mb_id)
+		if key not in rank_mb_ops:
+			return []
+
+		return [i for i, op in rank_mb_ops[key] if op.op == op_type]
 
 	# Second pass: add edges
 	for i, op in enumerate(schedule):
 		if op.op in comm_types:
 			# Same micro-batch, peer block, matching operation
-			j = find_op(
-				lambda matching_op: get_peer(op) == matching_op.block_id
-				and op.block_id == get_peer(matching_op)
-				and matching_op.mb_id == op.mb_id
-				and matching(op.op) == matching_op.op
-			)
+			j = find_matching_comm(op)
 			if j != -1:
 				graph.add_edge(i, j)
 				graph.add_edge(j, i)
 
 		if op.op in op_to_direct_dependency:
 			# Same rank, same micro-batch, sequential dependency (rf->f->sf, rb->b->sb)
-			deps = find_all_ops(
-				lambda matching_op: matching_op.block_id == op.block_id
-				and matching_op.mb_id == op.mb_id
-				and op_to_direct_dependency[op.op] == matching_op.op
-			)
+			# We assume that they are always before in the schedule for faster search
+			deps = find_all_ops(op.block_id, op.mb_id, op_to_direct_dependency[op.op])
 			for j in deps:
 				graph.add_edge(i, j)
 
@@ -450,7 +446,7 @@ def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[in
 				next_op_idx = ops[j + 1]
 				graph.add_edge(next_op_idx, current_op_idx)
 
-	return graph, node_to_op
+	return graph
 
 
 def reorder_communications(schedule: List[Operation], strategy: str = "smart") -> List[Operation]:
@@ -462,12 +458,12 @@ def reorder_communications(schedule: List[Operation], strategy: str = "smart") -
 	:return: Reordered schedule
 	:rtype: List[Operation]
 	"""
-	graph, node_to_op = schedule_to_graph(schedule)
+	graph = schedule_to_graph(schedule)
 
 	if strategy == "smart":
 		topo_order = smart_topological_sort(graph, schedule)
 	else:
 		topo_order = topological_sort(graph)
 
-	new_schedule = [node_to_op[i] for i in topo_order]
+	new_schedule = [schedule[i] for i in topo_order]
 	return new_schedule

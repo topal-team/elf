@@ -113,17 +113,20 @@ class Operation:
 		return hash((self.block_id, self.mb_id, self.rank, self.op))
 
 
+matching_ops = {
+	OperationType.RECV_FORWARD: OperationType.SEND_FORWARD,
+	OperationType.RECV_BACKWARD: OperationType.SEND_BACKWARD,
+	OperationType.SEND_FORWARD: OperationType.RECV_FORWARD,
+	OperationType.SEND_BACKWARD: OperationType.RECV_BACKWARD,
+}
+
+
 def matching(op_type):
 	"""
 	The matching operation is the opposite communication, in the same direction.
 	For instance, a recv(forward) is matched with a send(forward), and a send(backward) with a recv(backward).
 	"""
-	return {
-		OperationType.RECV_FORWARD: OperationType.SEND_FORWARD,
-		OperationType.RECV_BACKWARD: OperationType.SEND_BACKWARD,
-		OperationType.SEND_FORWARD: OperationType.RECV_FORWARD,
-		OperationType.SEND_BACKWARD: OperationType.RECV_BACKWARD,
-	}[op_type]
+	return matching_ops[op_type]
 
 
 def get_peer(op):
