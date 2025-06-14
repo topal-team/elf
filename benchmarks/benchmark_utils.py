@@ -81,8 +81,8 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32):
 	return iter_time, all_peak_mems
 
 
-def meta_to_gpu(model):
-	model.to_empty(device="cuda")
+def meta_to_device(model, device="cuda"):
+	model.to_empty(device=device)
 	for param in model.parameters():
 		if hasattr(param, "reset_parameters"):
 			param.reset_parameters()
@@ -113,7 +113,7 @@ def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 		start_idx = end_idx
 
 	parts = [parts[i] for i, p in enumerate(placement) if p == rank]
-	parts = [meta_to_gpu(p) for p in parts]
+	parts = [meta_to_device(p, "cuda") for p in parts]
 	return parts
 
 
@@ -128,18 +128,6 @@ def test_correctness(model, pipe):
 	rank = dist.get_rank()
 	world_size = dist.get_world_size()
 
-	# Sync parameters on CPU
-	for param in model.parameters():
-		tensor = param.data.cuda()
-		dist.broadcast(tensor, src=0)
-		param.data = tensor.cpu()
-
-	ref_model = copy.deepcopy(model)
-
-	# Move back all necessary params to GPU
-	for block in pipe.blocks:
-		block.model.cuda()
-
 	atol = 1e-3
 	rtol = 1e-3
 	inputs = model.get_sample(world_size * 2).cuda()
@@ -151,20 +139,24 @@ def test_correctness(model, pipe):
 
 	loss_fn = model.loss_fn
 	model.eval()  # disable dropout
-	ref_model.eval()
 
 	# Execute using pipeline
 	pipe.zero_grad()
 	y, loss = pipe(inputs, targets, loss_fn, split_size=1)
 
 	all_grads = {}
-	for name, param in pipe.blocks[0].model.named_parameters():
-		if param.grad is not None:
-			all_grads[name] = param.grad.cpu()
+	for block in pipe.blocks:
+		for name, param in block.model.named_parameters():
+			if param.grad is not None:
+				all_grads[name] = param.grad.cpu()
 
 	last = world_size - 1
+	all_params = pipe.gather_parameters(dst=last)
 	if rank == last:
-		ref_model.cpu()  # doesnt fit in gpu memory
+		ref_model = copy.deepcopy(model)
+		meta_to_device(ref_model, "cpu")
+		ref_model.load_state_dict(all_params)
+		ref_model.eval()
 		ref_model.zero_grad()
 		y_ref = ref_model(inputs)
 		loss_ref = loss_fn(y_ref, targets)
@@ -173,11 +165,11 @@ def test_correctness(model, pipe):
 		loss = loss.cpu()
 
 		assert torch.allclose(y, y_ref, atol=atol, rtol=rtol), (
-			f"y mismatch: {torch.norm(y - y_ref)} ({100 * torch.norm(y - y_ref) / torch.norm(y_ref)}%)"
+			f"y mismatch: {torch.norm(y - y_ref)} ({100 * torch.norm(y - y_ref) / torch.norm(y_ref)}%) ({torch.norm(y)} vs {torch.norm(y_ref)})"
 		)
 
 		assert torch.allclose(loss, loss_ref, atol=atol, rtol=rtol), (
-			f"loss mismatch: {torch.norm(loss - loss_ref)} ({100 * torch.norm(loss - loss_ref) / torch.norm(loss_ref)}%)"
+			f"loss mismatch: {torch.norm(loss - loss_ref)} ({100 * torch.norm(loss - loss_ref) / torch.norm(loss_ref)}%) ({torch.norm(loss)} vs {torch.norm(loss_ref)})"
 		)
 
 		loss_ref.backward()
@@ -187,13 +179,6 @@ def test_correctness(model, pipe):
 				module.move_last_computed("grad_output", 0)
 				module.backward(0)
 
-		offset = 0
-
-		def rename_param(name):
-			splitted = name.split(".")
-			splitted[0] = "block_" + str(offset + int(splitted[0]))
-			return ".".join(splitted)
-
 		all_grads_ref = {
 			name: param.grad for name, param in ref_model.named_parameters() if param.grad is not None
 		}
@@ -202,16 +187,13 @@ def test_correctness(model, pipe):
 			grads = [{}]
 			dist.recv_object_list(grads, peer)
 			for name, grad in grads[0].items():
-				name = rename_param(name)
 				assert torch.allclose(grad.cpu(), all_grads_ref[name], atol=atol, rtol=rtol), (
 					f"grad mismatch ({name}): {torch.norm(grad.cpu() - all_grads_ref[name])} ({100 * torch.norm(grad.cpu() - all_grads_ref[name]) / torch.norm(all_grads_ref[name])}%)"
 				)
 				del all_grads_ref[name]
-			offset += max(int(name.split(".")[0]) for name in grads[0].keys()) + 1
 			del grads
 
 		for name, grad in all_grads.items():
-			name = rename_param(name)
 			assert torch.allclose(grad, all_grads_ref[name], atol=atol, rtol=rtol), (
 				f"grad mismatch ({name}): {torch.norm(grad - all_grads_ref[name])} ({100 * torch.norm(grad - all_grads_ref[name]) / torch.norm(all_grads_ref[name])}%)"
 			)

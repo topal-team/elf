@@ -448,8 +448,6 @@ class FullTransformer(nn.Module):
 	def forward(self, x):
 		x = self.embed(x)
 
-		x = x.to(self.head.weight.dtype)
-
 		for b in self.blocks:
 			x = b(x)
 
@@ -463,6 +461,7 @@ class FullTransformer(nn.Module):
 		return self.get_sample(batch_size, dtype)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
+		pred = pred.to(torch.float32)  # CrossEntropy is unsafe in lower precision
 		pred = pred.view(-1, self.input_dim)  # flatten seq dim
 		target = target.view(-1)
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)

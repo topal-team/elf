@@ -7,8 +7,6 @@ import torch
 import shutil
 import torch.distributed as dist
 
-from collections import OrderedDict
-
 from .block import PipelineBlock
 from .schedules import *
 from .engine import Engine
@@ -192,10 +190,12 @@ class Pipeline:
 		"""
 		Returns an iterator over the parameters of all blocks in the pipeline.
 
-		:return: An iterator yielding parameter groups for each block.
-		:rtype: List[Dict[str, Iterator[torch.nn.Parameter]]]
+		:return: An iterator yielding parameters for all blocks.
+		:rtype: Iterator[torch.nn.Parameter]
 		"""
-		return [{"params": block.model.parameters()} for block in self.blocks]
+		for block in self.blocks:
+			for param in block.model.parameters():
+				yield param
 
 	def named_parameters(self):
 		"""
@@ -204,10 +204,9 @@ class Pipeline:
 		:return: An iterator yielding tuples of (name, parameter) for all parameters in the pipeline.
 		:rtype: Iterator[Tuple[str, torch.nn.Parameter]]
 		"""
-		rank_named_parameters = OrderedDict()
 		for block in self.blocks:
-			rank_named_parameters.update(block.model.named_parameters())
-		return rank_named_parameters
+			for name, param in block.model.named_parameters():
+				yield name, param
 
 	def zero_grad(self, set_to_none=True):
 		"""
@@ -292,6 +291,32 @@ class Pipeline:
 		else:
 			if worker in dist.get_process_group_ranks(pp_group):
 				dist.send_object_list([self.named_parameters()], dst=worker, group=pp_group)
+
+	def gather_parameters(self, dst=0):
+		"""
+		Collects the parameters from all ranks and returns a dictionary of tensors.
+		"""
+		rank = dist.get_rank()
+		pp_group = self.blocks[0].pp_group
+		my_params = {}
+		for block in self.blocks:
+			for name, param in block.model.named_parameters():
+				if name not in my_params:
+					my_params[name] = param.data.detach()
+				else:
+					logger.warning(
+						f"Duplicate parameter {name} found in block {block.id}, using first occurrence"
+					)
+
+		all_params = [None] * dist.get_world_size() if rank == dst else None
+		dist.gather_object(my_params, all_params, dst=dst, group=pp_group)
+
+		state_dict = {}
+		if rank == dst:
+			for params in all_params:
+				state_dict.update(params)
+
+		return state_dict
 
 	@staticmethod
 	def _get_default_placement(schedule, pp):

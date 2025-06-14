@@ -42,13 +42,13 @@ def get_precision(precision: str) -> torch.dtype:
 def parse_args():
 	parser = argparse.ArgumentParser(description="Measure communication time between GPUs")
 	parser.add_argument(
-		"--config_file",
+		"--config-file",
 		type=str,
 		default="ilps/configs/default.json",
 		help="Path to the configuration file to update",
 	)
 	parser.add_argument(
-		"--output_file",
+		"--output-file",
 		type=str,
 		help="Path to save the updated configuration file (defaults to overwriting config_file)",
 	)
@@ -135,7 +135,7 @@ def main():
 			start.record()
 			dist.send(x, dst)
 			end.record()
-			torch.cuda.synchronize()
+			end.synchronize()
 			send_times.append(start.elapsed_time(end))
 		else:
 			dist.recv(x, src)
@@ -152,7 +152,7 @@ def main():
 			start.record()
 			dist.recv(x, src)
 			end.record()
-			torch.cuda.synchronize()
+			end.synchronize()
 			recv_times.append(start.elapsed_time(end))
 		else:
 			dist.send(x, dst)
