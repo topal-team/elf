@@ -306,7 +306,6 @@ class SimpleTransformer(SimpleModel):
 
 	def forward(self, x):
 		x = self.embed(x)
-		x = x.to(self.head.weight.dtype)
 
 		for b in self.blocks:
 			x = b(x)
