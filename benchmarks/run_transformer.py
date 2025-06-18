@@ -9,19 +9,20 @@ import torch.distributed as dist
 
 sys.path.append(".")
 
-from elf import Pipeline
-from models.simple import FullTransformer
+from elf import Pipeline, get_sources_targets_sequential
 from elf.zb_utils import replace_linear_with_linear_dw
-from benchmarks.benchmark_utils import meta_to_device
+from models.simple import FullTransformer
+from benchmarks.benchmark_utils import get_handcrafted_partition, meta_to_device
 
 
 class MixedPrecisionOptimizer:
 	"""Mixed precision optimizer wrapper that handles FP16/BF16 training with FP32 master weights."""
 
-	def __init__(self, optimizer_cls, params, dtype, opt_dtype, **optimizer_kwargs):
+	def __init__(self, optimizer_cls, params, dtype, opt_dtype, opt_device, **optimizer_kwargs):
 		self.dtype = dtype
 		self.opt_dtype = opt_dtype
-		self.need_master_weights = dtype != opt_dtype
+		self.opt_device = opt_device
+		self.need_master_weights = dtype != opt_dtype or opt_device != "cuda"
 
 		if self.need_master_weights:
 			# Create master weights in optimizer precision
@@ -30,7 +31,7 @@ class MixedPrecisionOptimizer:
 
 			for param in params:
 				if param.requires_grad:
-					master_param = param.detach().clone().to(opt_dtype)
+					master_param = param.detach().clone().to(opt_dtype).to(opt_device)  # cast THEN move!
 					master_param.requires_grad_(True)
 					self.master_params.append(master_param)
 					self.param_mapping[param] = master_param
@@ -46,6 +47,7 @@ class MixedPrecisionOptimizer:
 			for param in self.master_params:
 				if param.grad is not None:
 					param.grad.zero_()
+
 			# Also zero model param grads to be safe
 			for param in self.param_mapping.keys():
 				if param.grad is not None:
@@ -60,15 +62,17 @@ class MixedPrecisionOptimizer:
 			for model_param, master_param in self.param_mapping.items():
 				if model_param.grad is not None:
 					if master_param.grad is None:
-						master_param.grad = torch.empty_like(master_param)
-					master_param.grad.copy_(model_param.grad.to(dtype=master_param.dtype))
+						master_param.grad = torch.empty_like(
+							master_param, pin_memory=self.opt_device == torch.device("cpu")
+						)  # pin if using CPU weights for faster transfer
+					master_param.grad.copy_(model_param.grad)
 
 			# Step optimizer on master weights
 			self.optimizer.step()
 
 			# Copy updated weights back to model params
 			for model_param, master_param in self.param_mapping.items():
-				model_param.data.copy_(master_param.data.to(dtype=model_param.dtype))
+				model_param.data.copy_(master_param.data)
 		else:
 			self.optimizer.step()
 
@@ -108,17 +112,20 @@ def parse_args():
 		help="Optimizer data type",
 	)
 	parser.add_argument(
+		"--opt-device", type=str, default="cuda", choices=["cpu", "cuda"], help="Optimizer device"
+	)
+	parser.add_argument(
 		"--sdpa",
 		type=str,
-		default=None,
-		choices=["math", "flash", "efficient", "cudnn"],
+		default="none",
+		choices=["none", "math", "flash", "efficient", "cudnn"],
 		help="SDPA implementation",
 	)
 	parser.add_argument(
 		"--partitioner",
 		type=str,
 		default="naive",
-		choices=["naive", "constrained", "metis", "dagP"],
+		choices=["naive", "constrained", "metis", "dagP", "handcrafted"],
 		help="Partitioner type",
 	)
 	parser.add_argument(
@@ -132,6 +139,7 @@ def parse_args():
 	parser.add_argument(
 		"--log", type=str, choices=["none", "info", "debug"], default="info", help="Log level"
 	)
+	parser.add_argument("--profile", action="store_true", help="Profile the training")
 	return parser.parse_args()
 
 
@@ -151,7 +159,7 @@ def get_dtype(dtype):
 
 def get_sdpa(sdpa):
 	match sdpa:
-		case None:
+		case "none":
 			return None
 		case "math":
 			return "MATH"
@@ -191,6 +199,7 @@ def main():
 
 	dtype = get_dtype(args.dtype)
 	opt_dtype = get_dtype(args.opt_dtype)
+	opt_device = torch.device(args.opt_device)
 	batch_size = args.batch_size
 	nmb = world_size * 2
 	mb_size = batch_size // nmb
@@ -209,17 +218,31 @@ def main():
 		replace_linear_with_linear_dw(model, "meta")
 
 	if rank == 0:
-		# only rank 0 profiles and partitions
-		model = meta_to_device(model, "cuda")
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
 
+	if args.partitioner == "handcrafted":
+		placement = Pipeline._get_default_placement(args.schedule, world_size)
+		parts = get_handcrafted_partition(model, rank, placement)
+		sources, targets = get_sources_targets_sequential(placement)
+		args.partitioner = False
+		sample = None
+	else:
+		parts = model
+		sources, targets = None, None
+		sample = model.get_sample(mb_size)
+		if rank == 0:
+			model = meta_to_device(model, "cuda")
+
 	pipeline = Pipeline(
-		model,
-		model.get_sample(mb_size),
+		parts,
+		sample,
 		placement="auto",
 		partitioner=args.partitioner,
 		schedule=args.schedule,
+		sources=sources,
+		targets=targets,
 	)
+
 	dist.barrier()
 	torch.cuda.synchronize()
 	partition_time = time.time() - start_time
@@ -230,7 +253,7 @@ def main():
 
 	all_params = [p for block in pipeline.blocks for p in block.model.parameters() if p.requires_grad]
 	optimizer = MixedPrecisionOptimizer(
-		torch.optim.Adam, all_params, dtype, opt_dtype, eps=1e-5
+		torch.optim.Adam, all_params, dtype, opt_dtype, opt_device, eps=1e-5
 	)  # eps needed when optimizer is <= fp16
 
 	for _ in range(5):  # Warmup
@@ -238,14 +261,21 @@ def main():
 		y, loss = pipeline(sample, target, model.loss_fn, split_size=mb_size)
 
 	torch.cuda.reset_peak_memory_stats()
+
+	if args.profile:
+		torch.cuda.cudart().cudaProfilerStart()
+
 	for _ in range(args.niters):
 		optimizer.zero_grad()
-		y, loss = pipeline(sample, target, model.loss_fn, split_size=mb_size)
+		y, loss = pipeline(sample, target, model.loss_fn, split_size=mb_size, profile=args.profile)
 		optimizer.step()
 
 	dist.barrier()
 	torch.cuda.synchronize()
 	training_time = time.time() - start_time
+
+	if args.profile:
+		torch.cuda.cudart().cudaProfilerStop()
 
 	time.sleep(rank * 0.1)  # avoid all printing at the same time :)
 	print(

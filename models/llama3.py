@@ -14,10 +14,10 @@ python llama31.py \
 """
 
 from dataclasses import dataclass
-from typing import Optional
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 # -----------------------------------------------------------------------------
@@ -30,13 +30,11 @@ class ModelArgs:
 	n_layers: int = 32
 	n_heads: int = 32
 	vocab_size: int = -1
-	multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-	ffn_dim_multiplier: Optional[float] = 2
+	ffn_dim: int = 14336
 	norm_eps: float = 1e-5
 	rope_theta: float = 500000
-	use_scaled_rope: bool = False
 	max_batch_size: int = 32
-	max_seq_len: int = 2048
+	max_seq_len: int = 8192
 	flash: bool = False  # use flash attention?
 
 	def __init__(self, **kwargs):
@@ -68,35 +66,29 @@ def apply_scaling(freqs: torch.Tensor):
 	return new_freqs
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False):
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 	freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 	t = torch.arange(end, device=freqs.device, dtype=torch.float32)
-	freqs = apply_scaling(freqs)
 	freqs = torch.outer(t, freqs)
 	freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-	freqs_cis_real = torch.stack([freqs_cis.real, freqs_cis.imag], dim=-1)
-	return freqs_cis_real
+	return freqs_cis
 
 
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-	# shape gymnastics let's go
-	# x is (bs, seqlen, n_heads, head_dim), e.g. (4, 8, 32, 128)
-	# freqs_cis is (seq_len, head_dim/2, 2), e.g. (8, 64, 2)
-	xshaped = x.float().reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2)
-	# xshaped is (bs, seqlen, n_heads, head_dim/2, 2), e.g. (4, 8, 32, 64, 2)
-	freqs_cis = freqs_cis.reshape(1, xshaped.size(1), 1, xshaped.size(3), 2)
-	# freqs_cis becomes (1, seqlen, 1, head_dim/2, 2), e.g. (1, 8, 1, 64, 2)
-	x_out2 = torch.stack(
-		[
-			xshaped[..., 0] * freqs_cis[..., 0] - xshaped[..., 1] * freqs_cis[..., 1],
-			xshaped[..., 1] * freqs_cis[..., 0] + xshaped[..., 0] * freqs_cis[..., 1],
-		],
-		-1,
-	)
-	# x_out2 at this point is (bs, seqlen, n_heads, head_dim/2, 2), e.g. (4, 8, 32, 64, 2)
-	x_out2 = x_out2.flatten(3)
-	# x_out2 is now (bs, seqlen, n_heads, head_dim), e.g. (4, 8, 32, 128)
-	return x_out2.type_as(x)
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+	ndim = x.ndim
+	assert 0 <= 1 < ndim
+	assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+	shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+	return freqs_cis.view(*shape)
+
+
+def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor):
+	xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+	xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+	freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+	xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+	xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+	return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 class Attention(nn.Module):
@@ -113,33 +105,31 @@ class Attention(nn.Module):
 
 		self.register_buffer("freqs_cis", args.freqs_cis.clone().detach())
 
-	def forward(self, x: torch.Tensor, max_seqlen: Optional[int]):
+	def forward(self, x: torch.Tensor):
 		bsz, seqlen, _ = x.shape
 		xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 		xq = xq.reshape(bsz, seqlen, self.n_heads, self.head_dim)
 		xk = xk.reshape(bsz, seqlen, self.n_heads, self.head_dim)
 		xv = xv.reshape(bsz, seqlen, self.n_heads, self.head_dim)
-		freqs_cis = self.freqs_cis[:max_seqlen]
-		xq = apply_rotary_emb(xq, freqs_cis)
-		xk = apply_rotary_emb(xk, freqs_cis)
+		freqs_cis = self.freqs_cis[:seqlen]
+		xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 		xq, xk, xv = (x.transpose(1, 2) for x in (xq, xk, xv))
-		mask = torch.full((max_seqlen, max_seqlen), float("-inf"))
-		mask = torch.triu(mask, diagonal=1)
-		mask = mask.type_as(xq)
-		output = F.scaled_dot_product_attention(xq, xk, xv, mask)
+
+		# with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+		if self.flash:
+			with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+				output = F.scaled_dot_product_attention(xq, xk, xv)
+		else:
+			output = F.scaled_dot_product_attention(xq, xk, xv)
+
 		output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 		proj = self.wo(output)
 		return proj
 
 
 class FeedForward(nn.Module):
-	def __init__(
-		self, dim: int, hidden_dim: int, multiple_of: int, ffn_dim_multiplier: Optional[float] = 1
-	):
+	def __init__(self, dim: int, hidden_dim: int):
 		super().__init__()
-		hidden_dim = int(2 * hidden_dim / 3)
-		hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-		hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 		self.w1 = nn.Linear(dim, hidden_dim, bias=False)
 		self.w2 = nn.Linear(hidden_dim, dim, bias=False)
 		self.w3 = nn.Linear(dim, hidden_dim, bias=False)
@@ -155,17 +145,12 @@ class TransformerBlock(nn.Module):
 		self.dim = args.dim
 		self.head_dim = args.dim // args.n_heads
 		self.attention = Attention(args)
-		self.feed_forward = FeedForward(
-			dim=args.dim,
-			hidden_dim=4 * args.dim,
-			multiple_of=args.multiple_of,
-			ffn_dim_multiplier=args.ffn_dim_multiplier,
-		)
+		self.feed_forward = FeedForward(dim=args.dim, hidden_dim=args.ffn_dim)
 		self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
 		self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-	def forward(self, x: torch.Tensor, max_seqlen: Optional[int]):
-		h = x + self.attention(self.attention_norm(x), max_seqlen)
+	def forward(self, x: torch.Tensor):
+		h = x + self.attention(self.attention_norm(x))
 		out = h + self.feed_forward(self.ffn_norm(h))
 		return out
 
@@ -176,13 +161,9 @@ class Llama(nn.Module):
 		self.params = params
 		self.vocab_size = params.vocab_size
 		self.n_layers = params.n_layers
-		self.device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device("cpu")
 
 		params.freqs_cis = precompute_freqs_cis(
-			params.dim // params.n_heads,
-			params.max_seq_len * 2,
-			params.rope_theta,
-			params.use_scaled_rope,
+			params.dim // params.n_heads, params.max_seq_len * 2, params.rope_theta
 		)
 
 		self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
@@ -193,7 +174,7 @@ class Llama(nn.Module):
 	def forward(self, inputs: torch.Tensor):
 		h = self.tok_embeddings(inputs)
 		for layer in self.layers:
-			h = layer(h, self.params.max_seq_len)
+			h = layer(h)
 		h = self.norm(h)
 		return self.output(h)
 

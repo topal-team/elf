@@ -117,6 +117,11 @@ def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 	return parts
 
 
+def get_handcrafted_partition(model, rank, placement):
+	factors = [len(model.blocks) // len(placement)] * len(placement)
+	return get_handcrafted_imbalanced_partition(model, rank, placement, factors)
+
+
 def find(sched, optype, block_id, mb_id):
 	for i, op in enumerate(sched):
 		if op.mb_id == mb_id and op.op == optype and op.block_id == block_id:
