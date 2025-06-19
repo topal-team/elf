@@ -2,7 +2,9 @@
 
 The ILPs need information about the time and memory statistics of your model. This information must respect a specific format:
 ```json
-[
+// You can store whatever you want here, like model info
+
+"stages": [
     {
         "T": [Compute time F, Compute time B, Compute time W],
         "M": [Memory kept F, Memory kept B, Memory kept W],
@@ -39,7 +41,7 @@ The ILPs need information about the time and memory statistics of your model. Th
 ```
 
 Let's break it down:
-the file should contain a list of subconfigs. Each subconfig corresponds to one stage of the pipeline (one part of your model). It has a profiled execution time and an amount of memory kept for all 3 operations (F, B, W). Tcomm is the profiled communication size for the output of this stage (not the input!). Mparams is the amount of memory taken by the parameters.
+the file should contain a list of subconfigs in the "stages" entry. Each subconfig corresponds to one stage of the pipeline (one part of your model). It has a profiled execution time and an amount of memory kept for all 3 operations (F, B, W). Tcomm is the profiled communication size for the output of this stage (not the input!). Mparams is the amount of memory taken by the parameters.
 
 Then, it can have rematerialization options. There are two kinds of options, forward and backward. They have exactly the same syntax. A rematerialization option has a name (not very useful, just use different names for all), a time overhead induced by the recomputation, and an amount of memory deleted compared to storing everything.\
 Note that the options "recompute everything" and "recompute nothing" are added automatically, no need to include them.\
