@@ -38,7 +38,7 @@ sys.path.append(".")
 from elf.zb_utils import replace_linear_with_linear_dw
 from models.simple import ChainTransformer, FullTransformer  # noqa: F401
 from benchmarks.benchmark_utils import bench, get_handcrafted_imbalanced_partition
-from benchmarks.zb_schedulers import RematScheduler
+from benchmarks.ilp_schedulers import RematScheduler
 
 logging.basicConfig(level=logging.INFO)
 

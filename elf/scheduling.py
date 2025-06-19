@@ -66,7 +66,7 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	RBF_STRATEGY = auto()  # Recompute Backward-Forward (activations, between B and W)
 	RBB_STRATEGY = auto()  # Recompute Backward-Backward (gradients, between B and W)
 
-	# for forward, it's a boolean to save the activations or not
+	# for recompute forward, it's a boolean to save the computation graph for a second backward or not
 	SAVE = auto()
 
 	OFFLOAD_DW = auto()
