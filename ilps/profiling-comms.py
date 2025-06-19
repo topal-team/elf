@@ -97,7 +97,7 @@ def main():
 	local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
 	microbatch_size = args.microbatch_size
 
@@ -171,13 +171,14 @@ def main():
 		output_file = args.output_file if args.output_file else config_file
 
 		try:
-			config["Tcomm"] = avg_comm
+			for stage in config["stages"]:
+				stage["Tcomm"] = avg_comm
 
 			os.makedirs(os.path.dirname(output_file), exist_ok=True)
 			with open(output_file, "w") as f:
 				json.dump(config, f, indent=2)
 
-			print(f"Updated Tcomm value ({config['Tcomm']:.6f} ms) in {output_file}")
+			print(f"Updated Tcomm value ({avg_comm:.6f} ms) in {output_file}")
 		except Exception as e:
 			print(f"Error updating configuration file: {e}")
 

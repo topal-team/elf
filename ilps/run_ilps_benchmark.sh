@@ -160,7 +160,7 @@ if [ -z "$REGRESSION_FILE" ]; then
         $(declare -f setup_gpu_env)
         setup_gpu_env
         python -u ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30 $BACKEND_OPTIONS
-        python ilps/regression.py --input-file results/profiling/$CONFIG_NAME.json --config-file $CONFIG_FILE --output-file results/regression/$CONFIG_NAME.json
+        python ilps/regression.py --input-file results/profiling/$CONFIG_NAME.json --config-file $CONFIG_FILE --output-file results/regression/$CONFIG_NAME.json --nstages $NGPUS
     "
     # This is run in exclusive mode to ensure that no one is using the same socket (why can't torchrun find another socket available?)
     srun --time=00:10:00 $SLURM_OPTS --gpus=2 --ntasks=1 --exclusive bash -c "

@@ -1,0 +1,85 @@
+[
+    {
+        "T": [19.58, 21.33, 16.10],
+        "M": [1680.03, 512.0, 0.0],
+        "Tcomm": 0.58,
+        "Mparams": 768.20,
+        "forward_remat_options": [
+            {
+                "name": "selective_fwd",
+                "overhead": 1.12,
+                "mem_freed": 1152.03
+            }
+        ],
+        "backward_remat_options": [
+            {
+                "name": "activations_bwd",
+                "overhead": 19.58,
+                "mem_freed": 224.0
+            }
+        ]
+    },
+
+    {
+        "T": [19.58, 21.33, 16.10],
+        "M": [1680.03, 512.0, 0.0],
+        "Tcomm": 0.58,
+        "Mparams": 768.20,
+        "forward_remat_options": [
+            {
+                "name": "selective_fwd",
+                "overhead": 1.12,
+                "mem_freed": 1152.03
+            }
+        ],
+        "backward_remat_options": [
+            {
+                "name": "activations_bwd",
+                "overhead": 19.58,
+                "mem_freed": 224.0
+            }
+        ]
+    },
+
+    {
+        "T": [19.58, 21.33, 16.10],
+        "M": [1680.03, 512.0, 0.0],
+        "Tcomm": 0.58,
+        "Mparams": 768.20,
+        "forward_remat_options": [
+            {
+                "name": "selective_fwd",
+                "overhead": 1.12,
+                "mem_freed": 1152.03
+            }
+        ],
+        "backward_remat_options": [
+            {
+                "name": "activations_bwd",
+                "overhead": 19.58,
+                "mem_freed": 224.0
+            }
+        ]
+    },
+
+    {
+        "T": [19.58, 21.33, 16.10],
+        "M": [1680.03, 512.0, 0.0],
+        "Tcomm": 0.58,
+        "Mparams": 768.20,
+        "forward_remat_options": [
+            {
+                "name": "selective_fwd",
+                "overhead": 1.12,
+                "mem_freed": 1152.03
+            }
+        ],
+        "backward_remat_options": [
+            {
+                "name": "activations_bwd",
+                "overhead": 19.58,
+                "mem_freed": 224.0
+            }
+        ]
+    }
+]

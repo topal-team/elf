@@ -35,6 +35,7 @@ parser.add_argument(
 	type=str,
 	help="Path to save the updated configuration file (defaults to overwriting config-file)",
 )
+parser.add_argument("--nstages", "-n", type=int, required=True, help="Number of stages to create")
 args = parser.parse_args()
 
 with open(args.input_file, "r") as f:
@@ -53,13 +54,11 @@ mbp_data = data["mbp_per_block_batch"]
 X_no_recomp = np.array(no_recompute_data["features"])
 y_no_recomp = np.array(no_recompute_data["times"])
 mem_no_recomp = np.array(no_recompute_data["memory"])
-peak_mem_no_recomp = np.array(no_recompute_data["peak_memory"])
 param_size_per_block = np.array(no_recompute_data["param_size_per_block"])
 
 X_recomp = np.array(recompute_data["features"])
 y_recomp = np.array(recompute_data["times"])
 mem_recomp = np.array(recompute_data["memory"])
-peak_mem_recomp = np.array(recompute_data["peak_memory"])
 
 # Create interaction feature manually (n_blocks * batch_size)
 X_poly_no_recomp = np.array([X_no_recomp[:, 0] * X_no_recomp[:, 1]]).T
@@ -69,53 +68,54 @@ X_poly_recomp = np.array([X_recomp[:, 0] * X_recomp[:, 1]]).T
 feature_names = ["n_blocks*batch_size", "bias"]
 print(f"Features: {feature_names}")
 
-# Update parameter memory in config
-config["Mparams"] = float(np.mean(param_size_per_block))
+stage_config = {}
+stage_config["Mparams"] = float(np.mean(param_size_per_block))
+stage_config["M"] = []
 
-# Update the activation and gradient memory in config
-# These are the same with or without recomputation
-config["Mfp"] = float(mfp_data)
-config["Mbp"] = float(mbp_data)
-
+ops = ["f", "b", "w"]
 # Update runtime memory metrics in config
 # For no recomputation
-for i, name in enumerate(["Mf", "Mb", "Mw"]):
-	config[name] = float(np.mean(mem_no_recomp[:, i]))
+for i in range(len(ops)):
+	stage_config["M"].append(float(np.mean(mem_no_recomp[:, i])))
+
 
 # For recomputation
-for i, name in enumerate(["Mfsr", "Mbsr", "Mwsr"]):
-	config[name] = float(np.mean(mem_recomp[:, i]))
+sr_mem_kept = float(np.mean(mem_recomp[:, ops.index("f")]))
+sr_mem_freed = stage_config["M"][ops.index("f")] - sr_mem_kept
 
-# Update peak memory metrics
-config["PeakF"] = float(np.mean(peak_mem_no_recomp))
-config["PeakFsr"] = float(np.mean(peak_mem_recomp))
 
 # Run regression for timing metrics and update config
 print("\nRegression analysis:")
+stage_config["T"] = []
 # For no recomputation
 for i, name in enumerate(["Tf", "Tb", "Tw"]):
 	model = LinearRegression(fit_intercept=False)
 	model.fit(X_poly_no_recomp, y_no_recomp[:, i])
 	coef = float(model.coef_[0])
-	config[name] = coef
+	stage_config["T"].append(coef)
 	print(f"{name}: {coef}")
 	print(f"R-squared: {model.score(X_poly_no_recomp, y_no_recomp[:, i])}")
 
 # For recomputation
-for i, name in enumerate(["Tfsr", "Tbsr", "Twsr"]):
-	model = LinearRegression(fit_intercept=False)
-	model.fit(X_poly_recomp, y_recomp[:, i])
-	coef = float(model.coef_[0])
-	config[name] = coef
-	print(f"{name}: {coef}")
-	print(f"R-squared: {model.score(X_poly_recomp, y_recomp[:, i])}")
+model = LinearRegression(fit_intercept=False)
+model.fit(X_poly_recomp, y_recomp[:, ops.index("b")])
+Tb = float(model.coef_[0])
+print(f"Tb: {Tb}")
+print(f"R-squared: {model.score(X_poly_recomp, y_recomp[:, ops.index('b')])}")
+sr_time_overhead = Tb - stage_config["T"][ops.index("b")]
 
-# Print the new memory metrics
-print("\nMemory metrics:")
-print(f"Mfp: {config['Mfp']} MB/block/batch")
-print(f"Mbp: {config['Mbp']} MB/block/batch")
-print(f"PeakF: {config['PeakF']} MB/block/batch")
-print(f"PeakFsr: {config['PeakFsr']} MB/block/batch")
+stage_config["forward_remat_options"] = [
+	{"name": "selective_fwd", "overhead": sr_time_overhead, "mem_freed": sr_mem_freed}
+]
+stage_config["backward_remat_options"] = [
+	{
+		"name": "activations_bwd",
+		"overhead": stage_config["T"][ops.index("f")],
+		"mem_freed": float(mfp_data),
+	}
+]
+
+config = {"model": config["model"], "stages": [stage_config] * args.nstages}
 
 # Save the updated configuration
 output_file = args.output_file if args.output_file else args.config_file

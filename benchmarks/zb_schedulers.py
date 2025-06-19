@@ -64,10 +64,12 @@ class RematScheduler:
 		if op.op != OperationType.FORWARD:
 			return
 
-		rf = self.solution["rf"][op.block_id][op.mb_id]
-		rfsr = self.solution["rfsr"][op.block_id][op.mb_id]
+		recompute_all_activations = self.solution["full_fwd"][op.block_id][op.mb_id]
+		recompute_selective_activations = self.solution["selective_fwd"][op.block_id][op.mb_id]
 
-		def checkpoint_strategy(name, module, rf=rf, rfsr=rfsr):
+		def checkpoint_strategy(
+			name, module, rf=recompute_all_activations, rfsr=recompute_selective_activations
+		):
 			n = name.split(".")[0]
 			try:
 				n = int(n)
@@ -85,14 +87,16 @@ class RematScheduler:
 		op.options[OpOptions.REMAT_STRATEGY] = checkpoint_strategy
 
 	def _handle_backward_remat(self, op, sched):
-		rbf = self.solution["rbf"][op.block_id][op.mb_id]
-		rbb = self.solution["rbb"][op.block_id][op.mb_id]
+		recompute_only_activations = self.solution["activations_bwd"][op.block_id][op.mb_id]
+		recompute_all = self.solution["full_bwd"][op.block_id][op.mb_id]
 
-		if rbf == 0 or op.op != OperationType.BACKWARD_INPUTS:
+		if op.op != OperationType.BACKWARD_INPUTS or (
+			recompute_only_activations == 0 and recompute_all == 0
+		):
 			return
 
-		# RBF strategy
-		def rbf_strategy(name, module):
+		# Recompute activations strategy
+		def rbf_strategy(name, module, rbf=recompute_only_activations + recompute_all):
 			n = name.split(".")[0]
 			try:
 				n = int(n)
@@ -105,7 +109,7 @@ class RematScheduler:
 
 		op.options[OpOptions.RBF_STRATEGY] = rbf_strategy
 
-		# Insert recompute forward operation
+		# Insert recompute activations operation
 		remat_fwd = self._insert_recompute_operation(
 			sched,
 			op.block_id,
@@ -115,32 +119,34 @@ class RematScheduler:
 			**{OpOptions.RBF_STRATEGY: rbf_strategy},
 		)
 
-		if rbb != 0:
-			assert rbb <= rbf, "rbb must be less than or equal to rbf"
-			if remat_fwd:
-				remat_fwd.options[OpOptions.SAVE] = True
+		if recompute_all == 0:
+			return
 
-				# RBB strategy
-				def rbb_strategy(name, module):
-					n = name.split(".")[0]
-					try:
-						n = int(n)
-					except ValueError:
-						return False, False
+		# Recompute gradients
+		if remat_fwd:
+			remat_fwd.options[OpOptions.SAVE] = True
 
-					is_recomputed = isinstance(module, TransformerBlock) and n < rbb
-					is_frontier = isinstance(module, TransformerBlock) and n == rbb - 1
-					return is_recomputed, is_frontier
+			# RBB strategy
+			def rbb_strategy(name, module, rbb=recompute_all):
+				n = name.split(".")[0]
+				try:
+					n = int(n)
+				except ValueError:
+					return False, False
 
-				# Apply RBB strategy to all relevant operations
-				op.options[OpOptions.RBB_STRATEGY] = rbb_strategy
-				remat_fwd.options[OpOptions.RBB_STRATEGY] = rbb_strategy
+				is_recomputed = isinstance(module, TransformerBlock) and n < rbb
+				is_frontier = isinstance(module, TransformerBlock) and n == rbb - 1
+				return is_recomputed, is_frontier
 
-				fwd_idx = self._find_operation(sched, OperationType.FORWARD, op.block_id, op.mb_id)
-				if fwd_idx is not None:
-					sched[fwd_idx].options[OpOptions.RBB_STRATEGY] = rbb_strategy
+			# Apply RBB strategy to all relevant operations
+			op.options[OpOptions.RBB_STRATEGY] = rbb_strategy
+			remat_fwd.options[OpOptions.RBB_STRATEGY] = rbb_strategy
 
-				# Insert recompute backward operation
-				self._insert_recompute_operation(
-					sched, op.block_id, op.mb_id, op.rank, OperationType.RECOMPUTE_BACKWARD_INPUTS
-				)
+			fwd_idx = self._find_operation(sched, OperationType.FORWARD, op.block_id, op.mb_id)
+			if fwd_idx is not None:
+				sched[fwd_idx].options[OpOptions.RBB_STRATEGY] = rbb_strategy
+
+			# Insert recompute backward operation
+			self._insert_recompute_operation(
+				sched, op.block_id, op.mb_id, op.rank, OperationType.RECOMPUTE_BACKWARD_INPUTS
+			)
