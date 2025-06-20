@@ -18,7 +18,7 @@ Arguments:
     --output_file: Path to write benchmark results
     --config_file: Path to the ILP config file with model hyperparameters
     --n: Specific n value to benchmark
-    --solution_type: Specific solution type to benchmark (e.g., "remat", "balance", "combined")
+    --solution_type: Specific solution type to benchmark (e.g., "StageRemat", "Unbalancing", "BlockRemat")
 
 Note: This script must be run in a distributed setting with multiple GPUs.
 """
@@ -154,15 +154,6 @@ def process_solution(
 
 	parts = get_handcrafted_imbalanced_partition(model, rank, placement, balance)
 	return run_benchmark(model, parts, scheduler, placement, dtype, rank=rank)
-
-
-def balanced_partition(n: int, placement: List[int]) -> List[int]:
-	"""Distribute blocks evenly, handling remainder."""
-	if n < len(placement):
-		logging.getLogger().warning(f"n = {n} is less than the number of GPUs = {len(placement)}")
-	blocks_per_gpu = n // len(placement)
-	remainder = n % len(placement)
-	return [blocks_per_gpu + (1 if i < remainder else 0) for i in range(len(placement))]
 
 
 def get_precision(precision: str) -> torch.dtype:

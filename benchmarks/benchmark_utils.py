@@ -1,6 +1,7 @@
 import copy
 import os
 import sys
+from typing import List
 
 sys.path.append(".")
 
@@ -88,6 +89,16 @@ def meta_to_device(model, device="cuda"):
 			param.reset_parameters()
 
 	return model
+
+
+def balanced_partition(n: int, placement: List[int]) -> List[int]:
+	"""Distribute blocks evenly, handling remainder."""
+	if n < len(placement):
+		print(f"n = {n} is less than the number of GPUs = {len(placement)}")
+
+	blocks_per_gpu = n // len(placement)
+	remainder = n % len(placement)
+	return [blocks_per_gpu + (1 if i < remainder else 0) for i in range(len(placement))]
 
 
 def get_handcrafted_imbalanced_partition(model, rank, placement, factors):

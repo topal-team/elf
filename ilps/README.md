@@ -55,7 +55,7 @@ The file ``params.py`` provides a utility function, ``get_params_from_config``, 
 
 You are free to change these values after parsing the parameters. Just remember to re-generate the schedule if you change the number of processors or micro-batches.
 
-For ILPs that optimize load balancing (Balance and BlockRemat), an additional parameters $n$ can be passed to that utility to specify the number of blocks. In that case, your file should provide profiling values for one block (but still have as many subconfigs as the number of stages). These values will then be scaled according to the load balancing. For instance, if you have 4 GPUs and an homoegenous Transformer of 32 blocks for which you want to use BlockRemat, your file should contain 4 subconfigs with the statistics of 1 block each. Then you can give $n=32$ to the ``get_params_from_config`` function.\
+For ILPs that optimize load balancing (Unbalancing and BlockRemat), an additional parameters $n$ can be passed to that utility to specify the number of blocks. In that case, your file should provide profiling values for one block (but still have as many subconfigs as the number of stages). These values will then be scaled according to the load balancing. For instance, if you have 4 GPUs and an homoegenous Transformer of 32 blocks for which you want to use BlockRemat, your file should contain 4 subconfigs with the statistics of 1 block each. Then you can give $n=32$ to the ``get_params_from_config`` function.\
 Warning: do not use load balancing ILPs and/or the $n$ parameter with heterogeneous models.
 
 For an example, please look at the output file after the regression step of the ILPs benchmark in ``ilps/run_ilps_benchmark.sh``.
