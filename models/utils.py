@@ -139,8 +139,8 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 	add(
 		"--sdp-backend",
 		type=str,
-		default=None,
-		choices=["flash", "math", "efficient", "cudnn", None],
+		default="none",
+		choices=["flash", "math", "efficient", "cudnn", "none"],
 		help="Scaled-dot-product attention backend to use (torch 2.1+)",
 	)
 

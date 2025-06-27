@@ -24,20 +24,9 @@ add_transformer_args(parser, model_type="full")
 parser.add_argument("--pp", type=int, default=4, help="Pipeline parallelism degree")
 parser.add_argument("--run-id", type=str, default="", help="Run ID")
 parser.add_argument(
-	"--schedule",
-	type=str,
-	default="zbv",
-	help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbv)",
+	"--schedule", type=str, help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbv)"
 )
 parser.add_argument("--mb-size", type=int, default=2, help="Microbatch size")
-# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
-# parser.add_argument("--seq-len", type=int, default=1024, help="Sequence length")
-# parser.add_argument("--input-dim", type=int, default=2000, required=False, help="input dimension")
-# parser.add_argument("--hidden-dim", type=int, default=2048, help="Hidden dimension")
-# parser.add_argument("--nblocks", type=int, default=64, help="Number of blocks")
-# parser.add_argument("--nheads", type=int, default=32, required=False, help="number of attn heads")
-# parser.add_argument("--dropout", type=float, default=0.1, required=False, help="dropout value")
-
 parser.add_argument("--niters", type=int, default=10, help="Number of iterations")
 parser.add_argument(
 	"--only",
@@ -202,8 +191,7 @@ def elf():
 		scheduler = "1f1b"  # Not the same name
 
 	for part in parts:
-		if scheduler in ["zbh1", "zbv", "zbh2"]:
-			replace_linear_with_linear_dw(part, "cpu")
+		replace_linear_with_linear_dw(part, "cpu")
 
 	sources, dsts = MyPipe.get_sources_targets_sequential(placement)
 	pipe = MyPipe.Pipeline(
@@ -232,7 +220,7 @@ if __name__ == "__main__":
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = int(os.getenv("WORLD_SIZE"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", device_id=torch.device(local_rank))
 
 	inputs = inputs.cuda()
 	targets = targets.cuda()
@@ -267,12 +255,10 @@ if __name__ == "__main__":
 		config_dict = {
 			"pp_size": args.pp,
 			"batch_size": batch_size,
-			# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
-			# "seq_len": args.seq_len,
-			# "schedule": args.schedule,
+			"seq_len": args.seq_len,
+			"schedule": args.schedule,
 			"niters": args.niters,
-			# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
-			# "nblocks": args.nblocks,
+			"nblocks": args.nblocks,
 		}
 
 		wandb.init(
@@ -287,8 +273,6 @@ if __name__ == "__main__":
 		metrics = {
 			"run_id": args.run_id,
 			"pp_size": args.pp,
-			# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
-			# "n_blocks": len(model.blocks),
 			"parameters": sum(p.numel() for p in model.parameters()),
 			"torch_time": torch_time,
 			"elf_time": elf_time,
