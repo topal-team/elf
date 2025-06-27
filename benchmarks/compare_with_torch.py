@@ -9,13 +9,18 @@ sys.path.append("./")
 from elf.zb_utils import replace_linear_with_linear_dw
 import elf.pipeline as MyPipe
 from elf.utils import Timer
-from models.simple import FullTransformer
+from models.utils import add_transformer_args, build_model_from_args
 
 import torch.distributed.pipelining as PiPPy
 
 import argparse
 
 parser = argparse.ArgumentParser()
+
+# Model hyper-parameters
+add_transformer_args(parser, model_type="full")
+
+# Script-specific arguments
 parser.add_argument("--pp", type=int, default=4, help="Pipeline parallelism degree")
 parser.add_argument("--run-id", type=str, default="", help="Run ID")
 parser.add_argument(
@@ -25,12 +30,13 @@ parser.add_argument(
 	help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbv)",
 )
 parser.add_argument("--mb-size", type=int, default=2, help="Microbatch size")
-parser.add_argument("--seq-len", type=int, default=1024, help="Sequence length")
-parser.add_argument("--input-dim", type=int, default=2000, required=False, help="input dimension")
-parser.add_argument("--hidden-dim", type=int, default=2048, help="Hidden dimension")
-parser.add_argument("--nblocks", type=int, default=64, help="Number of blocks")
-parser.add_argument("--nheads", type=int, default=32, required=False, help="number of attn heads")
-parser.add_argument("--dropout", type=float, default=0.1, required=False, help="dropout value")
+# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
+# parser.add_argument("--seq-len", type=int, default=1024, help="Sequence length")
+# parser.add_argument("--input-dim", type=int, default=2000, required=False, help="input dimension")
+# parser.add_argument("--hidden-dim", type=int, default=2048, help="Hidden dimension")
+# parser.add_argument("--nblocks", type=int, default=64, help="Number of blocks")
+# parser.add_argument("--nheads", type=int, default=32, required=False, help="number of attn heads")
+# parser.add_argument("--dropout", type=float, default=0.1, required=False, help="dropout value")
 
 parser.add_argument("--niters", type=int, default=10, help="Number of iterations")
 parser.add_argument(
@@ -46,9 +52,7 @@ args = parser.parse_args()
 nmb = args.pp * 2
 batch_size = args.mb_size * nmb
 with torch.device("meta"):
-	model = FullTransformer(
-		args.input_dim, args.hidden_dim, args.nblocks, args.seq_len, args.nheads, args.dropout
-	)
+	model = build_model_from_args(args, model_type="full")
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
@@ -263,10 +267,12 @@ if __name__ == "__main__":
 		config_dict = {
 			"pp_size": args.pp,
 			"batch_size": batch_size,
-			"seq_len": args.seq_len,
-			"schedule": args.schedule,
+			# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
+			# "seq_len": args.seq_len,
+			# "schedule": args.schedule,
 			"niters": args.niters,
-			"nblocks": args.nblocks,
+			# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
+			# "nblocks": args.nblocks,
 		}
 
 		wandb.init(
@@ -281,7 +287,8 @@ if __name__ == "__main__":
 		metrics = {
 			"run_id": args.run_id,
 			"pp_size": args.pp,
-			"n_blocks": len(model.blocks),
+			# Duplicate model hyper-parameter flags added by `add_transformer_args` above – commented out.
+			# "n_blocks": len(model.blocks),
 			"parameters": sum(p.numel() for p in model.parameters()),
 			"torch_time": torch_time,
 			"elf_time": elf_time,

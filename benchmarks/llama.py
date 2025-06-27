@@ -126,7 +126,7 @@ def main():
 		config["n_heads"] = args.n_heads
 
 	dtype = get_dtype(args.dtype)
-	batch_size = 1 * args.pp
+	batch_size = 2 * args.pp
 
 	# Create model with configuration
 	model_args = ModelArgs(
