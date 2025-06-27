@@ -125,20 +125,29 @@ def get_inputs_outputs(parts):
 			part.remove(node)
 
 	# Fix empty parts
-	for i, part in enumerate(parts):
-		if len(part) != 0:
-			continue
-		if i != 0:
-			for output in outputs[i - 1]:
-				inputs[i].append(output)
-				outputs[i].append(output)
-		if i != len(parts) - 1:
-			for inp in inputs[i + 1]:
-				# Special case: since input is a reserved python name,
-				# it is replaced in code by input_1. So the dependency will be on input_1 but is fullfilled by input.
-				if "input" not in inp and "input" not in inputs[i]:
-					inputs[i].append(inp)
-				outputs[i].append(inp)
+	last_non_empty = len(parts) - 1
+	while len(parts[last_non_empty]) == 0:
+		last_non_empty -= 1
+
+	for i in range(last_non_empty + 1, len(parts)):
+		for output in outputs[last_non_empty]:
+			inputs[i].append(output)
+			outputs[i].append(output)
+
+	first_non_empty = 0
+	while len(parts[first_non_empty]) == 0:
+		first_non_empty += 1
+
+	for i in range(first_non_empty):
+		for input in inputs[first_non_empty]:
+			inputs[i].append(input)
+			outputs[i].append(input)
+
+	# --- This comment was in the previous version, but I'm not sure it's still needed. ---
+	# # Special case: since input is a reserved python name,
+	# # it is replaced in code by input_1. So the dependency will be on input_1 but is fullfilled by input.
+	# if "input" not in inp and "input" not in inputs[i]:
+	# 	inputs[i].append(inp)
 
 	return inputs, outputs
 

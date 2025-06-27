@@ -180,8 +180,10 @@ class Pipeline:
 			result = torch.cat(result, dim=0).detach()
 			losses = torch.tensor(losses, device=result.device).detach()
 			losses = losses.sum() / sum(mb_sizes)
+
 			if self.dp > 1:
 				dist.all_reduce(losses, group=self.blocks[-1].dp_group, op=dist.ReduceOp.AVG)
+
 			return result, losses
 		else:
 			return None, None
