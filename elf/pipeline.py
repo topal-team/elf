@@ -177,9 +177,11 @@ class Pipeline:
 
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:
-			result = torch.cat(result, dim=0).detach()
-			losses = torch.tensor(losses, device=result.device).detach()
-			losses = losses.sum() / sum(mb_sizes)
+			# Careful! if the result was offloaded to CPU, then this creates a sync point that slows down the execution
+			# with torch.no_grad():
+			# 	result = torch.cat(result, dim=0)
+			# 	losses = torch.tensor(losses)
+			# 	losses = losses.sum() / sum(mb_sizes)
 
 			if self.dp > 1:
 				dist.all_reduce(losses, group=self.blocks[-1].dp_group, op=dist.ReduceOp.AVG)
