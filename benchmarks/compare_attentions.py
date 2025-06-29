@@ -143,7 +143,7 @@ if __name__ == "__main__":
 	pipe = Pipeline(
 		rank_blocks,
 		sample,
-		schedule="1f1b",
+		scheduler="1f1b",
 		partitioner=False,
 		placement=placements,
 		sources=sources,

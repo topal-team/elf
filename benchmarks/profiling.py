@@ -29,7 +29,7 @@ if __name__ == "__main__":
 	loss_fn = model.loss_fn
 
 	# Create pipeline
-	pipe = Pipeline(model, sample, schedule="1f1b")
+	pipe = Pipeline(model, sample, scheduler="1f1b")
 	optimizer = torch.optim.Adam(pipe.parameters())
 
 	# Warmup iterations

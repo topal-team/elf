@@ -211,7 +211,7 @@ def test_inference_pipeline(init_dist):
 	sources, targets = get_sources_targets_sequential([0, 1, 2, 3])
 
 	pipe = Pipeline(
-		part, None, schedule="inference", partitioner=False, sources=sources, targets=targets
+		part, None, scheduler="inference", partitioner=False, sources=sources, targets=targets
 	)
 	assert len(pipe.blocks) == 1
 	assert pipe.blocks[0].id == pipe.blocks[0].rank == rank

@@ -49,10 +49,10 @@ if __name__ == "__main__":
 		"--log", choices=["debug", "info", "none"], default="info", help="Logging level"
 	)
 	parser.add_argument(
-		"--schedule",
+		"--scheduler",
 		choices=["afab", "1f1b", "hanayo", "full_remat", "zbh1", "zbh2"],
 		default="1f1b",
-		help="Schedule to use",
+		help="Scheduler to use",
 	)
 	parser.add_argument(
 		"--partitioner",
@@ -111,7 +111,7 @@ if __name__ == "__main__":
 	targets = torch.randint(0, config.vocab_size, (args.batch_size, args.seq_len), device=local_rank)
 
 	# Create pipeline
-	pipe = Pipeline(model, inputs, schedule=args.schedule, partitioner=args.partitioner, dp=args.dp)
+	pipe = Pipeline(model, inputs, scheduler=args.scheduler, partitioner=args.partitioner, dp=args.dp)
 
 	# Warmup
 	if rank == 0:

@@ -71,7 +71,7 @@ def main():
 		trace = torch.fx.symbolic_trace(model)
 		print(trace.code)
 
-	pipeline = Pipeline(model, img, partitioner="dagP", schedule="1f1b")
+	pipeline = Pipeline(model, img, partitioner="dagP", scheduler="1f1b")
 
 	batch = torch.randn(16, 1, 256, 256)
 	target = torch.randn(16, 1, 256, 256)

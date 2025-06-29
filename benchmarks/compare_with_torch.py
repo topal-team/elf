@@ -198,7 +198,7 @@ def elf():
 		parts,
 		None,
 		partitioner=False,
-		schedule=scheduler,
+		scheduler=scheduler,
 		placement=placement,
 		sources=sources,
 		targets=dsts,

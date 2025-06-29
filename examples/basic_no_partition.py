@@ -53,7 +53,7 @@ if __name__ == "__main__":
 		placement=placement,
 		sources=sources,
 		targets=targets,
-		schedule="zbh2",
+		scheduler="zbh2",
 	)
 
 	loss_fn = nn.functional.cross_entropy

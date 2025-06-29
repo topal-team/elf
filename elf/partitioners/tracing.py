@@ -1,3 +1,7 @@
+"""
+Extraction of computation graphs from models.
+"""
+
 import torch
 import torch.nn as nn
 

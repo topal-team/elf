@@ -26,7 +26,7 @@ split_size = batch_size // n_micro_batches
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 
-pipe = Pipeline(model, inputs, list(range(world_size)), schedule="zbh1")
+pipe = Pipeline(model, inputs, list(range(world_size)), scheduler="zbh1")
 
 # Training iteration
 model.zero_grad()

@@ -113,7 +113,7 @@ def main():
 		sample,
 		placement=config.pipeline.placement,
 		partitioner=config.pipeline.partitioner,
-		schedule=config.pipeline.schedule_type,
+		scheduler=config.pipeline.schedule_type,
 		dp=config.pipeline.dp,
 	)
 

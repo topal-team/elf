@@ -1,10 +1,10 @@
 ## ELF - Efficient Deep Learning Framework
 
-ELF is a deep learning framework that aims to allow distributed training of large models using state-of-the-art algorithms. It is build on top of PyTorch.
+ELF is a deep learning framework that aims to allow distributed training of large models using state-of-the-art algorithms. It is built on top of PyTorch.
 
 ### Use the framework
 
-The object ``Pipeline`` from ``pipeline`` provides a simple API to automatically take care of everything.
+The object ``Pipeline`` from ``elf`` provides a simple API to automatically take care of everything.
 ```py
 from elf import Pipeline
 model = ... # create your model
@@ -20,7 +20,7 @@ Note that ``sample`` is only necessary if you use automatic partitioning, as it 
 There are several arguments to modify its behaviour :
 - ``placement`` specifies the gpu used for each pipeline stage.
 - ``partitioner`` can be set to ``False`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device. Otherwise, you can choose between partitioners described below.
-- ``schedule`` modifies the schedule algorithm to use. Currently supported:
+- ``scheduler`` modifies the scheduling algorithm to use. Currently supported:
   - ``"afab"``: [GPipe](https://arxiv.org/pdf/1811.06965v5)
   - ``"1f1b"``: [1F1B](https://arxiv.org/pdf/1806.03377)
   - ``"hanayo"``: [Hanayo](https://arxiv.org/pdf/2308.15762)
@@ -30,9 +30,19 @@ There are several arguments to modify its behaviour :
   - ``"full_remat"``: Full Remat : GPipe with rematerialization of every micro-batch / 1f1b on the last rank
 - ``dp`` is the data parallelism degree. One pipeline will be replicated ``dp`` times.
 
-### Write your own schedule
+## The registry
 
-You can define your own schedule if you want to perform tests or use an unimplemented one. In order to do that, you simply have to write a function that takes as argument a ``placement``, a number of micro batches ``n_micro_batches``, and the signature of each block, to return the right sequence of operations (see the ``Operation`` class in ``scheduling.py``). Then, register it in the ``Pipeline`` class in ``pipeline.py`` (``_get_scheduler``).
+A registry module is available at ``elf/registry`` for users to implement their own algorithms that will be used inside of ELF. For now, two registries are open: Schedules and Partitioners. The expected function signatures are described in the same module for each registry. Here is an example to add a custom partitioner:
+
+```py
+from elf.registry import PARTITIONERS
+
+def my_partitioner(graph, times, memories, n):
+  # your partition code
+  return
+
+PARTITIONERS.register("partitioner_name", my_partitioner, "description (optional)")
+```
 
 ### Change the pipeline behaviour
 

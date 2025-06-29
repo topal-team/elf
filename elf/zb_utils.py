@@ -1,3 +1,7 @@
+"""
+Utility functions for decoupled backward passes, based on Zero-Bubble.
+"""
+
 import torch
 import torch.nn as nn
 

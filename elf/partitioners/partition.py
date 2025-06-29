@@ -5,11 +5,9 @@ API and main utils for graph partition
 import torch
 import numpy as np
 
+from ..registry import PARTITIONERS
 from .tracing import try_extract_graph
 from .profile import profile_operations
-from .custom import split_graph, split_graph_constrained
-from .metis import split_graph_metis
-from .dagP import split_graph_dagP
 from .utils import remove_inplace_leaves, Signature
 import logging
 
@@ -17,6 +15,9 @@ logger = logging.getLogger("partition")
 
 
 def check_partition(graph, parts, inputs, outputs):
+	"""
+	Check if a partition is valid.
+	"""
 	original_inputs = list(node.target for node in graph.nodes if node.op == "placeholder")
 
 	if original_inputs != inputs[0]:
@@ -190,25 +191,18 @@ def get_sources_targets(inputs, outputs):
 	return sources, targets
 
 
-_PARTITIONERS = {
-	"naive": split_graph,
-	"constrained": split_graph_constrained,
-	"metis": split_graph_metis,
-	"dagP": split_graph_dagP,
-}
-
-
 def split_graph(graph, times, memories, n, partitioner):
-	if partitioner not in _PARTITIONERS:
+	"""
+	Split a graph using the selected partitioner.
+	"""
+	if partitioner not in PARTITIONERS:
 		raise Exception(
-			"Unknown graph partitioning mode : {mode}.\n\
-						Available modes:\n\t\
-						- naive: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
-						- constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor\n\t\
-						- metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
-						- dagP: like METIS, but uses dagP to enforce acyclicity of partition."
+			f"Unknown graph partitioning mode '{partitioner}'. Available modes:\n"
+			+ "\n".join(
+				f"\t{name}: {PARTITIONERS.get_description(name)}" for name in PARTITIONERS.available()
+			)
 		)
-	return _PARTITIONERS[partitioner](graph, times, memories, n)
+	return PARTITIONERS[partitioner](graph, times, memories, n)
 
 
 def partition_graph(model, n, sample, partitioner="naive"):

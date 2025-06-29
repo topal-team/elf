@@ -53,7 +53,7 @@ class Pipeline:
 		sample,
 		placement="auto",
 		partitioner="metis",
-		schedule="1f1b",
+		scheduler="1f1b",
 		dp=1,
 		worker=0,
 		sources=None,
@@ -68,15 +68,15 @@ class Pipeline:
 		:type placement: List[int] or str
 		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
 		:type partitioner: boolean or str
-		:param schedule: pipeline algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b") (default), Hanayo ("hanayo"). You can also define your own function to generate the schedule, see the existing functions in schedule for an example.
-		:type schedule: str or function(List[int], int, **kwargs) -> List[Operation]
+		:param scheduler: static scheduling algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b") (default), Hanayo ("hanayo"), ZBH1/ZBH2/ZBV ("zbh1", "zbh2", "zbv"), Full Remat ("full_remat"), Inference ("inference"). You can also define your own scheduler by registering it in the registry.
+		:type scheduler: str or function(List[int], int, **kwargs) -> List[Operation]
 		:param dp: number of data parallel processes to use.
 		:type dp: Optional[int]
 		:param worker: rank of the process that will profile the model and partition it
 		:type worker: int
-		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned. See partitioners.utils.get_sources_targets_sequential for an example.
+		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :pyfunc:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type sources: List[Dict[str, int]]
-		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See partitioners.utils.get_sources_targets_sequential for an example.
+		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :pyfunc:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type targets: List[Dict[str, List[int]]]
 		"""
 		if not dist.is_initialized() or "RANK" not in os.environ.keys():
@@ -89,7 +89,7 @@ class Pipeline:
 
 		if placement == "auto":
 			pp = ws // dp
-			placement = Pipeline._get_default_placement(schedule, pp)
+			placement = Pipeline._get_default_placement(scheduler, pp)
 		elif isinstance(placement, str):
 			placement = list(map(int, placement.split(",")))
 
@@ -107,7 +107,7 @@ class Pipeline:
 		parts, signatures = self._partition_model(model, partitioner, sample, worker, sources, targets)
 		self.blocks = self._create_pipeline(parts, signatures)
 		self.signatures = signatures
-		self.scheduler = Pipeline._get_scheduler(schedule)
+		self.scheduler = Pipeline._get_scheduler(scheduler)
 		self.engine = Engine(self.blocks)
 
 		# Used to avoid re-generating schedule every time
@@ -367,29 +367,31 @@ class Pipeline:
 
 	@staticmethod
 	def _get_scheduler(schedule):
-		if not isinstance(schedule, str):
+		"""Return a scheduler function given its *schedule* identifier.
+
+		The lookup order is:
+		1.  If *schedule* is already a callable, return it unchanged.
+		2.  If *schedule* is found inside the global :pydata:`elf.registry.SCHEDULERS`,
+		   use that entry.  This allows users to plug-in their custom algorithms
+		   without modifying the core library.
+		3.  Fall back to the built-in mapping used before the registry refactor so
+		   as to remain backward-compatible.
+		"""
+		from .registry import SCHEDULERS  # Local import to avoid circular deps
+
+		# 1) Callable provided directly
+		if callable(schedule):
 			return schedule
-		match schedule.lower():
-			case "afab" | "gpipe":
-				return generate_afab_schedule
-			case "1f1b" | "megatron":
-				return generate_1f1b_schedule
-			case "hanayo":
-				return generate_hanayo_schedule
-			case "full_remat":
-				return generate_full_remat_schedule
-			case "zbh1":
-				return generate_zbh1_schedule
-			case "zbh2":
-				return generate_zbh2_schedule
-			case "zbv":
-				return generate_zbv_schedule
-			case "inference":
-				return generate_inference_schedule
-			case _:
-				raise Exception(
-					f"Unknown schedule : {schedule}. Available ones : [afab, 1f1b, hanayo, full_remat, zbh1, zbh2, inference]"
-				)
+
+		# 2) Registry lookup
+		if schedule in SCHEDULERS:
+			return SCHEDULERS.get(schedule)
+
+		msg = "Unknown schedule '{schedule}'. Available ones:\n"
+		for name in SCHEDULERS.available():
+			msg += f"\t{name}: {SCHEDULERS.get_description(name)}\n"
+
+		raise ValueError(msg)
 
 	def _generate_schedule(self, n_micro_batches):
 		"""
@@ -565,10 +567,6 @@ class Pipeline:
 		return blocks, signatures
 
 	def _check_for_partitioner(self, partitioner):
-		assert partitioner in ["naive", "constrained", "dagP", "metis"], (
-			"Partition strategies available are : [naive, constrained, dagP, metis]"
-		)
-
 		if partitioner == "metis":
 			if not shutil.which("gpmetis"):
 				logger.warning("metis is not installed, falling back to naive")

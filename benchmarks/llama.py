@@ -152,7 +152,7 @@ def main():
 		None,
 		placement=placement,
 		partitioner=False,
-		schedule="zbh1",
+		scheduler="zbh1",
 		dp=args.dp,
 		worker=0,
 		sources=sources,

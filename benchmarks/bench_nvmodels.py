@@ -97,7 +97,7 @@ def parse_args():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--log", choices=["none", "info", "debug"], default="info")
 	parser.add_argument("--model", choices=["unet", "autoencoder", "dit"], default="dit")
-	parser.add_argument("--schedule", choices=["1f1b", "zbh1", "zbh2"], default="1f1b")
+	parser.add_argument("--scheduler", choices=["1f1b", "zbh1", "zbh2"], default="1f1b")
 	parser.add_argument(
 		"--partitioner", choices=["naive", "constrained", "metis", "dagP"], default="naive"
 	)
@@ -132,7 +132,7 @@ def main():
 		print(f"# of parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 		logger.info(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 
-	pipeline = Pipeline(model, sample, partitioner=args.partitioner, schedule=args.schedule)
+	pipeline = Pipeline(model, sample, partitioner=args.partitioner, scheduler=args.scheduler)
 
 	if rank == 0:
 		logger.info("Pipeline created. Running pipeline...")
@@ -170,7 +170,7 @@ def main():
 		metrics = {
 			"world_size": dist.get_world_size(),
 			"partitioner": args.partitioner,
-			"schedule": args.schedule,
+			"scheduler": args.scheduler,
 			"model": args.model,
 			"throughput": (n * dist.get_world_size()) / time,
 			"iteration_time": time / n,

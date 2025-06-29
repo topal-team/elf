@@ -138,7 +138,7 @@ def parse_args():
 		help="Partitioner type",
 	)
 	parser.add_argument(
-		"--schedule",
+		"--scheduler",
 		type=str,
 		default="1f1b",
 		choices=["gpipe", "1f1b", "megatron", "hanayo", "zbh1", "zbh2", "zbv", "full_remat"],
@@ -194,7 +194,7 @@ def main():
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
 
 	if args.partitioner == "handcrafted":
-		placement = Pipeline._get_default_placement(args.schedule, world_size) * args.interleaving
+		placement = Pipeline._get_default_placement(args.scheduler, world_size) * args.interleaving
 		parts = get_handcrafted_partition(model, rank, placement)
 		sources, targets = get_sources_targets_sequential(placement)
 		args.partitioner = False
@@ -211,7 +211,7 @@ def main():
 		sample,
 		placement="auto",
 		partitioner=args.partitioner,
-		schedule=args.schedule,
+		scheduler=args.scheduler,
 		sources=sources,
 		targets=targets,
 	)

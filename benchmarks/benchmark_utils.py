@@ -32,7 +32,7 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32):
 		None,
 		placement=placement,
 		partitioner=False,
-		schedule=scheduler,
+		scheduler=scheduler,
 		sources=sources,
 		targets=dsts,
 	)

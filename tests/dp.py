@@ -235,7 +235,7 @@ if __name__ == "__main__":
 		required=False,
 	)
 	parser.add_argument(
-		"--schedule",
+		"--scheduler",
 		"-s",
 		choices=["afab", "1f1b", "hanayo", "zbh1", "zbh2", "zbv"],
 		default="1f1b",
@@ -290,7 +290,7 @@ if __name__ == "__main__":
 		copy.deepcopy(model),
 		model.get_sample(4).cuda(),
 		placement=placement,
-		schedule=args.schedule,
+		scheduler=args.scheduler,
 		partitioner=args.partitioner,
 		dp=args.dp,
 	)

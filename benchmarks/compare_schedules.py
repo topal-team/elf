@@ -96,7 +96,7 @@ if __name__ == "__main__":
 
 	results = {}
 
-	for s, placement, schedule in setups:
+	for s, placement, scheduler in setups:
 		nparts = len(placement)
 		model.cpu()
 		partitioner = args.partitioner
@@ -125,7 +125,7 @@ if __name__ == "__main__":
 			parts,
 			inputs,
 			placement,
-			schedule=schedule,
+			scheduler=scheduler,
 			partitioner=partitioner,
 			sources=sources,
 			targets=dsts,
@@ -178,7 +178,7 @@ if __name__ == "__main__":
 
 			results[s] = {
 				"placement": placement,
-				"schedule": schedule,
+				"scheduler": scheduler,
 				"total_time_mean": mean_time,
 				"total_time_std": std_time,
 				"throughput_mean": mean_throughput,

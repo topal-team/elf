@@ -1,3 +1,7 @@
+"""
+Rematerialization manager.
+"""
+
 from contextlib import contextmanager
 
 from torch.utils.checkpoint import checkpoint

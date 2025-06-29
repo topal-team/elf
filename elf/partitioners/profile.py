@@ -1,5 +1,5 @@
 """
-Utils for operation profiling
+Profiling of models based on torch.fx.
 """
 
 import copy

@@ -95,7 +95,7 @@ if __name__ == "__main__":
 		model,
 		sample,
 		placement=config.pipeline.placement,
-		schedule=config.pipeline.schedule_type,
+		scheduler=config.pipeline.scheduler_type,
 		dp=config.pipeline.dp,
 	)
 
