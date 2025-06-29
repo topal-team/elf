@@ -214,7 +214,6 @@ def build_model_from_args(args: argparse.Namespace, *, model_type: _ModelType):
 
 	cfg = model_config_from_args(args, model_type=model_type)
 	dtype = cfg.pop("dtype")
-	print(cfg)
 
 	if model_type == "full":
 		return FullTransformer(**cfg).to(dtype)

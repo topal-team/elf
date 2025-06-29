@@ -503,10 +503,10 @@ def generate_zbv_schedule(placement, n_micro_batches, signatures):
 		for id_ in ids:
 			schedule.append(Operation(id_, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
 
-	for i in range(stages_per_device):
-		assert fs[i] == bs[i] == ws[i] == n_micro_batches, (
-			f"Rank {rank}, stage {i}: f = {fs[i]}, b = {bs[i]}, w = {ws[i]} (expected {n_micro_batches})"
-		)
+		for i in range(stages_per_device):
+			assert fs[i] == bs[i] == ws[i] == n_micro_batches, (
+				f"Rank {rank}, stage {i}: f = {fs[i]}, b = {bs[i]}, w = {ws[i]} (expected {n_micro_batches})"
+			)
 
 	return schedule
 

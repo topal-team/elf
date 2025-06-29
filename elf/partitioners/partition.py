@@ -5,7 +5,7 @@ API and main utils for graph partition
 import torch
 import numpy as np
 
-from elf.zb_utils import LayerDWTracer
+from .tracing import try_extract_graph
 from .profile import profile_operations
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
@@ -25,6 +25,8 @@ def check_partition(graph, parts, inputs, outputs):
 		)
 
 	for i in range(1, len(parts)):
+		if len(parts[i]) == 0:
+			raise Exception(f"Part {i} is empty")
 		for input in inputs[i]:
 			is_in_prev_part = False
 			for j in reversed(range(i)):
@@ -68,6 +70,7 @@ def get_inputs_outputs(parts):
 	"""
 	Finds the dependencies between each block of a partition.
 	Removes inputs/outputs nodes of each part to merge them into 2 nodes.
+	The order of inputs and outputs is consistent.
 
 	:param parts: partition of a model
 	:type parts: List[List[fx.Node]]
@@ -124,30 +127,12 @@ def get_inputs_outputs(parts):
 		for node in to_remove:
 			part.remove(node)
 
-	# Fix empty parts
-	last_non_empty = len(parts) - 1
-	while len(parts[last_non_empty]) == 0:
-		last_non_empty -= 1
-
-	for i in range(last_non_empty + 1, len(parts)):
-		for output in outputs[last_non_empty]:
-			inputs[i].append(output)
-			outputs[i].append(output)
-
-	first_non_empty = 0
-	while len(parts[first_non_empty]) == 0:
-		first_non_empty += 1
-
-	for i in range(first_non_empty):
-		for input in inputs[first_non_empty]:
-			inputs[i].append(input)
-			outputs[i].append(input)
-
-	# --- This comment was in the previous version, but I'm not sure it's still needed. ---
-	# # Special case: since input is a reserved python name,
-	# # it is replaced in code by input_1. So the dependency will be on input_1 but is fullfilled by input.
-	# if "input" not in inp and "input" not in inputs[i]:
-	# 	inputs[i].append(inp)
+	# Make sure the order is consistent
+	for i in range(len(parts)):
+		if i != 0:
+			inputs[i].sort()
+		if i != len(parts) - 1:
+			outputs[i].sort()
 
 	return inputs, outputs
 
@@ -205,36 +190,25 @@ def get_sources_targets(inputs, outputs):
 	return sources, targets
 
 
-def symbolic_trace_with_layerdw(model: torch.nn.Module) -> torch.fx.GraphModule:
-	"""Helper function to trace a model with LayerDW modules treated as leaf nodes"""
-	tracer = LayerDWTracer()
-	graph = tracer.trace(model)
-	return torch.fx.GraphModule(model, graph)
+_PARTITIONERS = {
+	"naive": split_graph,
+	"constrained": split_graph_constrained,
+	"metis": split_graph_metis,
+	"dagP": split_graph_dagP,
+}
 
 
-def extract_graph_fx(model):
-	return symbolic_trace_with_layerdw(model)
-
-
-def extract_graph_export(model, sample, use_dynamic_batch_size=False):
-	if use_dynamic_batch_size:
-		dim = torch.export.Dim("batch")
-		dynamic_shapes = ({0: dim},)
-		exported = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes)
-		module = exported.module()
-		return module
-	else:
-		exported = torch.export.export(model, args=(sample,))
-		return exported.module()
-
-
-def extract_graph(model, sample, mode="fx"):
-	if mode == "export":
-		return extract_graph_export(model, sample)
-	elif mode == "fx":
-		return extract_graph_fx(model)
-	else:
-		raise ValueError(f"Unknown graph extraction mode: {mode}")
+def split_graph(graph, times, memories, n, partitioner):
+	if partitioner not in _PARTITIONERS:
+		raise Exception(
+			"Unknown graph partitioning mode : {mode}.\n\
+						Available modes:\n\t\
+						- naive: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
+						- constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor\n\t\
+						- metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
+						- dagP: like METIS, but uses dagP to enforce acyclicity of partition."
+		)
+	return _PARTITIONERS[partitioner](graph, times, memories, n)
 
 
 def partition_graph(model, n, sample, partitioner="naive"):
@@ -267,57 +241,25 @@ def partition_graph(model, n, sample, partitioner="naive"):
 	:rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
 	"""
 	model.train()
-	try:
-		graph = extract_graph(model, sample, "fx")
 
-	except Exception as err_fx:
-		logger.debug(str(err_fx))
-		logger.info("Graph extraction failed with torch.fx. Trying with torch.export.")
-
-		try:
-			graph = extract_graph(model, sample, "export")
-		except Exception as err_export:
-			logger.debug(str(err_export))
-			logger.info("Graph extraction using torch.export failed; cannot partition the model.")
-			exit(1)
-
+	# 1 - Trace the graph
+	graph = try_extract_graph(model, sample)
 	logger.info(f"Extracted graph has {len(graph.graph.nodes)} nodes")
 
+	# 2 - Profile operations
 	times, memories = profile_operations(graph, sample)
 
-	if partitioner == "naive":
-		parts = split_graph(graph, times, memories, n)
-	elif partitioner == "constrained":
-		parts = split_graph_constrained(graph, times, memories, n)
-	elif partitioner == "metis":
-		parts = split_graph_metis(graph, times, memories, n)
-	elif partitioner == "dagP":
-		parts = split_graph_dagP(graph, times, memories, n)
-	else:
-		raise Exception(
-			"Unknown graph partitioning mode : {mode}.\n\
-						Available modes:\n\t\
-						- naive: does not take into account memory, no constraint on the number of inputs/outputs\n\t\
-						- constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor\n\t\
-						- metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.\n\t\
-						- dagP: like METIS, but uses dagP to enforce acyclicity of partition."
-		)
+	# 3 - Partition using the selected partitioner
+	parts = split_graph(graph, times, memories, n, partitioner)
 
-	while len(parts) != n:
-		parts.append([])
-
+	# 4 - Find connections between parts
 	inputs, outputs = get_inputs_outputs(parts)
-	# Make sure the order is consistent
-	for i in range(n):
-		if i != 0:
-			inputs[i].sort()
-		if i != n - 1:
-			outputs[i].sort()
-
-	check_partition(graph.graph, parts, inputs, outputs)
 	sources, targets = get_sources_targets(inputs, outputs)
 	signatures = [Signature(inputs[i], outputs[i], sources[i], targets[i]) for i in range(n)]
 
+	check_partition(graph.graph, parts, inputs, outputs)
+
+	# 5 - Create subgraphs
 	blocks = []
 	for i, p in enumerate(parts):
 		subgraph = create_subgraph(graph, p, inputs[i], outputs[i])

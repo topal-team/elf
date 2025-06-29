@@ -43,7 +43,7 @@ def split_graph(graph, times, memories, n=3):
 	return parts
 
 
-def split_graph_constrained(graph, times, memories, n=3):
+def split_graph_constrained(graph, times, memories, n, imbalance_ratio=0.025):
 	"""
 	Naively splits a graph into roughly equal blocks in terms of time.
 	This algorithm does not take into account the memory used or transferred.
@@ -56,14 +56,21 @@ def split_graph_constrained(graph, times, memories, n=3):
 	:param memories: unused ; it is only there for consistency with the other partitioning functions
 	:type memories: Dict[str, float]
 	:param n: number of partitions to create
-	:type n: Optional[int]
+	:type n: int
+	:param imbalance_ratio: allowed imbalance in the partition, as a fraction of time per part
+	:type imbalance_ratio: float
 
 	:return: ``n`` lists of nodes corresponding to each part
 	:rtype: List[List[fx.Node]]
 	"""
+
+	if imbalance_ratio >= 1:
+		raise ValueError("Failed to partition the graph: imbalance ratio set to 1")
+
 	nodes = list(graph.graph.nodes)
 	total_time = sum(np.median(times.get(node.name, 0)) for node in nodes)
 	target_time = total_time / n
+	imbalance_margin = imbalance_ratio * target_time
 
 	parts = [[] for _ in range(n)]
 	needed_inputs = []
@@ -71,7 +78,12 @@ def split_graph_constrained(graph, times, memories, n=3):
 	current_part = n - 1
 	current_time = 0
 	for node in reversed(nodes):
-		if current_time >= target_time and len(needed_inputs) <= 1:
+		# Go to the next part if we are over the balance, or close to it, and we have only one input
+		if (
+			current_part > 0
+			and (current_time >= target_time or target_time - current_time < imbalance_margin)
+			and len(needed_inputs) <= 1
+		):
 			current_part -= 1
 			current_time = 0
 			needed_inputs = []
@@ -82,5 +94,10 @@ def split_graph_constrained(graph, times, memories, n=3):
 				needed_inputs.append(dep.name)
 		if node.name in needed_inputs:
 			needed_inputs.remove(node.name)
+
+	for part in parts:
+		if len(part) == 0:
+			# Gradually allow more imbalance until we find a valid partition
+			return split_graph_constrained(graph, times, memories, n, imbalance_ratio + 0.025)
 
 	return parts

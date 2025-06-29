@@ -144,6 +144,7 @@ def parse_args():
 		choices=["gpipe", "1f1b", "megatron", "hanayo", "zbh1", "zbh2", "zbv", "full_remat"],
 		help="Schedule type",
 	)
+	parser.add_argument("--interleaving", type=int, default=1, help="Interleaving factor")
 	parser.add_argument("--niters", type=int, default=10, help="Number of training iterations")
 	parser.add_argument(
 		"--log", type=str, choices=["none", "info", "debug"], default="info", help="Log level"
@@ -193,7 +194,7 @@ def main():
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
 
 	if args.partitioner == "handcrafted":
-		placement = Pipeline._get_default_placement(args.schedule, world_size)
+		placement = Pipeline._get_default_placement(args.schedule, world_size) * args.interleaving
 		parts = get_handcrafted_partition(model, rank, placement)
 		sources, targets = get_sources_targets_sequential(placement)
 		args.partitioner = False

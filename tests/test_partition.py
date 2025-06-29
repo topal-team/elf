@@ -1,5 +1,6 @@
 import pytest
-from elf.partitioners.partition import *
+from elf.partitioners import extract_graph, partition_graph
+from elf.partitioners.utils import remove_inplace_leaves
 
 import copy
 import torch

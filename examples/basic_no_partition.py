@@ -1,15 +1,16 @@
 import os
 import sys
 
-sys.path.append(".")
 
-from elf.pipeline import get_sources_targets_sequential
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torchvision.models import resnet50
+
+sys.path.append(".")
+
+from elf import Pipeline, get_sources_targets_sequential
 from elf.zb_utils import replace_linear_with_linear_dw
-from elf import Pipeline
 
 import logging
 
@@ -37,9 +38,14 @@ if __name__ == "__main__":
 	replace_linear_with_linear_dw(model, rank)
 	part = get_part(model, rank)
 
-	# We don't need a sample here
 	placement = [0, 1, 2, 3]
+
 	sources, targets = get_sources_targets_sequential(placement)
+	# This is equivalent to the above, but more explicit
+	# sources = {0: {"input": None}, 1: {"input": 0}, 2: {"input": 1}, 3: {"input": 2}}
+	# targets = {0: {"output": [1]}, 1: {"output": [2]}, 2: {"output": [3]}, 3: {"output": [None]}}
+
+	# We don't need to pass a sample here, because no profiling will be done
 	pipe = Pipeline(
 		part,
 		None,

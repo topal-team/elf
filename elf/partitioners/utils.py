@@ -89,3 +89,58 @@ class Signature:
 
 	def __repr__(self):
 		return str(self)
+
+
+def signatures_from_sources_targets(sources, targets):
+	"""
+	Create signatures from sources and targets
+	"""
+	assert len(sources) == len(targets), "Sources and targets must have the same length"
+
+	signatures = []
+	for i in range(len(sources)):
+		inputs = sorted(list(sources[i].keys()))
+		outputs = sorted(list(targets[i].keys()))
+		signatures.append(
+			Signature(inputs, outputs, [sources[i][j] for j in inputs], [targets[i][j] for j in outputs])
+		)
+
+	return signatures
+
+
+def get_sources_targets_sequential(placement):
+	"""
+	Generates sources and targets for a fully sequential model (no skip connections), with one input and one output per stage.
+	This is intended to be used with the ``partitioner=False`` option.
+
+	.. note::
+		here's an example of what the returned sources and targets look like:
+		sources = {
+			0: { # stage 0's sources
+				"input": None # variable 'input' comes from None
+			},
+			1: {
+				"x": 0 # variable 'x' comes from stage 0
+			}, ...
+		}
+		targets = {
+			0: { # stage 0's targets
+				"output": [1, 2] # variable 'output' goes to stages 1 and 2
+			},
+			1: {
+				"output": [2] # variable 'output' goes to stage 2
+			}, ...
+		}
+
+	:param placement: placement of the model blocks on gpus
+	:type placement: List[int]
+	:return: Sources and targets for each stage
+	:rtype: Tuple[Dict[int, Dict[str, int]], Dict[int, Dict[str, List[int]]]]
+	"""
+	sources = {}
+	targets = {}
+	for i in range(len(placement)):
+		# Everyone needs full signatures to generate schedule
+		sources[i] = {"input": i - 1 if i != 0 else None}
+		targets[i] = {"output": [i + 1 if i != len(placement) - 1 else None]}
+	return sources, targets

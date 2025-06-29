@@ -3,8 +3,9 @@ Pipeline API and setup
 """
 
 import os
-import torch
 import shutil
+
+import torch
 import torch.distributed as dist
 
 from .block import PipelineBlock
@@ -14,8 +15,11 @@ from .utils import *
 from .scheduling import schedule_to_str, check_schedule_validity
 from .comm_scheduling import reorder_communications
 from .zb_utils import LayerDW
-from .partitioners import partition_graph
-from .partitioners.utils import Signature
+from .partitioners import (
+	partition_graph,
+	signatures_from_sources_targets,
+	get_sources_targets_sequential,
+)
 
 import logging
 
@@ -70,9 +74,9 @@ class Pipeline:
 		:type dp: Optional[int]
 		:param worker: rank of the process that will profile the model and partition it
 		:type worker: int
-		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned.
+		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned. See partitioners.utils.get_sources_targets_sequential for an example.
 		:type sources: List[Dict[str, int]]
-		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned.
+		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See partitioners.utils.get_sources_targets_sequential for an example.
 		:type targets: List[Dict[str, List[int]]]
 		"""
 		if not dist.is_initialized() or "RANK" not in os.environ.keys():
@@ -432,22 +436,17 @@ class Pipeline:
 			else:
 				parts = model
 
-			assert sources is not None and targets is not None, (
-				"Sources and targets must be provided when using pre-partitioned model"
-			)
-			signatures = []
-			for i in range(len(self.placement)):
-				inputs = sorted(list(sources[i].keys()))
-				outputs = sorted(list(targets[i].keys()))
-				signatures.append(
-					Signature(
-						inputs, outputs, [sources[i][j] for j in inputs], [targets[i][j] for j in outputs]
-					)
+			if sources is None and targets is None:
+				logger.warning(
+					"No sources and targets provided, assuming sequential partitioning. If this is not what you want, please explictly provide sources and targets when creating the pipeline."
 				)
+				sources, targets = get_sources_targets_sequential(self.placement)
+			else:
+				signatures = signatures_from_sources_targets(sources, targets)
 
 		else:
 			raise Exception(
-				"Partition strategy should be either False when using pre-partitioned model, or a string among [naive, constrained, dagP, metis]."
+				"Partition strategy should be either False when using pre-partitioned model, or a string indicating the partition strategy."
 			)
 
 		return parts, signatures
@@ -580,41 +579,3 @@ class Pipeline:
 				return self._check_for_partitioner("metis")
 
 		return partitioner
-
-
-def get_sources_targets_sequential(placement):
-	"""
-	Generates sources and targets for a fully sequential model (no skip connections), with one input and one output per stage.
-	This is intended to be used with the ``partitioner=False`` option.
-
-	.. note::
-		here's an example of what the returned sources and targets look like:
-		sources = {
-			0: { # stage 0's sources
-				"input": None # variable input comes from None
-			},
-			1: {
-				"x": 0 # variable x comes from stage 0
-			}, ...
-		}
-		targets = {
-			0: { # stage 0's targets
-				"output": [1, 2] # variable output goes to stages 1 and 2
-			},
-			1: {
-				"output": [2] # variable output goes to stage 2
-			}, ...
-		}
-
-	:param placement: placement of the model blocks on gpus
-	:type placement: List[int]
-	:return: Sources and targets for each stage
-	:rtype: Tuple[Dict[int, Dict[str, int]], Dict[int, Dict[str, List[int]]]]
-	"""
-	sources = {}
-	targets = {}
-	for i in range(len(placement)):
-		# Everyone needs full signatures to generate schedule
-		sources[i] = {"input": i - 1 if i != 0 else None}
-		targets[i] = {"output": [i + 1 if i != len(placement) - 1 else None]}
-	return sources, targets
