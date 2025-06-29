@@ -118,6 +118,9 @@ class Engine:
 			- all_events: time taken for each operation
 			- memories: total gpu memory allocated after each operation
 
+		.. warning::
+			If the environment variable ``ELF_PRECISE_TIMINGS`` is not set, the timings will be completely wrong.
+
 		:rtype: Tensor, Tensor, Dict[float], Dict[Dict[Operation, float]]
 		"""
 		split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]

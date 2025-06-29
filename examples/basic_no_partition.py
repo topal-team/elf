@@ -14,7 +14,7 @@ from elf.zb_utils import replace_linear_with_linear_dw
 
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 
 def get_part(model, rank):

@@ -119,7 +119,7 @@ def parse_args():
 	add_transformer_args(parser, model_type="full")
 
 	# Script-specific parameters
-	parser.add_argument("--batch-size", type=int, default=32, help="Global batch size")
+	parser.add_argument("--batch-size", type=int, default=32, help="Global batch size, per DP group")
 	parser.add_argument(
 		"--opt-dtype",
 		type=str,
@@ -145,6 +145,7 @@ def parse_args():
 		help="Schedule type",
 	)
 	parser.add_argument("--interleaving", type=int, default=1, help="Interleaving factor")
+	parser.add_argument("--dp", type=int, default=1, help="Data parallelism degree")
 	parser.add_argument("--niters", type=int, default=10, help="Number of training iterations")
 	parser.add_argument(
 		"--log", type=str, choices=["none", "info", "debug"], default="info", help="Log level"
@@ -181,8 +182,10 @@ def main():
 	dtype = get_dtype(args.dtype)
 	opt_dtype = get_dtype(args.opt_dtype)
 	opt_device = torch.device(args.opt_device)
+
+	pp = world_size // args.dp
 	batch_size = args.batch_size
-	nmb = world_size * 2
+	nmb = pp * 2
 	mb_size = batch_size // nmb
 
 	start_time = time.time()
@@ -194,7 +197,7 @@ def main():
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
 
 	if args.partitioner == "handcrafted":
-		placement = Pipeline._get_default_placement(args.scheduler, world_size) * args.interleaving
+		placement = Pipeline._get_default_placement(args.scheduler, pp) * args.interleaving
 		parts = get_handcrafted_partition(model, rank, placement)
 		sources, targets = get_sources_targets_sequential(placement)
 		args.partitioner = False
@@ -214,6 +217,7 @@ def main():
 		scheduler=args.scheduler,
 		sources=sources,
 		targets=targets,
+		dp=args.dp,
 	)
 
 	dist.barrier()
@@ -262,15 +266,15 @@ def main():
 	if rank == 0:
 		time.sleep(world_size * 0.1)
 		print(
-			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.batch_size * args.niters * args.seq_len) / training_time:.2f} tokens/s",
+			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.dp * args.batch_size * args.niters * args.seq_len) / training_time:.2f} tokens/s",
 			flush=True,
 		)
-		print("\nNow testing correctness...", flush=True, end="")
+
+		# print("\nNow testing correctness...", flush=True, end="")
 
 	# test_correctness(model, pipeline)
-
-	if rank == 0:
-		print("\tPassed!", flush=True)
+	# if rank == 0:
+	# 	print("\tPassed!", flush=True)
 
 	if dist.is_initialized():
 		dist.destroy_process_group()

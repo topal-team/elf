@@ -182,10 +182,10 @@ class Pipeline:
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:
 			# Careful! if the result was offloaded to CPU, then this creates a sync point that slows down the execution
-			# with torch.no_grad():
-			# 	result = torch.cat(result, dim=0)
-			# 	losses = torch.tensor(losses)
-			# 	losses = losses.sum() / sum(mb_sizes)
+			with torch.no_grad():
+				# result = torch.cat(result, dim=0)
+				losses = torch.tensor(losses, device=torch.cuda.current_device())
+				losses = losses.sum() / sum(mb_sizes)
 
 			if self.dp > 1:
 				dist.all_reduce(losses, group=self.blocks[-1].dp_group, op=dist.ReduceOp.AVG)
@@ -367,15 +367,13 @@ class Pipeline:
 
 	@staticmethod
 	def _get_scheduler(schedule):
-		"""Return a scheduler function given its *schedule* identifier.
+		"""Return a scheduler function given its string identifier.
 
 		The lookup order is:
 		1.  If *schedule* is already a callable, return it unchanged.
 		2.  If *schedule* is found inside the global :pydata:`elf.registry.SCHEDULERS`,
 		   use that entry.  This allows users to plug-in their custom algorithms
 		   without modifying the core library.
-		3.  Fall back to the built-in mapping used before the registry refactor so
-		   as to remain backward-compatible.
 		"""
 		from .registry import SCHEDULERS  # Local import to avoid circular deps
 
@@ -399,8 +397,6 @@ class Pipeline:
 
 		:param n_micro_batches: Number of micro-batches
 		:type n_micro_batches: int
-		:param options: Additional options for the scheduler
-		:type options: dict
 		:return: Generated schedule
 		:rtype: List[Operation]
 		"""
