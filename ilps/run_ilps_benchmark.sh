@@ -155,20 +155,20 @@ fi
 
 # Run GPU-intensive profiling steps only if no regression file is provided
 if [ -z "$REGRESSION_FILE" ]; then
+    REGRESSION_FILE="results/regression/$CONFIG_NAME.json"
     echo "No regression file provided. Running profiling steps..."
     srun --time=00:45:00 $SLURM_OPTS --gpus=1 bash -c "
         $(declare -f setup_gpu_env)
         setup_gpu_env
         python -u ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30 $BACKEND_OPTIONS
-        python ilps/regression.py --input-file results/profiling/$CONFIG_NAME.json --config-file $CONFIG_FILE --output-file results/regression/$CONFIG_NAME.json --nstages $NGPUS
+        python ilps/regression.py --input-file results/profiling/$CONFIG_NAME.json --config-file $CONFIG_FILE --output-file $REGRESSION_FILE --nstages $NGPUS
     "
     # This is run in exclusive mode to ensure that no one is using the same socket (why can't torchrun find another socket available?)
     srun --time=00:10:00 $SLURM_OPTS --gpus=2 --ntasks=1 --exclusive bash -c "
         $(declare -f setup_gpu_env)
         setup_gpu_env
-        torchrun --nproc-per-node=2 ilps/profiling-comms.py --config results/regression/$CONFIG_NAME.json
+        torchrun --nproc-per-node=2 ilps/profiling-comms.py --config $REGRESSION_FILE
     "
-    REGRESSION_FILE="results/regression/$CONFIG_NAME.json"
 else
     echo "Using provided regression file: $REGRESSION_FILE"
 fi

@@ -17,9 +17,9 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
-	n_iterations = 5
+	n_iterations = 10
 
-	microbatch_size = 2
+	microbatch_size = 1
 	n_micro_batches = world_size * 2
 	batch_size = microbatch_size * n_micro_batches
 

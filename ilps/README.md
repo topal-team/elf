@@ -2,42 +2,44 @@
 
 The ILPs need information about the time and memory statistics of your model. This information must respect a specific format:
 ```json
-// You can store whatever you want here, like model info
+{
+    // You can store whatever you want here, like model info
 
-"stages": [
-    {
-        "T": [Compute time F, Compute time B, Compute time W],
-        "M": [Memory kept F, Memory kept B, Memory kept W],
-        "Tcomm": Time taken to send the output,
-        "Mparams": Amount of memory to store parameters,
-        "forward_remat_options": [
-            {
-                "name": Option name,
-                "overhead": Additional time needed during B,
-                "memory freed": Amount of memory deleted after F
-            },
-            {
-                ...
-            }
-        ],
-        "backward_remat_options": [
-            {
-                "name": Option name,
-                "overhead": Additional time needed during W,
-                "memory freed": Amount of memory deleted after B
-            },
-            {
-                ...
-            }
-        ]
-    },
+    "stages": [
+        {
+            "T": [Compute time F, Compute time B, Compute time W],
+            "M": [Memory kept F, Memory kept B, Memory kept W],
+            "Tcomm": Time taken to send the output,
+            "Mparams": Amount of memory to store parameters,
+            "forward_remat_options": [
+                {
+                    "name": Option name,
+                    "overhead": Additional time needed during B,
+                    "memory freed": Amount of memory deleted after F
+                },
+                {
+                    ...
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": Option name,
+                    "overhead": Additional time needed during W,
+                    "memory freed": Amount of memory deleted after B
+                },
+                {
+                    ...
+                }
+            ]
+        },
 
-    {
-        "T": ...,
-        "M": ...,
-        ....
-    }
-]
+        {
+            "T": ...,
+            "M": ...,
+            ....
+        }
+    ]
+}
 ```
 
 Let's break it down:

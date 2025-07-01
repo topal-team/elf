@@ -39,7 +39,7 @@ from elf.registry import PARTITIONERS
 
 def my_partitioner(graph, times, memories, n):
   # your partition code
-  return
+  return parts
 
 PARTITIONERS.register("partitioner_name", my_partitioner, "description (optional)")
 ```

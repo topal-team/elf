@@ -249,7 +249,11 @@ def main():
 	for i in range(args.niters):
 		optimizer.zero_grad()
 		y, loss = pipeline(
-			model.get_sample(batch_size), model.get_target(batch_size), model.loss_fn, split_size=mb_size
+			model.get_sample(batch_size),
+			model.get_target(batch_size),
+			model.loss_fn,
+			split_size=mb_size,
+			profile=args.profile,
 		)
 		optimizer.step()
 

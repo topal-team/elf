@@ -125,7 +125,7 @@ def run_benchmark(
 	"""Run benchmark and return iteration time and peak memory usage."""
 	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, dtype)
 	if rank == 0:
-		print(f"\t{iter_time:.2f}s, Peak memory: {[f'{m:.2f}' for m in all_peak_mems]} GB")
+		print(f"\t{iter_time:.2f}s / iter, Peak memory: {[f'{m:.2f}' for m in all_peak_mems]} GB")
 	return iter_time, all_peak_mems
 
 

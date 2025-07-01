@@ -492,7 +492,7 @@ class PipelineBlock:
 		if self.dp_group is None:
 			return
 		for _, p in sorted(self.model.named_parameters()):
-			dist.all_reduce(p.grad.data, group=self.dp_group, op=dist.ReduceOp.AVG)
+			dist.all_reduce(p.grad.data, group=self.dp_group, op=dist.ReduceOp.AVG, async_op=True)
 
 	def scale_grads(self, batch_size):
 		"""

@@ -164,17 +164,26 @@ class LinearDW(nn.Linear, LayerDW):
 			inp = inputs.reshape(-1, inputs.size(-1))
 
 			# dL/dW
-			grads_w = torch.matmul(go.T, inp).to(self.weight.device, non_blocking=True)
-			self.weight.grad = (
-				grads_w if self.weight.grad is None else self.weight.grad + grads_w
-			)  # accumulate
+			grads_w = torch.matmul(go.T, inp)
+			if grads_w.device != self.weight.device:
+				grads_w = grads_w.to(self.weight.device, non_blocking=True)
+
+			if self.weight.grad is None:
+				self.weight.grad = grads_w
+			else:
+				self.weight.grad.add_(grads_w)  # accumulate without re-allocating
 
 			# dL/db
 			if self.bias is not None:
-				grads_b = go.sum(0).to(self.bias.device, non_blocking=True)
-				self.bias.grad = (
-					grads_b if self.bias.grad is None else self.bias.grad + grads_b
-				)  # accumulate
+				grads_b = go.sum(0)
+
+				if grads_b.device != self.bias.device:
+					grads_b = grads_b.to(self.bias.device, non_blocking=True)
+
+				if self.bias.grad is None:
+					self.bias.grad = grads_b
+				else:
+					self.bias.grad.add_(grads_b)  # accumulate without re-allocating
 
 		self.ctx["grad_output"][mb_id] = None
 		self.ctx["input"][mb_id] = None

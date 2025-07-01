@@ -9,7 +9,7 @@ Example
 >>> from elf.registry import SCHEDULERS
 >>> def custom_scheduler(placement, n_micro_batches, signatures):
 ...     ...
-...     return scheduler
+...     return schedule
 
 >>> SCHEDULERS.register("my_scheduler", custom_scheduler, "My custom scheduler")
 

@@ -43,7 +43,7 @@ def split_graph(graph, times, memories, n=3):
 	return parts
 
 
-def split_graph_constrained(graph, times, memories, n, imbalance_ratio=0.025):
+def split_graph_constrained(graph, times, memories, n, imbalance_ratio=0):
 	"""
 	Naively splits a graph into roughly equal blocks in terms of time.
 	This algorithm does not take into account the memory used or transferred.
@@ -98,6 +98,6 @@ def split_graph_constrained(graph, times, memories, n, imbalance_ratio=0.025):
 	for part in parts:
 		if len(part) == 0:
 			# Gradually allow more imbalance until we find a valid partition
-			return split_graph_constrained(graph, times, memories, n, imbalance_ratio + 0.025)
+			return split_graph_constrained(graph, times, memories, n, imbalance_ratio + 0.01)
 
 	return parts
