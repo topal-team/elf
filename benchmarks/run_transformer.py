@@ -11,6 +11,8 @@ sys.path.append(".")
 
 from elf import Pipeline, get_sources_targets_sequential
 from elf.zb_utils import replace_linear_with_linear_dw
+from elf.schedules import JsonScheduler
+from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import get_handcrafted_partition, meta_to_device
 from models.utils import add_transformer_args, build_model_from_args, get_dtype
 
@@ -119,7 +121,11 @@ def parse_args():
 	add_transformer_args(parser, model_type="full")
 
 	# Script-specific parameters
-	parser.add_argument("--batch-size", type=int, default=32, help="Global batch size, per DP group")
+	parser.add_argument(
+		"--batch-size", type=int, default=None, help="Global batch size, per DP group"
+	)
+	parser.add_argument("--nmb", type=int, default=None, help="Number of micro-batches")
+	parser.add_argument("--mb-size", type=int, default=1, help="Micro-batch size")
 	parser.add_argument(
 		"--opt-dtype",
 		type=str,
@@ -141,9 +147,10 @@ def parse_args():
 		"--scheduler",
 		type=str,
 		default="1f1b",
-		choices=["gpipe", "1f1b", "megatron", "hanayo", "zbh1", "zbh2", "zbv", "full_remat"],
+		choices=["gpipe", "1f1b", "megatron", "hanayo", "zbh1", "zbh2", "zbv", "full_remat", "file"],
 		help="Schedule type",
 	)
+	parser.add_argument("--schedule-file", type=str, help="Schedule from file")
 	parser.add_argument("--interleaving", type=int, default=1, help="Interleaving factor")
 	parser.add_argument("--dp", type=int, default=1, help="Data parallelism degree")
 	parser.add_argument("--niters", type=int, default=10, help="Number of training iterations")
@@ -184,9 +191,23 @@ def main():
 	opt_device = torch.device(args.opt_device)
 
 	pp = world_size // args.dp
-	batch_size = args.batch_size
-	nmb = pp * 2
-	mb_size = batch_size // nmb
+
+	mb_size = args.mb_size
+	assert not (args.batch_size is None and args.nmb is None), (
+		"Batch size or number of micro-batches must be provided"
+	)
+	assert (args.batch_size is None or args.nmb is None) or (
+		args.nmb * args.mb_size == args.batch_size
+	), "If both batch size and number of micro-batches are provided, they must be consistent"
+	batch_size = mb_size * args.nmb if args.batch_size is None else args.batch_size
+	assert batch_size % mb_size == 0, "Batch size must be divisible by micro-batch size"
+
+	if args.scheduler == "file":
+		assert args.schedule_file is not None, "Schedule file is required for file scheduler"
+		scheduler = JsonScheduler(args.schedule_file)
+		SCHEDULERS.register("file", scheduler)
+	else:
+		scheduler = args.scheduler
 
 	start_time = time.time()
 	with torch.device("meta"):
@@ -214,7 +235,7 @@ def main():
 		sample,
 		placement="auto",
 		partitioner=args.partitioner,
-		scheduler=args.scheduler,
+		scheduler=scheduler,
 		sources=sources,
 		targets=targets,
 		dp=args.dp,
@@ -270,7 +291,7 @@ def main():
 	if rank == 0:
 		time.sleep(world_size * 0.1)
 		print(
-			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.dp * args.batch_size * args.niters * args.seq_len) / training_time:.2f} tokens/s",
+			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.dp * batch_size * args.niters * args.seq_len) / training_time:.2f} tokens/s",
 			flush=True,
 		)
 

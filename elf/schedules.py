@@ -4,6 +4,7 @@ A schedule is a list of operations (see Operation) that will be executed in orde
 Every rank should generate the entire schedule for all ranks, in order to detect and fix cycles/deadlocks.
 """
 
+import json
 from .scheduling import OpOptions, OperationType, Operation
 from .registry import SCHEDULERS
 import logging
@@ -483,6 +484,37 @@ def generate_inference_schedule(placement, n_micro_batches, signatures):
 				schedule.pop(-1)  # remove loss forward
 
 	return schedule
+
+
+class JsonScheduler:
+	"""
+	Scheduler that uses a JSON representation of the schedule.
+	"""
+
+	def __init__(self, json_file):
+		with open(json_file, "r") as f:
+			self.schedule_json = json.load(f)
+
+	def __call__(self, placement, n_micro_batches, signatures):
+		schedule = []
+		order = self.schedule_json["order"]
+
+		for block_id, optype, mb_id in order:
+			block_id = int(block_id)
+			mb_id = int(mb_id)
+			match optype:
+				case "f":
+					_add_forward_pass(
+						schedule, placement, block_id, mb_id, placement[block_id], signatures[block_id]
+					)
+				case "b":
+					_add_backward_pass(
+						schedule, placement, block_id, mb_id, placement[block_id], signatures[block_id]
+					)
+				case "w":
+					_add_backward_params(schedule, block_id, mb_id, placement[block_id])
+
+		return schedule
 
 
 def schedule_from_str(schedule_str, placement, signatures):
