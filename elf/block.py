@@ -181,10 +181,10 @@ class PipelineBlock:
 		# Strategy manager to handle RBF and RBB strategies
 		self.remat_manager = RematManager(self)
 
-		self.recv_fwd_stream = torch.cuda.Stream()
-		self.recv_bwd_stream = torch.cuda.Stream()
-		self.send_fwd_stream = torch.cuda.Stream()
-		self.send_bwd_stream = torch.cuda.Stream()
+		self.recv_fwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+		self.recv_bwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+		self.send_fwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+		self.send_bwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
 
 	def __str__(self) -> str:
 		return f"Rank {self.rank} - Layer {self.id}"
