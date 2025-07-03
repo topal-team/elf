@@ -14,29 +14,21 @@ Arguments:
     --output_file: Path to save the updated configuration file (defaults to overwriting config_file)
     --microbatch_size: Microbatch size for communication (default: 2)
     --iterations: Number of iterations for timing (default: 1000)
+	--precision: Precision to use (default: fp32)
 
 Note: This script must be run with at least 2 GPUs using torchrun or a similar launcher.
 """
 
 import os
+import sys
 import json
 import argparse
-import sys
 import torch
 import torch.distributed as dist
 
+sys.path.append(".")
 
-def get_precision(precision: str) -> torch.dtype:
-	"""Get the precision from the precision string."""
-	match precision:
-		case "fp32":
-			return torch.float32
-		case "fp16":
-			return torch.float16
-		case "bf16":
-			return torch.bfloat16
-		case _:
-			raise ValueError(f"Invalid precision: {precision}")
+from models.utils import get_dtype
 
 
 def parse_args():
@@ -102,7 +94,7 @@ def main():
 	microbatch_size = args.microbatch_size
 
 	x = torch.randn(
-		microbatch_size, seq_len, hidden_size, dtype=get_precision(args.precision), device="cuda"
+		microbatch_size, seq_len, hidden_size, dtype=get_dtype(args.precision), device="cuda"
 	)
 	# Ensure all GPUs are synchronized before starting
 	dist.barrier()

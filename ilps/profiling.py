@@ -28,24 +28,12 @@ from torch.utils.checkpoint import checkpoint
 sys.path.append(".")
 
 from models.simple import Attention, ChainTransformer
+from models.utils import get_sdpa, get_dtype
 from elf.zb_utils import LayerDW, replace_linear_with_linear_dw
 from elf.utils import Timer
 
 # Default model hyperparameters
 default_config = {"hidden_dim": 4096, "seq_len": 1024, "num_heads": 32, "dropout": 0.1}
-
-
-def get_precision(precision: str) -> torch.dtype:
-	"""Get the precision from the precision string."""
-	match precision:
-		case "fp32":
-			return torch.float32
-		case "fp16":
-			return torch.float16
-		case "bf16":
-			return torch.bfloat16
-		case _:
-			raise ValueError(f"Invalid precision: {precision}")
 
 
 def parse_args():
@@ -122,7 +110,7 @@ def create_model(n_blocks, config, sdp_backend, precision):
 			config["seq_len"],
 			config["num_heads"],
 			config["dropout"],
-			sdp_backend=sdp_backend,
+			sdp_backend=get_sdpa(sdp_backend),
 		)
 		.to(precision)
 		.cuda()
@@ -273,7 +261,7 @@ def main():
 	args = parse_args()
 	config = load_config(args.config)
 
-	precision = get_precision(args.precision)
+	precision = get_dtype(args.precision)
 
 	# Parse block sizes and batch sizes from command line
 	block_sizes = [int(x) for x in args.blocks.split(",")]

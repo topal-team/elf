@@ -37,6 +37,7 @@ from typing import Dict, List, Optional, Any
 sys.path.append(".")
 from elf.zb_utils import replace_linear_with_linear_dw
 from models.simple import ChainTransformer, FullTransformer  # noqa: F401
+from models.utils import get_dtype, get_sdpa
 from benchmarks.benchmark_utils import bench, get_handcrafted_imbalanced_partition
 from benchmarks.ilp_schedulers import RematScheduler
 
@@ -95,7 +96,7 @@ def create_model(
 
 	with torch.device("meta"):
 		model = ChainTransformer(
-			hidden_size, n, seq_len, num_heads, dropout, sdp_backend=sdp_backend
+			hidden_size, n, seq_len, num_heads, dropout, sdp_backend=get_sdpa(sdp_backend)
 		).to(precision)
 
 	replace_linear_with_linear_dw(model, "meta")
@@ -156,19 +157,6 @@ def process_solution(
 	return run_benchmark(model, parts, scheduler, placement, dtype, rank=rank)
 
 
-def get_precision(precision: str) -> torch.dtype:
-	"""Get the precision from the precision string."""
-	match precision:
-		case "fp32":
-			return torch.float32
-		case "fp16":
-			return torch.float16
-		case "bf16":
-			return torch.bfloat16
-		case _:
-			raise ValueError(f"Invalid precision: {precision}")
-
-
 def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--restart", action="store_true", default=False)
@@ -201,7 +189,7 @@ def main():
 	setup_logging(args.log)
 
 	rank, world_size = setup_distributed()
-	precision = get_precision(args.precision)
+	precision = get_dtype(args.precision)
 
 	# Ensure output directory exists
 	if rank == 0:

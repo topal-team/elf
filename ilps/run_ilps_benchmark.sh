@@ -10,7 +10,7 @@
 # 5. Benchmarking execution strategies (ilps_guided_benchmark.py)
 #
 # Usage:
-#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE] [--sdp-backend BACKEND]
+#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE] [--sdp-backend BACKEND] [--precision PRECISION]
 #
 # Arguments:
 #   --config: Path to the configuration file with model hyperparameters
@@ -24,6 +24,7 @@
 #   --constraint: SLURM constraint (e.g., h100, v100-32g, ..)
 #   --regression-file: Path to existing regression file (if provided, skips profiling steps)
 #   --sdp-backend: Attention backend (default: None)
+#   --precision: Precision (default: fp32)
 # Example:
 #   ./ilps/run_ilps_benchmark.sh --config ilps/configs/default.json --ngpus 4 --min-blocks 4 --max-blocks 16 --step 4
 
@@ -39,6 +40,7 @@ SLURM_ACCOUNT=""
 SLURM_CONSTRAINT=""
 REGRESSION_FILE=""
 SDP_BACKEND=""
+PRECISION="fp32"
 
 # Parse named parameters
 while [[ $# -gt 0 ]]; do
@@ -85,6 +87,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --sdp-backend)
             SDP_BACKEND="$2"
+            shift 2
+            ;;
+        --precision)
+            PRECISION="$2"
             shift 2
             ;;
         *)
@@ -160,18 +166,20 @@ if [ -z "$REGRESSION_FILE" ]; then
     srun --time=00:45:00 $SLURM_OPTS --gpus=1 bash -c "
         $(declare -f setup_gpu_env)
         setup_gpu_env
-        python -u ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30 $BACKEND_OPTIONS
+        python -u ilps/profiling.py --config $CONFIG_FILE --output results/profiling/$CONFIG_NAME.json -i 30 $BACKEND_OPTIONS --precision $PRECISION
         python ilps/regression.py --input-file results/profiling/$CONFIG_NAME.json --config-file $CONFIG_FILE --output-file $REGRESSION_FILE --nstages $NGPUS
     "
     # This is run in exclusive mode to ensure that no one is using the same socket (why can't torchrun find another socket available?)
     srun --time=00:10:00 $SLURM_OPTS --gpus=2 --ntasks=1 --exclusive bash -c "
         $(declare -f setup_gpu_env)
         setup_gpu_env
-        torchrun --nproc-per-node=2 ilps/profiling-comms.py --config $REGRESSION_FILE
+        torchrun --nproc-per-node=2 ilps/profiling-comms.py --config $REGRESSION_FILE --precision $PRECISION
     "
 else
     echo "Using provided regression file: $REGRESSION_FILE"
 fi
+
+exit 0
 
 # Run ILP solving on the front node (no GPU needed)
 if [[ -f results/ilps-solutions/$CONFIG_NAME.json ]]; then
@@ -207,6 +215,7 @@ python ilps/generate_benchmark_jobs.py \
     --ngpus "$NGPUS" \
     --slurm-opts "$SLURM_OPTS" \
     --output-script "$BENCHMARK_SCRIPT" \
+    --precision "$PRECISION" \
     $BACKEND_OPTIONS
 
 echo "Generated benchmark script: $BENCHMARK_SCRIPT"
