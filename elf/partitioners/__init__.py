@@ -14,7 +14,7 @@ from .dagP import split_graph_dagP
 from ..registry import PARTITIONERS
 
 PARTITIONERS.register(
-	"custom",
+	"naive",
 	split_graph,
 	"Naively partition into roughly equal blocks without taking memory into account.",
 )
