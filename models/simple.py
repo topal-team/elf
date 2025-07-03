@@ -63,7 +63,7 @@ class SimpleResNet(nn.Module):
 		return x
 
 	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn(batch_size, 3, 224, 224, dtype=dtype)
+		return torch.randn((batch_size, 3, 224, 224), dtype=dtype)
 
 	def get_target(self, batch_size, dtype=torch.int64):
 		return torch.randint(0, self.fc.out_features, (batch_size,), dtype=dtype)
@@ -130,7 +130,7 @@ class SimpleCNN(nn.Module):
 		return x
 
 	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn(batch_size, 3, 224, 224, dtype=dtype)
+		return torch.randn((batch_size, 3, 224, 224), dtype=dtype)
 
 	def get_target(self, batch_size, dtype=torch.int64):
 		return torch.randint(0, 10, (batch_size,), dtype=dtype)
@@ -173,7 +173,7 @@ class SimpleAttention(nn.Module):
 		return context
 
 	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn(batch_size, 64, self.hidden_dim, dtype=dtype)
+		return torch.randn((batch_size, 64, self.hidden_dim), dtype=dtype)
 
 	def get_target(self, batch_size, dtype=torch.float32):
 		return self.get_sample(batch_size, dtype)  # same
@@ -208,7 +208,7 @@ class SimpleFastAttention(nn.Module):
 			return context
 
 	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn(batch_size, 64, self.hidden_dim, dtype=dtype)
+		return torch.randn((batch_size, 64, self.hidden_dim), dtype=dtype)
 
 	def get_target(self, batch_size, dtype=torch.float32):
 		return self.get_sample(batch_size, dtype)  # same
@@ -370,7 +370,7 @@ class MultiHeadAttention(nn.Module):
 		return out
 
 	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn(batch_size, 64, self.hidden_dim, dtype=dtype)
+		return torch.randn((batch_size, 64, self.hidden_dim), dtype=dtype)
 
 	def get_target(self, batch_size, dtype=torch.float32):
 		return self.get_sample(batch_size, dtype)  # same
@@ -500,7 +500,7 @@ class ChainTransformer(nn.Module):
 		return x
 
 	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn(batch_size, self.seq_len, self.hidden_dim, dtype=dtype)
+		return torch.randn((batch_size, self.seq_len, self.hidden_dim), dtype=dtype)
 
 	def get_target(self, batch_size, dtype=torch.float32):
 		return self.get_sample(batch_size, dtype)

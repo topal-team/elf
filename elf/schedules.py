@@ -514,6 +514,11 @@ class JsonScheduler:
 				case "w":
 					_add_backward_params(schedule, block_id, mb_id, placement[block_id])
 
+		for block_id in range(len(placement)):
+			schedule.append(
+				Operation(block_id, None, OperationType.ALL_REDUCE_PARAM_GRADS, placement[block_id])
+			)
+
 		return schedule
 
 

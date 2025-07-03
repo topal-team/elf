@@ -11,10 +11,10 @@ import torch.distributed as dist
 
 sys.path.append(".")
 from elf.pipeline import Pipeline, get_sources_targets_sequential
-from models.simple import ChainTransformer
 from elf.utils import Timer, pretty_print_params
 from elf.zb_utils import replace_linear_with_linear_dw
 from benchmarks.benchmark_utils import get_handcrafted_imbalanced_partition
+from models.utils import add_transformer_args, build_model_from_args, get_dtype
 
 import logging
 
@@ -34,11 +34,9 @@ if __name__ == "__main__":
 		default="handcrafted",
 		help="partitioner to distribute the model",
 	)
-	parser.add_argument("--nblocks", type=int, default=16, required=False, help="number of blocks")
-	parser.add_argument(
-		"--hidden-dim", type=int, default=2048, required=False, help="hidden dimension"
-	)
-	parser.add_argument("--seq-len", type=int, default=512, required=False, help="sequence length")
+	add_transformer_args(parser, model_type="chain")
+	parser.set_defaults(hidden_dim=2048, nblocks=16, seq_len=512, num_heads=32, dropout=0.1)
+
 	parser.add_argument("--niters", type=int, default=30, required=False, help="number of iterations")
 	parser.add_argument(
 		"--output",
@@ -65,13 +63,20 @@ if __name__ == "__main__":
 
 	torch.cuda.set_device(local_rank)
 
-	dist.init_process_group(backend="nccl", timeout=timedelta(seconds=300))
+	dist.init_process_group(
+		backend="nccl", device_id=torch.device(local_rank), timeout=timedelta(seconds=300)
+	)
 
 	# torch.cuda.cudart().cudaProfilerStart()
 
-	model = ChainTransformer(args.hidden_dim, args.nblocks, args.seq_len, 32, 0.1)
+	dtype = get_dtype(args.dtype)
+
+	with torch.device("meta"):
+		model = build_model_from_args(args, model_type="chain")
+
 	if rank == 0:
 		print(f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters")
+
 	loss_fn = model.loss_fn
 
 	setups = [
@@ -88,7 +93,7 @@ if __name__ == "__main__":
 		("ZBV", list(range(world_size)) + list(reversed(range(world_size))), "zbv"),
 	]
 	n_micro_batches = world_size * 2
-	split_size = 2
+	split_size = 1
 	batch_size = split_size * n_micro_batches
 	n_iterations = args.niters
 
@@ -98,7 +103,6 @@ if __name__ == "__main__":
 
 	for s, placement, scheduler in setups:
 		nparts = len(placement)
-		model.cpu()
 		partitioner = args.partitioner
 		if partitioner == "handcrafted":
 			factors = [
@@ -113,13 +117,13 @@ if __name__ == "__main__":
 
 		if "ZB" in s and not replaced_dw:
 			replaced_dw = True
-			replace_linear_with_linear_dw(model, "cpu")
+			replace_linear_with_linear_dw(model, "meta")
 
 		if rank == 0:
 			print(f"Beginning benchmark for {s}")
 
-		inputs = model.get_sample(batch_size)
-		targets = model.get_target(batch_size)
+		inputs = model.get_sample(batch_size, dtype)
+		targets = model.get_target(batch_size, dtype)
 
 		pipe = Pipeline(
 			parts,
@@ -153,13 +157,12 @@ if __name__ == "__main__":
 			with Timer() as timer:
 				for i in range(n_iterations):
 					model.zero_grad()
-					inputs = model.get_sample(batch_size)
-					targets = model.get_target(batch_size)
-					y = pipe(inputs, targets, loss_fn, split_size=split_size)
+					inputs = model.get_sample(batch_size, dtype)
+					targets = model.get_target(batch_size, dtype)
+					_ = pipe(inputs, targets, loss_fn, split_size=split_size)
 					stats.append(pipe.stats)
 
 				dist.barrier()
-				torch.cuda.synchronize()
 
 			trial_times.append(timer.time())
 
@@ -189,7 +192,7 @@ if __name__ == "__main__":
 
 		pipe.clear()
 		model.zero_grad(set_to_none=True)
-		del pipe, y, inputs, targets
+		del pipe, inputs, targets
 		gc.collect()
 		torch.cuda.empty_cache()
 
