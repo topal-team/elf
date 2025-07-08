@@ -110,6 +110,7 @@ def create_model(n_blocks, config, sdp_backend, precision):
 			config["seq_len"],
 			config["num_heads"],
 			config["dropout"],
+			config["ffn_dim"],
 			sdp_backend=get_sdpa(sdp_backend),
 		)
 		.to(precision)

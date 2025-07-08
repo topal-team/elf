@@ -125,7 +125,10 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 
 	# FFN dimension
 	add(
-		"--ffn-dim", type=int, default=None, help="Dimension of the feed-forward network (defaults to 4 * hidden_dim)"
+		"--ffn-dim",
+		type=int,
+		default=None,
+		help="Dimension of the feed-forward network (defaults to 4 * hidden_dim)",
 	)
 
 	# Weight precision / dtype requested by the user.  Most scripts convert

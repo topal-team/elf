@@ -11,7 +11,52 @@ Most model implement a get_sample(), get_target(), and loss_fn() method for bett
 """
 
 
-class SimpleResNet(nn.Module):
+class SimpleModel(nn.Module):
+	def get_sample(self, batch_size, dtype=torch.float32):
+		raise NotImplementedError
+
+	def get_target(self, batch_size, dtype=torch.float32):
+		raise NotImplementedError
+
+	def loss_fn(self, pred, target, *args, **kwargs):
+		raise NotImplementedError
+
+
+class FeedForward(nn.Module):
+	def __init__(self, hidden_size, ffn_dim, activation=nn.GELU):
+		super(FeedForward, self).__init__()
+		self.fc1 = nn.Linear(hidden_size, ffn_dim, bias=False)
+		self.activation = activation()
+		self.fc2 = nn.Linear(ffn_dim, hidden_size, bias=False)
+
+	def forward(self, x):
+		return self.fc2(self.activation(self.fc1(x)))
+
+
+class SimpleFFN(SimpleModel):
+	def __init__(self, hidden_size, ffn_dim, nblocks, activation=nn.GELU):
+		super(SimpleFFN, self).__init__()
+		self.hidden_size = hidden_size
+		self.blocks = nn.ModuleList(
+			[FeedForward(hidden_size, ffn_dim, activation) for _ in range(nblocks)]
+		)
+
+	def forward(self, x):
+		for block in self.blocks:
+			x = block(x)
+		return x
+
+	def get_sample(self, batch_size, dtype=torch.float32):
+		return torch.randn((batch_size, self.hidden_size), dtype=dtype)
+
+	def get_target(self, batch_size, dtype=torch.float32):
+		return torch.randn((batch_size, self.hidden_size), dtype=dtype)
+
+	def loss_fn(self, pred, target, *args, **kwargs):
+		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
+
+
+class SimpleResNet(SimpleModel):
 	"""
 	Regular, almost homogeneous ResNet with constant channel and image dimensions.
 	"""
@@ -97,7 +142,7 @@ class ResBlock(nn.Module):
 		return out
 
 
-class SimpleCNN(nn.Module):
+class SimpleCNN(SimpleModel):
 	"""
 	Simple classification CNN with two convolutions and a ReLU activation.
 	"""
@@ -139,7 +184,10 @@ class SimpleCNN(nn.Module):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
 
 
-class SimpleAttention(nn.Module):
+# TODO: deprecate SimpleAttention, SimpleFastAttention, SimpleTransformer
+
+
+class SimpleAttention(SimpleModel):
 	"""
 	Simple attention layer with a single head.
 	"""
@@ -148,9 +196,9 @@ class SimpleAttention(nn.Module):
 		super(SimpleAttention, self).__init__()
 		self.hidden_dim = hidden_dim
 
-		self.query = nn.Linear(hidden_dim, hidden_dim)
-		self.key = nn.Linear(hidden_dim, hidden_dim)
-		self.value = nn.Linear(hidden_dim, hidden_dim)
+		self.query = nn.Linear(hidden_dim, hidden_dim, bias=False)
+		self.key = nn.Linear(hidden_dim, hidden_dim, bias=False)
+		self.value = nn.Linear(hidden_dim, hidden_dim, bias=False)
 		self.softmax = nn.Softmax(dim=-1)
 
 	def forward(self, inputs):
@@ -182,7 +230,7 @@ class SimpleAttention(nn.Module):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
 
 
-class SimpleFastAttention(nn.Module):
+class SimpleFastAttention(SimpleModel):
 	"""
 	Simple attention layer with a single head.
 	sdp_backend: can be 'FLASH_ATTENTION' or 'MATH'
@@ -192,9 +240,9 @@ class SimpleFastAttention(nn.Module):
 		super(SimpleFastAttention, self).__init__()
 		self.hidden_dim = hidden_dim
 
-		self.query = nn.Linear(hidden_dim, hidden_dim)
-		self.key = nn.Linear(hidden_dim, hidden_dim)
-		self.value = nn.Linear(hidden_dim, hidden_dim)
+		self.query = nn.Linear(hidden_dim, hidden_dim, bias=False)
+		self.key = nn.Linear(hidden_dim, hidden_dim, bias=False)
+		self.value = nn.Linear(hidden_dim, hidden_dim, bias=False)
 		self.softmax = nn.Softmax(dim=-1)
 		self.sdp_backend = sdp_backend
 
@@ -217,7 +265,7 @@ class SimpleFastAttention(nn.Module):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
 
 
-class SimpleTransformer(nn.Module):
+class SimpleTransformer(SimpleModel):
 	"""
 	Simple transformer with a single head.
 	ffn_dim is optional and defaults to hidden_dim * 4.
@@ -234,15 +282,16 @@ class SimpleTransformer(nn.Module):
 		self.seq_len = seq_len
 
 		self.embed = nn.Embedding(input_dim, hidden_dim)
-		self.head = nn.Linear(hidden_dim, input_dim)
+		self.head = nn.Linear(hidden_dim, input_dim, bias=False)
 		self.blocks = []
+		activation = nn.GELU
 		for i in range(n_blocks):
 			if sdp_backend is not None:
 				self.blocks.append(
 					nn.Sequential(
 						SimpleFastAttention(hidden_dim, sdp_backend),
 						nn.LayerNorm(hidden_dim),
-						FeedForward(hidden_dim, ffn_dim),
+						FeedForward(hidden_dim, ffn_dim, activation),
 						nn.LayerNorm(hidden_dim),
 					)
 				)
@@ -251,7 +300,7 @@ class SimpleTransformer(nn.Module):
 					nn.Sequential(
 						SimpleAttention(hidden_dim),
 						nn.LayerNorm(hidden_dim),
-						FeedForward(hidden_dim, ffn_dim),
+						FeedForward(hidden_dim, ffn_dim, activation),
 						nn.LayerNorm(hidden_dim),
 					)
 				)
@@ -279,21 +328,6 @@ class SimpleTransformer(nn.Module):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
 
 
-class FeedForward(nn.Module):
-	"""
-	Util for transformers.
-	"""
-
-	def __init__(self, dim, ffn_dim):
-		super(FeedForward, self).__init__()
-		self.fc1 = nn.Linear(dim, ffn_dim)
-		self.gelu = nn.GELU()
-		self.fc2 = nn.Linear(ffn_dim, dim)
-
-	def forward(self, x):
-		return self.fc2(self.gelu(self.fc1(x)))
-
-
 class Attention(nn.Module):
 	"""
 	Util for transformers.
@@ -318,12 +352,12 @@ class FastAttention(nn.Module):
 		super().__init__()
 		self.dim = dim
 		self.scale = 1.0 / math.sqrt(self.dim)
-		self.dropout = nn.Dropout(dropout)
+		self.dropout = dropout
 		self.sdp_backend = sdp_backend
 
 	def forward(self, q, k, v):
 		with sdpa_kernel(backends=[SDPBackend.__dict__[self.sdp_backend]]):
-			context = F.scaled_dot_product_attention(q, k, v)
+			context = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
 			return context
 
 
@@ -340,9 +374,9 @@ class MultiHeadAttention(nn.Module):
 		self.num_heads = num_heads
 		self.head_dim = dim // num_heads
 		# Single large linear layers for Q,K,V
-		self.q_proj = nn.Linear(dim, dim)
-		self.k_proj = nn.Linear(dim, dim)
-		self.v_proj = nn.Linear(dim, dim)
+		self.q_proj = nn.Linear(dim, dim, bias=False)
+		self.k_proj = nn.Linear(dim, dim, bias=False)
+		self.v_proj = nn.Linear(dim, dim, bias=False)
 
 		if sdp_backend is not None:
 			self.attn = FastAttention(self.head_dim, dropout, sdp_backend=sdp_backend)
@@ -369,15 +403,6 @@ class MultiHeadAttention(nn.Module):
 
 		return out
 
-	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn((batch_size, 64, self.hidden_dim), dtype=dtype)
-
-	def get_target(self, batch_size, dtype=torch.float32):
-		return self.get_sample(batch_size, dtype)  # same
-
-	def loss_fn(self, pred, target, *args, **kwargs):
-		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
-
 
 class TransformerBlock(nn.Module):
 	"""
@@ -389,11 +414,11 @@ class TransformerBlock(nn.Module):
 		self.norm1 = nn.LayerNorm(dim)
 		self.norm2 = nn.LayerNorm(dim)
 		self.attn = MultiHeadAttention(dim, num_heads, dropout, sdp_backend)
-		self.proj = nn.Linear(dim, dim)
+		self.proj = nn.Linear(dim, dim, bias=False)
 		self.dropout1 = nn.Dropout(dropout)
 		self.dropout2 = nn.Dropout(dropout)
 		ffn_dim = ffn_dim or dim * 4
-		self.mlp = FeedForward(dim, ffn_dim)
+		self.mlp = FeedForward(dim, ffn_dim, nn.GELU)
 
 	def forward(self, x):
 		residual = x
@@ -413,7 +438,7 @@ class TransformerBlock(nn.Module):
 		return y
 
 
-class FullTransformer(nn.Module):
+class FullTransformer(SimpleModel):
 	"""
 	Full decoder-only transformer architecture, with embedding and output head.
 	ffn_dim is optional and defaults to hidden_dim * 4.
@@ -439,7 +464,7 @@ class FullTransformer(nn.Module):
 		self.seq_len = seq_len
 
 		self.embed = nn.Embedding(input_dim, hidden_dim)
-		self.head = nn.Linear(hidden_dim, input_dim)
+		self.head = nn.Linear(hidden_dim, input_dim, bias=False)
 		self.blocks = []
 		for i in range(n_blocks):
 			self.blocks.append(TransformerBlock(hidden_dim, num_heads, dropout, ffn_dim, sdp_backend))
@@ -455,7 +480,9 @@ class FullTransformer(nn.Module):
 		return x
 
 	def get_sample(self, batch_size, dtype=torch.int64):
-		return torch.randint(0, self.input_dim, (batch_size, self.seq_len), dtype=dtype)
+		return torch.randint(
+			0, self.input_dim, (batch_size, self.seq_len), dtype=torch.int64
+		)  # don't accept different dtype
 
 	def get_target(self, batch_size, dtype=torch.int64):
 		return self.get_sample(batch_size, dtype)
@@ -467,7 +494,7 @@ class FullTransformer(nn.Module):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
 
 
-class ChainTransformer(nn.Module):
+class ChainTransformer(SimpleModel):
 	"""
 	Homogeneous chain of transformer blocks.
 	ffn_dim is optional and defaults to hidden_dim * 4.
