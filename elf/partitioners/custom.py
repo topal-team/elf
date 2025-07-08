@@ -43,11 +43,24 @@ def split_graph(graph, times, memories, n=3):
 	return parts
 
 
-def split_graph_constrained(graph, times, memories, n, imbalance_ratio=0):
+def _evaluate_partition_balance(parts, times):
+	"""
+	Evaluates the balance of a partition.
+	"""
+	if any(len(part) == 0 for part in parts):
+		return -100
+	loads = [sum(np.median(times.get(node.name, 0)) for node in part) for part in parts]
+	avg_load = sum(loads) / len(loads)
+	balance = avg_load / max(loads)
+	return balance
+
+
+def split_graph_constrained(graph, times, memories, n):
 	"""
 	Naively splits a graph into roughly equal blocks in terms of time.
 	This algorithm does not take into account the memory used or transferred.
 	Unlike split_graph, it is guaranteed that every block has 1 tensor as input and 1 tensor as output.
+	This algorithm iteratively creates partitions, allowing more imbalance each time, until a valid and balanced partition is found.
 
 	:param graph: symbolic trace of the module to partition (see torch.fx)
 	:type graph: fx.GraphModule
@@ -63,7 +76,28 @@ def split_graph_constrained(graph, times, memories, n, imbalance_ratio=0):
 	:return: ``n`` lists of nodes corresponding to each part
 	:rtype: List[List[fx.Node]]
 	"""
+	imbalance_ratio = 0
+	parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio)
+	score = _evaluate_partition_balance(parts, times)
 
+	while True:
+		imbalance_ratio += 0.01
+		new_parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio)
+		new_score = _evaluate_partition_balance(new_parts, times)
+		if new_score < score:
+			parts = new_parts
+			break
+
+		parts = new_parts
+		score = new_score
+
+	return parts
+
+
+def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio):
+	"""
+	Creates one partition of the graph, with a given imbalance ratio.
+	"""
 	if imbalance_ratio >= 1:
 		raise ValueError("Failed to partition the graph: imbalance ratio set to 1")
 
@@ -94,10 +128,5 @@ def split_graph_constrained(graph, times, memories, n, imbalance_ratio=0):
 				needed_inputs.append(dep.name)
 		if node.name in needed_inputs:
 			needed_inputs.remove(node.name)
-
-	for part in parts:
-		if len(part) == 0:
-			# Gradually allow more imbalance until we find a valid partition
-			return split_graph_constrained(graph, times, memories, n, imbalance_ratio + 0.01)
 
 	return parts

@@ -30,7 +30,10 @@ import torch
 
 from models.simple import FullTransformer, ChainTransformer
 
+
 __all__ = ["add_transformer_args", "build_model_from_args", "model_config_from_args"]
+
+logger = logging.getLogger(__name__)
 
 _ModelType = Literal["full", "chain"]
 
@@ -122,7 +125,7 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 
 	# FFN dimension
 	add(
-		"--ffn-dim", type=int, help="Dimension of the feed-forward network (defaults to 4 * hidden_dim)"
+		"--ffn-dim", type=int, default=None, help="Dimension of the feed-forward network (defaults to 4 * hidden_dim)"
 	)
 
 	# Weight precision / dtype requested by the user.  Most scripts convert
@@ -189,11 +192,15 @@ def model_config_from_args(args: argparse.Namespace, *, model_type: _ModelType) 
 			"seq_len": args.seq_len,
 			"num_heads": args.num_heads if args.num_heads is not None else cfg.get("num_heads"),
 			"dropout": args.dropout,
-			"ffn_dim": args.ffn_dim if args.ffn_dim is not None else cfg.get("ffn_dim"),
+			"ffn_dim": args.ffn_dim if args.ffn_dim is not None else cfg.get("ffn_dim", None),
 			"sdp_backend": get_sdpa(args.sdp_backend),
 			"dtype": get_dtype(args.dtype),
 		}
 	)
+
+	if cfg["ffn_dim"] is None:
+		logger.warning(f"ffn_dim is not set, using 4 * hidden_dim = {cfg['hidden_dim'] * 4}")
+		cfg["ffn_dim"] = cfg["hidden_dim"] * 4
 
 	if model_type == "full":
 		cfg["input_dim"] = args.vocab_size

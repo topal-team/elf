@@ -130,7 +130,7 @@ def parse_args():
 		"--opt-dtype",
 		type=str,
 		default="float32",
-		choices=["float16", "bfloat16", "float32", "float8"],
+		choices=["float16", "bfloat16", "float32", "fp16", "bf16", "fp32"],
 		help="Optimizer data type",
 	)
 	parser.add_argument(
