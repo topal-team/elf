@@ -3,10 +3,15 @@ Rematerialization manager.
 """
 
 from contextlib import contextmanager
+import functools
 
-from torch.utils.checkpoint import checkpoint
+from torch.utils.checkpoint import (
+	checkpoint,
+	create_selective_checkpoint_contexts,
+	CheckpointPolicy,
+)
 
-from .zb_utils import LayerDW
+from ..zb_utils import LayerDW
 
 
 class RematManager:
@@ -176,3 +181,14 @@ class RematManager:
 			if hasattr(module, "_elf_original_forward"):
 				setattr(module, "forward", getattr(module, "_elf_original_forward"))
 				delattr(module, "_elf_original_forward")
+
+
+def recompute_all_context_fn():
+	"""
+	Create a context that recomputes all activations
+	"""
+
+	def policy_fn(*args, **kwargs):
+		return CheckpointPolicy.MUST_RECOMPUTE
+
+	return functools.partial(create_selective_checkpoint_contexts, policy_fn)

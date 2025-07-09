@@ -8,8 +8,8 @@ import torch.distributed as dist
 from collections import deque, OrderedDict
 import time
 
-from .scheduling import OperationType
-from .utils import Timer
+from ..scheduling import OperationType
+from ..utils import Timer
 
 import logging
 import os
@@ -119,9 +119,9 @@ class Engine:
 			- memories: total gpu memory allocated after each operation
 
 		.. warning::
-			If the environment variable ``ELF_PRECISE_TIMINGS`` is not set, the timings will be completely wrong.
+			If the environment variable ``ELF_TIMINGS`` is not set, the timings will be completely wrong.
 
-		:rtype: Tensor, Tensor, Dict[float], Dict[Dict[Operation, float]]
+		:rtype: List[Tensor], List[Tensor], Dict[float], Dict[Dict[Operation, float]]
 		"""
 		split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]
 		microbatches = iter(zip(*split_batches))
@@ -290,6 +290,8 @@ class Engine:
 
 		for block in self.blocks:
 			block.compute_time.clear()
+
+		torch.cuda.current_stream().wait_stream(self.offload_stream)
 
 		return result, losses, stats, detailed_stats
 

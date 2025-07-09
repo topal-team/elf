@@ -2,15 +2,28 @@
 API and main utils for graph partition
 """
 
+import shutil
 import torch
 
-from ..registry import PARTITIONERS
-from .tracing import try_extract_graph
+from ..registry import PARTITIONERS, resolve
 from .profile import profile_operations
 from .utils import remove_inplace_leaves, Signature
 import logging
 
 logger = logging.getLogger("partition")
+
+
+def _check_for_partitioner(partitioner):
+	if partitioner == PARTITIONERS["metis"]:
+		if not shutil.which("gpmetis"):
+			logger.warning("metis is not installed, falling back to naive")
+			return PARTITIONERS["naive"]
+	elif partitioner == PARTITIONERS["dagP"]:
+		if not shutil.which("rMLGP"):
+			logger.warning("dagP is not installed, falling back to metis")
+			return _check_for_partitioner(PARTITIONERS["metis"])
+
+	return partitioner
 
 
 def check_partition(graph, parts, inputs, outputs):
@@ -194,17 +207,12 @@ def split_graph(graph, times, memories, n, partitioner):
 	"""
 	Split a graph using the selected partitioner.
 	"""
-	if partitioner not in PARTITIONERS:
-		raise Exception(
-			f"Unknown graph partitioning mode '{partitioner}'. Available modes:\n"
-			+ "\n".join(
-				f"\t{name}: {PARTITIONERS.get_description(name)}" for name in PARTITIONERS.available()
-			)
-		)
-	return PARTITIONERS[partitioner](graph, times, memories, n)
+	partitioner = resolve(partitioner, PARTITIONERS)
+	partitioner = _check_for_partitioner(partitioner)
+	return partitioner(graph, times, memories, n)
 
 
-def partition_graph(model, n, sample, partitioner="naive"):
+def partition_graph(model, n, sample, partitioner, tracer):
 	"""
 	Splits a graph into n parts of roughly equal time.
 
@@ -214,14 +222,10 @@ def partition_graph(model, n, sample, partitioner="naive"):
 	:type n: int
 	:param sample: example of inputs to feed to the model (used for profiling)
 	:type sample: Tensor
-	:param partitioner: Different partitioners are available:
-
-	        - naive: does not take into account memory, no constraint on the number of inputs/outputs
-	        - constrained: does not take into account memory, inputs & outputs of each block are limited to 1 tensor
-	        - metis: uses METIS to minimize both time and communication memory. No hard constraint on inputs/outputs.
-	        - dagP: like METIS, but uses dagP to enforce acyclicity of partition.
-
-	:type partitioner: str
+	:param partitioner: partitioner to use, as registered in registry.PARTITIONERS
+	:type partitioner: Partitioner
+	:param tracer: tracer to use, as registered in registry.TRACERS
+	:type tracer: Tracer
 
 	:raise Exception: if the partition is invalid
 
@@ -236,7 +240,8 @@ def partition_graph(model, n, sample, partitioner="naive"):
 	model.train()
 
 	# 1 - Trace the graph
-	graph = try_extract_graph(model, sample)
+	graph = tracer(model, sample)
+
 	logger.info(f"Extracted graph has {len(graph.graph.nodes)} nodes")
 
 	# 2 - Profile operations

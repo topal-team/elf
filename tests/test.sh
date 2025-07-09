@@ -10,8 +10,10 @@ fi
 
 torchrun --nproc-per-node $n_gpus -m pytest -m multi . $*
 
+# Assert the most basic script runs
 echo "Checking that a basic example runs"
-torchrun --nproc-per-node $n_gpus examples/basic.py # Assert the most basic script runs
+torchrun --nproc-per-node $n_gpus examples/basic.py
+torchrun --nproc-per-node $n_gpus examples/basic_no_partition.py
 
 echo "Checking for correctness"
-torchrun --nproc-per-node $n_gpus -- tests/dp.py -dp 1 -pp 4
+torchrun --nproc-per-node $n_gpus -- tests/dp.py -dp 1 -pp $n_gpus

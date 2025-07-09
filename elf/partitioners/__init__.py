@@ -2,7 +2,12 @@
 Automatic partition of a computation graph
 """
 
-from .tracing import try_extract_graph, extract_graph
+from .tracing import (
+	try_extract_graph,
+	extract_graph_fx,
+	extract_graph_fx_safe,
+	extract_graph_export,
+)
 from .partition import partition_graph
 from .profile import profile_operations
 from .utils import Signature, signatures_from_sources_targets, get_sources_targets_sequential
@@ -11,7 +16,7 @@ from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
 from .dagP import split_graph_dagP
 
-from ..registry import PARTITIONERS
+from ..registry import PARTITIONERS, TRACERS
 
 PARTITIONERS.register(
 	"naive",
@@ -30,9 +35,17 @@ PARTITIONERS.register(
 	"dagP", split_graph_dagP, "Graph partitioning using dagP. Requires rMLGP to be installed."
 )
 
+TRACERS.register("default", try_extract_graph, "Try all tracers and use the first one that works")
+TRACERS.register("fx", extract_graph_fx, "Extract graph using torch.fx")
+TRACERS.register(
+	"fx_safe",
+	extract_graph_fx_safe,
+	"Extract graph using torch.fx, by marking every non-traceable submodule as leaf, iteratively.",
+)
+TRACERS.register("export", extract_graph_export, "Extract graph using torch.export")
+
+
 __all__ = [
-	"try_extract_graph",
-	"extract_graph",
 	"partition_graph",
 	"profile_operations",
 	"Signature",

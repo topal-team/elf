@@ -70,3 +70,5 @@ if __name__ == "__main__":
 		optimizer.step()
 
 	pipe.clear()
+
+	dist.destroy_process_group()

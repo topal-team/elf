@@ -32,7 +32,7 @@ There are several arguments to modify its behaviour :
 
 ## The registry
 
-A registry module is available at ``elf/registry`` for users to implement their own algorithms that will be used inside of ELF. For now, two registries are open: Schedules and Partitioners. The expected function signatures are described in the same module for each registry. Here is an example to add a custom partitioner:
+A registry module is available at ``elf/registry`` for users to implement their own algorithms that will be used inside of ELF. For now, three registries are open: Schedules, Tracers and Partitioners. The expected function signatures are described in the same module for each registry. Here is an example to add a custom partitioner:
 
 ```py
 from elf.registry import PARTITIONERS

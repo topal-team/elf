@@ -1,10 +1,12 @@
 import pytest
-from elf.partitioners import extract_graph, partition_graph
-from elf.partitioners.utils import remove_inplace_leaves
 
 import copy
 import torch
 import torch.nn as nn
+
+from elf.partitioners import partition_graph
+from elf.partitioners.utils import remove_inplace_leaves
+from elf.registry import PARTITIONERS, TRACERS
 
 
 @pytest.mark.single
@@ -12,7 +14,7 @@ def test_extract():
 	def check_model(model, sample):
 		for mode in ["fx", "export"]:
 			model.zero_grad()
-			graph = extract_graph(copy.deepcopy(model), sample, mode)
+			graph = TRACERS[mode](copy.deepcopy(model), sample)
 			assert isinstance(graph, torch.fx.GraphModule)
 			y = model(sample.clone().detach())
 			z = graph(sample.clone().detach())
@@ -138,7 +140,7 @@ def test_partition():
 
 		assert nodes_partitioned == nodes_original
 
-	for mode in ["naive", "constrained", "metis"]:  # dagP often crashed for now
+	for mode in PARTITIONERS.available():
 		model = nn.Sequential(
 			nn.Linear(10, 10),
 			nn.ReLU(),

@@ -1,5 +1,6 @@
 from elf.partitioners.utils import Signature
-from elf.schedules import *
+from elf.scheduling import Operation, OperationType
+from elf.registry import SCHEDULERS
 import pytest
 
 
@@ -10,7 +11,7 @@ def test_afab():
 	sources = [[None], [0]]
 	destinations = [[[1]], [[None]]]
 
-	schedule = generate_afab_schedule(
+	schedule = SCHEDULERS["afab"](
 		placement,
 		n_micro_batches,
 		signatures=[Signature([""], [""], src, dst) for src, dst in zip(sources, destinations)],
@@ -61,7 +62,7 @@ def test_1f1b():
 	sources = [[None], [0]]
 	destinations = [[[1]], [[None]]]
 
-	schedule = generate_1f1b_schedule(
+	schedule = SCHEDULERS["1f1b"](
 		placement,
 		n_micro_batches,
 		signatures=[Signature([""], [""], src, dst) for src, dst in zip(sources, destinations)],
@@ -224,19 +225,19 @@ def check_validity(schedule, placement, n_micro_batches):
 @pytest.mark.single
 @pytest.mark.skip("Need to update that test with src/dst")
 def test_schedule():
-	scheduler = generate_afab_schedule
+	scheduler = SCHEDULERS["afab"]
 	for placement in [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]]:
 		for n_micro_batches in [2, 4, 8]:
 			schedule = scheduler(placement, n_micro_batches)
 			check_validity(schedule, placement, n_micro_batches)
 
-	scheduler = generate_1f1b_schedule
+	scheduler = SCHEDULERS["1f1b"]
 	for placement in [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]]:
 		for n_micro_batches in [2, 4, 8]:
 			schedule = scheduler(placement, n_micro_batches)
 			check_validity(schedule, placement, n_micro_batches)
 
-	scheduler = generate_hanayo_schedule
+	scheduler = SCHEDULERS["hanayo"]
 	for placement in [
 		[0, 1, 2, 3, 3, 2, 1, 0],
 		[0, 1, 2, 3, 4, 5, 6, 7, 7, 6, 5, 4, 3, 2, 1, 0],

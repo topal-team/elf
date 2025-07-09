@@ -3,18 +3,18 @@ Pipeline API and setup
 """
 
 import os
-import shutil
+
+from dataclasses import asdict, dataclass
+from typing import Any
 
 import torch
 import torch.distributed as dist
 
-from .block import PipelineBlock
-from .schedules import *
-from .engine import Engine
-from .utils import *
-from .scheduling import schedule_to_str, check_schedule_validity
-from .comm_scheduling import reorder_communications
+from .execution import PipelineBlock, Engine
+from .scheduling import schedule_to_str, check_schedule_validity, reorder_communications
+from .utils import send_models, recv_models, broadcast_models, Placement
 from .zb_utils import LayerDW
+from .registry import Tracer, Partitioner, Scheduler, TRACERS, PARTITIONERS, SCHEDULERS, resolve
 from .partitioners import (
 	partition_graph,
 	signatures_from_sources_targets,
@@ -26,20 +26,18 @@ import logging
 logger = logging.getLogger("pipeline")
 
 
-def to_cpu(nested_dict):
-	"""
-	Recursively moves all tensors in a nested dictionary to the CPU.
-	"""
-	if isinstance(nested_dict, dict):
-		return {key: to_cpu(value) for key, value in nested_dict.items()}
-	elif isinstance(nested_dict, list):
-		return [to_cpu(item) for item in nested_dict]
-	elif isinstance(nested_dict, tuple):
-		return tuple(to_cpu(item) for item in nested_dict)
-	elif isinstance(nested_dict, torch.Tensor):
-		return nested_dict.cpu()
-	else:
-		return nested_dict
+@dataclass
+class PipelineConfig:
+	tracer: Tracer | str = "default"
+	partitioner: Partitioner | str = "constrained"
+	scheduler: Scheduler | str = "1f1b"
+	placement: Placement | str = "auto"
+	pp: int | None = None
+	dp: int = 1
+	worker: int = 0
+
+	def to_kwargs(self) -> dict[str, Any]:
+		return {k: v for k, v in asdict(self).items() if v is not None}
 
 
 class Pipeline:
@@ -51,6 +49,7 @@ class Pipeline:
 		self,
 		model,
 		sample,
+		# Legacy arguments
 		placement="auto",
 		partitioner="metis",
 		scheduler="1f1b",
@@ -58,6 +57,9 @@ class Pipeline:
 		worker=0,
 		sources=None,
 		targets=None,
+		# New config usage
+		*,
+		config: PipelineConfig | None = None,
 	):
 		"""
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
@@ -87,27 +89,53 @@ class Pipeline:
 		local_rank = int(os.getenv("LOCAL_RANK"))
 		torch.cuda.set_device(local_rank)
 
-		if placement == "auto":
-			pp = ws // dp
-			placement = Pipeline._get_default_placement(scheduler, pp)
-		elif isinstance(placement, str):
-			placement = list(map(int, placement.split(",")))
+		cfg: dict[str, Any] = {}
+		if config is not None:
+			cfg = config.to_kwargs()
+			cfg.setdefault("placement", placement)
+			cfg.setdefault("partitioner", partitioner)
+			cfg.setdefault("scheduler", scheduler)
+			cfg.setdefault("dp", dp)
+			cfg.setdefault("worker", worker)
+		else:
+			cfg = {
+				"placement": placement,
+				"partitioner": partitioner,
+				"scheduler": scheduler,
+				"tracer": "default",  # hardcoded for now
+				"dp": dp,
+				"worker": worker,
+			}
 
-		assert max(placement) < ws, "Placement is out of bounds"
-		pp = max(placement) + 1
+		# Create config
+		self.cfg = PipelineConfig(**cfg)
+		self.pp = self.cfg.pp or ws // self.cfg.dp  # Number of GPUs used for pipeline parallelism
+		self.dp = self.cfg.dp  # Number of GPUs used for data parallelism
+		assert self.pp * self.dp == ws, (
+			f"Requested PP = {self.pp}, DP = {self.dp} need {self.pp * self.dp} processes, but {ws} were spawned"
+		)
 
-		assert pp * dp <= ws, f"Requested PP = {pp}, DP = {dp} but only {ws} processes were spawned"
-
-		self.pp = pp
-		self.dp = dp
+		# Distributed setups
+		if self.cfg.placement == "auto":
+			self.placement = Placement.default(self.cfg.scheduler, self.pp)
+		else:
+			self.placement = Placement(self.cfg.placement)
 
 		self._init_process_groups()  # sets pp_group and dp_groups
 
-		self.placement = placement
-		parts, signatures = self._partition_model(model, partitioner, sample, worker, sources, targets)
-		self.blocks = self._create_pipeline(parts, signatures)
+		# Resolve components from registries
+		self.scheduler = resolve(self.cfg.scheduler, SCHEDULERS)
+		self.tracer = resolve(self.cfg.tracer, TRACERS)
+		self.partitioner = (
+			resolve(self.cfg.partitioner, PARTITIONERS) if self.cfg.partitioner else False
+		)  # False if no partitioning is desired
+
+		# Partition model
+		parts, signatures = self._partition_model(model, sample, sources, targets)
 		self.signatures = signatures
-		self.scheduler = Pipeline._get_scheduler(scheduler)
+
+		# Create execution engine
+		self.blocks = self._create_pipeline(parts, signatures)
 		self.engine = Engine(self.blocks)
 
 		# Used to avoid re-generating schedule every time
@@ -130,7 +158,9 @@ class Pipeline:
 		:type profile: boolean
 
 		:return: result of the forward pass and loss value if the last block of the pipeline is managed by this process
-		:rtype: (Tensor, Tensor) or (None, None)
+		:rtype: (List[Tensor], Tensor) or (None, None)
+		.. warning::
+			The result is automatically offloaded to CPU. Since merging it back would cause a sync point, it is currently returned as a list of tensors, one for each micro-batch.
 		"""
 		# We expect a list of arguments, not a single tensor
 		if isinstance(batch, torch.Tensor):
@@ -326,15 +356,6 @@ class Pipeline:
 
 		return state_dict
 
-	@staticmethod
-	def _get_default_placement(schedule, pp):
-		if schedule == "hanayo" or schedule == "zbv":
-			return [i for i in range(pp)] + list(reversed([i for i in range(pp)]))
-		elif schedule == "megatron":
-			return [i for i in range(pp)] * 2
-		else:
-			return [i for i in range(pp)]
-
 	def _get_mb_sizes(self, split_size, batch):
 		"""
 		Determine the sizes of micro-batches based on the given split_size and batch.
@@ -365,35 +386,11 @@ class Pipeline:
 
 		return mb_sizes
 
-	@staticmethod
-	def _get_scheduler(schedule):
-		"""Return a scheduler function given its string identifier.
-
-		The lookup order is:
-		1.  If *schedule* is already a callable, return it unchanged.
-		2.  If *schedule* is found inside the global :pydata:`elf.registry.SCHEDULERS`,
-		   use that entry.  This allows users to plug-in their custom algorithms
-		   without modifying the core library.
-		"""
-		from .registry import SCHEDULERS  # Local import to avoid circular deps
-
-		# 1) Callable provided directly
-		if callable(schedule):
-			return schedule
-
-		# 2) Registry lookup
-		if schedule in SCHEDULERS:
-			return SCHEDULERS.get(schedule)
-
-		msg = "Unknown schedule '{schedule}'. Available ones:\n"
-		for name in SCHEDULERS.available():
-			msg += f"\t{name}: {SCHEDULERS.get_description(name)}\n"
-
-		raise ValueError(msg)
-
 	def _generate_schedule(self, n_micro_batches):
 		"""
 		Generate a schedule for one execution.
+		Also reorders communications to avoid deadlocks and improve performance.
+		The resulting schedule only contains operations for the current process.
 
 		:param n_micro_batches: Number of micro-batches
 		:type n_micro_batches: int
@@ -415,19 +412,11 @@ class Pipeline:
 		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
 
-	def _partition_model(self, model, partitioner, sample, worker, sources, targets):
+	def _partition_model(self, model, sample, sources, targets):
 		"""
 		Either partitions the model, or makes sure it's already partitioned
 		"""
-		if isinstance(partitioner, str):
-			try:
-				parts, signatures = self._shared_partition(model, sample, partitioner, worker=worker)
-			except Exception as e:
-				logger.error(
-					"Error partitioning the model. This can be due to your model using features either not supported by torch.fx/torch.export, or by this library."
-				)
-				raise e
-		elif not partitioner:
+		if not self.partitioner:
 			# Model is already the right part, just make sure it's a list
 			if isinstance(model, torch.nn.Module):
 				parts = [model]
@@ -441,11 +430,14 @@ class Pipeline:
 				sources, targets = get_sources_targets_sequential(self.placement)
 			else:
 				signatures = signatures_from_sources_targets(sources, targets)
-
 		else:
-			raise Exception(
-				"Partition strategy should be either False when using pre-partitioned model, or a string indicating the partition strategy."
-			)
+			try:
+				parts, signatures = self._shared_partition(model, sample)
+			except Exception as e:
+				logger.error(
+					"Error partitioning the model. This can be due to your model using features either not supported by torch.fx/torch.export, or by this library."
+				)
+				raise e
 
 		return parts, signatures
 
@@ -455,6 +447,8 @@ class Pipeline:
 
 		:param parts: List of model parts coming from a partitioned model
 		:type parts: List[nn.Module]
+		:param signatures: List of signatures for each block
+		:type signatures: List[Signature]
 
 		:return: list of blocks handled by this process with everything set up for the pipeline to work
 		:rtype: List[PipelineBlock]
@@ -462,9 +456,9 @@ class Pipeline:
 		rank = dist.get_rank()
 
 		offset = (rank // self.pp) * self.pp
-		placement = [p + offset for p in self.placement]
+		placement = Placement([p + offset for p in self.placement])
 
-		ids = [i for i in range(len(placement)) if placement[i] == rank]
+		ids = placement.get_ids(rank)
 		blocks = []
 		for i in range(len(parts)):
 			dp_group = self.dp_groups[ids[i] % self.pp] if self.dp > 1 else None
@@ -503,7 +497,7 @@ class Pipeline:
 					logger.info(f"Creating DP group with members {members}")
 				self.dp_groups.append(dist.new_group(members))
 
-	def _shared_partition(self, model, sample, partitioner, worker=0):
+	def _shared_partition(self, model, sample):
 		"""
 		Partitions a model according to a placement & mode, then shares it to every process to be consistent
 
@@ -511,17 +505,6 @@ class Pipeline:
 		:type model: nn.Module
 		:param sample: example of input data that will be processed by the model
 		:type sample: Tensor
-		:param partitioner: partitioner to use ; available options are :
-
-			- "naive": simple load balancing algorithm
-			- "constrained": naive with less communication
-			- "metis": use METIS
-			- "dagP": use dagP / rMLGP
-			For more info, see partition.
-
-		:type partitioner: str
-		:param worker: rank of the process that will profile the model and partition it
-		:type worker: int
 
 		:return: blocks (modules) for this process
 		:rtype: List[nn.Module]
@@ -532,11 +515,10 @@ class Pipeline:
 		n_blocks = self.placement.count(rank % self.pp)
 		blocks = [None for _ in range(n_blocks)]
 		signatures = [None for _ in range(len(self.placement))]
+		worker = self.cfg.worker
 		if rank == worker:
-			partitioner = self._check_for_partitioner(partitioner)
-
 			parts, signatures = partition_graph(
-				model, len(self.placement), sample, partitioner=partitioner
+				model, len(self.placement), sample, partitioner=self.partitioner, tracer=self.tracer
 			)
 			for d in range(self.pp):
 				blocks_on_d = [parts[i] for i in range(len(parts)) if self.placement[i] == d]
@@ -561,15 +543,3 @@ class Pipeline:
 		logger.debug(f"Rank {rank} has {len(blocks)} block" + ("s" if len(blocks) > 1 else ""))
 
 		return blocks, signatures
-
-	def _check_for_partitioner(self, partitioner):
-		if partitioner == "metis":
-			if not shutil.which("gpmetis"):
-				logger.warning("metis is not installed, falling back to naive")
-				return "naive"
-		elif partitioner == "dagP":
-			if not shutil.which("rMLGP"):
-				logger.warning("dagP is not installed, falling back to metis")
-				return self._check_for_partitioner("metis")
-
-		return partitioner

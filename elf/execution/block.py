@@ -5,9 +5,9 @@ Individual stage computation and communication management
 import torch
 import torch.distributed as dist
 
-from .scheduling import OpOptions
-from .utils import Timer, TensorMetadata
-from .zb_utils import LayerDW
+from ..scheduling import OpOptions
+from ..utils import Timer, TensorMetadata
+from ..zb_utils import LayerDW
 from .remat import RematManager
 
 import logging
@@ -178,7 +178,7 @@ class PipelineBlock:
 
 		self.compute_time = []  # used to measure idle time
 
-		# Strategy manager to handle RBF and RBB strategies
+		# Take care of rematerialization
 		self.remat_manager = RematManager(self)
 
 	def __str__(self) -> str:

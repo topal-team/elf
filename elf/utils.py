@@ -2,12 +2,16 @@
 Various useful classes / functions
 """
 
-import functools
 import time
 import uuid
+import logging
+
 import torch
 import torch.distributed as dist
-from torch.utils.checkpoint import create_selective_checkpoint_contexts, CheckpointPolicy
+
+from typing import List
+
+logger = logging.getLogger(__name__)
 
 dtypes = [
 	torch.float16,
@@ -19,22 +23,6 @@ dtypes = [
 	torch.int64,
 	torch.bool,
 ]
-
-
-def op_to_str(op):
-	"""
-	Pretty print for dist.P2POp
-
-	:param op: communication operation
-	:type op: dist.P2POp
-	:return: string describing the op
-	:rtype: string
-	"""
-	match op.op:
-		case dist.isend:
-			return f"Send to {op.peer}"
-		case dist.irecv:
-			return f"Receive from {op.peer}"
 
 
 def pretty_print_params(n):
@@ -56,6 +44,39 @@ def pretty_print_step(rank, times):
 		info += f"\t{k} : {v:.2f}s\n"
 	info += f"\tPeak memory : {memory:.2f}GB ({100 * memory / total_memory:.2f}%)"
 	print(info)
+
+
+class Placement(List[int]):
+	"""
+	Wrapper around a list of integers that represents the placement of the pipeline blocks.
+	"""
+
+	def __init__(self, placement: List[int]):
+		super().__init__(placement)
+		assert not dist.is_initialized() or max(self) < dist.get_world_size(), (
+			"Placement is out of bounds"
+		)
+
+	def get_ids(self, rank: int) -> List[int]:
+		"""
+		Get the ids of the pipeline blocks that are on the given rank.
+		"""
+		return [self[i] for i in range(len(self)) if self[i] == rank]
+
+	@staticmethod
+	def default(scheduler, pp):
+		if callable(scheduler):
+			logger.warning(
+				f"Placement.default() expects a scheduler name, not the scheduler object itself. Using {scheduler.__name__} as the scheduler name."
+			)
+			scheduler = scheduler.__name__
+
+		if scheduler == "hanayo" or scheduler == "zbv":
+			return Placement([i for i in range(pp)] + list(reversed([i for i in range(pp)])))
+		elif scheduler == "megatron":
+			return Placement([i for i in range(pp)] * 2)
+		else:
+			return Placement([i for i in range(pp)])
 
 
 class TensorMetadata:
@@ -346,14 +367,3 @@ def broadcast_models(models, src, group=None):
 		m.cuda()
 
 	return models
-
-
-def recompute_all_context_fn():
-	"""
-	Create a context that recomputes all activations
-	"""
-
-	def policy_fn(*args, **kwargs):
-		return CheckpointPolicy.MUST_RECOMPUTE
-
-	return functools.partial(create_selective_checkpoint_contexts, policy_fn)

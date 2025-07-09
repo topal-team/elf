@@ -7,6 +7,7 @@ import torch.nn as nn
 
 import logging
 
+from elf.registry import TRACERS
 from elf.zb_utils import LayerDWTracer
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ def symbolic_trace_with_layerdw(model: torch.nn.Module) -> torch.fx.GraphModule:
 	return torch.fx.GraphModule(model, graph)
 
 
-def extract_graph_fx(model):
+def extract_graph_fx(model, *args):
 	return symbolic_trace_with_layerdw(model)
 
 
@@ -112,7 +113,12 @@ def try_extract_graph(model, sample):
 	:rtype: torch.fx.GraphModule or torch.export.ExportedProgram
 	:raises Exception: If all extraction modes fail
 	"""
-	modes = ["fx", "fx_safe", "export"]
+	modes = TRACERS.available()
+	modes.remove("default")
+	# Prioritize fx and fx_safe modes over export (hardcoded :/)
+	priority_modes = ["fx", "fx_safe"]
+	other_modes = [mode for mode in modes if mode not in priority_modes]
+	modes = priority_modes + other_modes
 	for mode in modes:
 		try:
 			return extract_graph(model, sample, mode)

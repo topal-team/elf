@@ -9,9 +9,9 @@ import torch.distributed as dist
 
 sys.path.append(".")
 
-from elf import Pipeline, get_sources_targets_sequential
+from elf import Pipeline, PipelineConfig, get_sources_targets_sequential, Placement
 from elf.zb_utils import replace_linear_with_linear_dw
-from elf.schedules import JsonScheduler
+from elf.scheduling import JsonScheduler
 from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import get_handcrafted_partition, meta_to_device
 from models.utils import add_transformer_args, build_model_from_args, get_dtype
@@ -218,7 +218,7 @@ def main():
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
 
 	if args.partitioner == "handcrafted":
-		placement = Pipeline._get_default_placement(args.scheduler, pp) * args.interleaving
+		placement = Placement.default(args.scheduler, pp) * args.interleaving
 		parts = get_handcrafted_partition(model, rank, placement)
 		sources, targets = get_sources_targets_sequential(placement)
 		args.partitioner = False
@@ -230,16 +230,11 @@ def main():
 		if rank == 0:
 			model = meta_to_device(model, "cuda")
 
-	pipeline = Pipeline(
-		parts,
-		sample,
-		placement="auto",
-		partitioner=args.partitioner,
-		scheduler=scheduler,
-		sources=sources,
-		targets=targets,
-		dp=args.dp,
+	config = PipelineConfig(
+		partitioner=args.partitioner, scheduler=scheduler, placement="auto", pp=pp, dp=args.dp
 	)
+
+	pipeline = Pipeline(parts, sample, config=config, sources=sources, targets=targets)
 
 	dist.barrier()
 	torch.cuda.synchronize()

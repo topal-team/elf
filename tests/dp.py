@@ -2,21 +2,21 @@ import os
 import sys
 import copy
 import traceback
-import torch
+import logging
 
+from argparse import ArgumentParser
+
+import torch
 import torch.distributed as dist
 
 from torch.optim import SGD
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-sys.path.append("./")
-from elf.pipeline import Pipeline
+sys.path.append(".")
+from elf.pipeline import Pipeline, Placement
 from elf.zb_utils import replace_linear_with_linear_dw
 from models.simple import SimpleTransformer, SimpleCNN, SimpleResNet
-
-from argparse import ArgumentParser
-import logging
 
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
@@ -209,8 +209,8 @@ def train(pipe, model, data, pp, dp):
 			), f"Different losses for epoch {e} - expected {losses[e].item()}, got {epoch_loss.item()}"
 			print(f"Loss check passed for epoch {e}")
 
-		for block in pipe.blocks:
-			if dp > 1:
+		if dp > 1:
+			for block in pipe.blocks:
 				assert_model_params_equal(block.model, block.dp_group)  # check same parameters across DP
 
 
@@ -258,14 +258,14 @@ if __name__ == "__main__":
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
+	dist.init_process_group(backend="nccl", device_id=torch.device(local_rank))
 
 	match args.model:
 		case "cnn":
 			model = SimpleCNN(256)
 			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
 		case "tf":
-			model = SimpleTransformer(128, 1024, args.pp * args.interleaving * 16)
+			model = SimpleTransformer(128, 1024, args.pp * args.interleaving * 8)
 			data = Dummy((64,), torch.int64, (64,), torch.int64)
 		case "resnet":
 			model = SimpleResNet(args.pp * args.interleaving)
@@ -273,20 +273,9 @@ if __name__ == "__main__":
 
 	model = model.cuda()
 	gt = copy.deepcopy(model)
+	replace_linear_with_linear_dw(model, rank)
 
-	match args.scheduler:
-		case "afab" | "1f1b":
-			placement = [i for i in range(args.pp)] * args.interleaving
-		case "hanayo" | "zbv":
-			placement = [i for i in range(args.pp)] + [i for i in reversed(range(args.pp))]
-			placement *= args.interleaving
-		case "zbh1" | "zbh2":
-			placement = [i for i in range(args.pp)]
-			if args.interleaving > 1:
-				logger.warning("Interleaving is not supported for ZB schedules")
-			replace_linear_with_linear_dw(model, rank)
-		case _:
-			raise ValueError(f"Unknown scheduler {args.scheduler}")
+	placement = Placement.default(args.scheduler, args.pp) * args.interleaving
 
 	pipe = Pipeline(
 		copy.deepcopy(model),
@@ -306,6 +295,7 @@ if __name__ == "__main__":
 
 		split_size = (16 // args.dp) // (args.pp * 2)
 		y, _ = pipe(sample.clone(), target.clone(), loss_fn=model.loss_fn, split_size=split_size)
+
 		pipe.zero_grad(set_to_none=False)
 		gt.zero_grad(set_to_none=False)
 

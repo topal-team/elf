@@ -1,8 +1,6 @@
 """Generic plugin registries used across the **elf** code-base.
 
-The goal is to replace ad-hoc *string ➜ function* dispatch patterns with a
-structured, type-safe alternative.  End-users can extend the library by simply
-importing :py:mod:`elf.registry` and calling :py:func:`Registry.register`.
+End-users can extend the library by simply importing :py:mod:`elf.registry` and calling :py:func:`Registry.register`.
 
 Example
 -------
@@ -16,16 +14,17 @@ Example
 Later, inside :py:class:`elf.pipeline.Pipeline` you can refer to it with
 
 >>> pipeline = Pipeline(model, sample, scheduler="my_scheduler")
+or
+>>> pipeline = Pipeline(model, sample, scheduler=custom_scheduler)
 """
 
 from __future__ import annotations
-from typing import Callable, Dict, Generic, Iterable, List, TypeVar, Protocol, TypeAlias
+from abc import abstractmethod
+from typing import Any, Callable, Dict, Generic, Iterable, List, TypeVar, Protocol, TypeAlias
 
 import torch
 
-import elf
-
-__all__ = ["Registry", "SCHEDULERS", "PARTITIONERS"]
+__all__ = ["Registry", "SCHEDULERS", "PARTITIONERS", "TRACERS", "resolve"]
 
 T = TypeVar("T", bound=Callable[..., object])
 
@@ -111,6 +110,22 @@ class Registry(Generic[T]):
 # Global registries exposed by the library
 SCHEDULERS: Registry = Registry("scheduler")
 PARTITIONERS: Registry = Registry("partitioner")
+TRACERS: Registry = Registry("tracer")
+
+
+def resolve(var: str | Callable, registry: Registry) -> T:
+	"""
+	Resolve a name to a callable.
+	"""
+	if callable(var):
+		return var
+	elif var in registry:
+		return registry[var]
+	else:
+		msg = f"Unknown {registry._name} '{var}'. Available ones:\n"
+		for name in registry.available():
+			msg += f"\t{name}: {registry.get_description(name)}\n"
+		raise ValueError(msg)
 
 
 class SchedulerFn(Protocol):
@@ -118,9 +133,7 @@ class SchedulerFn(Protocol):
 	Function that returns a list of operations to be performed.
 	"""
 
-	def __call__(
-		self, placement: str, n_micro_batches: int, signatures: List[elf.partitioners.utils.Signature]
-	) -> List[elf.scheduling.Operation]:
+	def __call__(self, placement: str, n_micro_batches: int, signatures: List[Any]) -> List[Any]:
 		"""
 		:param placement: device on which each block is placed
 		:type placement: List[int]
@@ -145,6 +158,7 @@ class PartitionerFn(Protocol):
 	Function that splits a graph into a list of subgraphs.
 	"""
 
+	@abstractmethod
 	def __call__(
 		self, graph: torch.fx.GraphModule, times: Dict[str, float], memories: Dict[str, float], n: int
 	) -> List[List[torch.fx.Node]]:
@@ -167,4 +181,28 @@ class PartitionerFn(Protocol):
 
 Partitioner: TypeAlias = PartitionerFn
 
-__all__ += ["Scheduler", "Partitioner"]
+
+class TracerFn(Protocol):
+	"""
+	Extract computation graph from a model using torch FX format.
+	"""
+
+	@abstractmethod
+	def __call__(
+		self, model: torch.nn.Module, sample: torch.Tensor, *args, **kwargs
+	) -> torch.fx.GraphModule:
+		"""
+		:param model: Model to trace
+		:type model: torch.nn.Module
+		:param sample: Sample input to use for tracing, if needed
+		:type sample: torch.Tensor
+
+		:return: Computation graph of the model, in torch.fx format
+		:rtype: fx.GraphModule
+		"""
+		...
+
+
+Tracer: TypeAlias = TracerFn
+
+__all__ += ["Scheduler", "Partitioner", "Tracer"]

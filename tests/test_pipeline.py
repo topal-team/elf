@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from elf.pipeline import *
+from elf import Pipeline, get_sources_targets_sequential
 
 from datetime import timedelta
 
