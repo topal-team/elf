@@ -1,18 +1,15 @@
 import sys
-
-from elf.zb_utils import replace_linear_with_linear_dw
-
-sys.path.append(".")
-from elf.pipeline import Pipeline
-
-
 import os
 import torch
 import torch.distributed as dist
 import logging
-from argparse import ArgumentParser
 import wandb
 
+from argparse import ArgumentParser
+
+sys.path.append(".")
+from elf import Pipeline, replace_linear_with_linear_dw
+from elf.utils import pretty_print_params
 from models.GPT import (
 	GPTTinyConfig,
 	GPTSmallConfig,
@@ -21,7 +18,6 @@ from models.GPT import (
 	GPTXXLConfig,
 	GPT,
 )
-from elf.utils import pretty_print_params
 
 logger = logging.getLogger("benchmark")
 logging.basicConfig(level=logging.INFO)

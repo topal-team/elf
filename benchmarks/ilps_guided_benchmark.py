@@ -26,16 +26,18 @@ Note: This script must be run in a distributed setting with multiple GPUs.
 import os
 import sys
 import json
-import torch
-import torch.distributed as dist
 import datetime
 import argparse
 import logging
 import psutil
+
 from typing import Dict, List, Optional, Any
 
+import torch
+import torch.distributed as dist
+
 sys.path.append(".")
-from elf.zb_utils import replace_linear_with_linear_dw
+from elf import replace_linear_with_linear_dw
 from models.simple import ChainTransformer, FullTransformer  # noqa: F401
 from models.utils import get_dtype, get_sdpa
 from benchmarks.benchmark_utils import bench, get_handcrafted_imbalanced_partition

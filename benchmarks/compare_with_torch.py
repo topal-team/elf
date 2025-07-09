@@ -1,19 +1,20 @@
 import os
+import sys
+import wandb
+import argparse
+
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-import sys
-import wandb
 
 sys.path.append("./")
-from elf.zb_utils import replace_linear_with_linear_dw
-import elf.pipeline as MyPipe
-from elf.utils import Timer
-from models.utils import add_transformer_args, build_model_from_args
 
+import elf
 import torch.distributed.pipelining as PiPPy
 
-import argparse
+from elf.utils import Timer
+from models.utils import add_transformer_args, build_model_from_args
+from benchmarks.benchmark_utils import meta_to_device
 
 parser = argparse.ArgumentParser()
 
@@ -42,6 +43,7 @@ nmb = args.pp * 2
 batch_size = args.mb_size * nmb
 with torch.device("meta"):
 	model = build_model_from_args(args, model_type="full")
+
 inputs = model.get_sample(batch_size)
 targets = model.get_target(batch_size)
 loss_fn = model.loss_fn
@@ -51,20 +53,7 @@ assert args.nblocks >= args.pp, (
 )
 
 
-def reset_parameters(module):
-	for c in module.children():
-		if getattr(c, "reset_parameters", False):
-			c.reset_parameters()
-		else:
-			reset_parameters(c)
-
-
-def send_meta_to_device(model, device="cuda"):
-	model.to_empty(device=device)
-	reset_parameters(model)
-	return model
-
-
+# TODO: use elf.Placement.default
 def get_placement(schedule_type, world_size):
 	match schedule_type:
 		case "1f1b" | "zbh1" | "afab" | "zbh2":
@@ -123,15 +112,15 @@ def get_parts(rank, placement):
 			continue
 
 		if i == 0:
-			parts.append(send_meta_to_device(nn.Sequential(model.embed, *model.blocks[start:end])))
+			parts.append(nn.Sequential(model.embed, *model.blocks[start:end]))
 		elif i == len(placement) - 1:
-			parts.append(send_meta_to_device(nn.Sequential(*model.blocks[start:end], model.head)))
+			parts.append(nn.Sequential(*model.blocks[start:end], model.head))
 		else:
-			parts.append(send_meta_to_device(nn.Sequential(*model.blocks[start:end])))
+			parts.append(nn.Sequential(*model.blocks[start:end]))
 
 		start = end
 
-	return parts
+	return [meta_to_device(p) for p in parts]
 
 
 def find_stage_global_idx(rank, placement, local_idx):
@@ -146,7 +135,7 @@ def find_stage_global_idx(rank, placement, local_idx):
 	return None
 
 
-def pippy():
+def benchmark_pippy():
 	placement = get_placement(args.schedule, world_size)
 	parts = get_parts(rank, placement)
 	n_stages = len(placement)
@@ -182,7 +171,7 @@ def pippy():
 	return timer.time(), torch.cuda.max_memory_allocated() / 2**30
 
 
-def elf():
+def benchmark_elf():
 	placement = get_placement(args.schedule, world_size)
 	parts = get_parts(rank, placement)
 
@@ -191,10 +180,10 @@ def elf():
 		scheduler = "1f1b"  # Not the same name
 
 	for part in parts:
-		replace_linear_with_linear_dw(part, "cpu")
+		elf.replace_linear_with_linear_dw(part, "cpu")
 
-	sources, dsts = MyPipe.get_sources_targets_sequential(placement)
-	pipe = MyPipe.Pipeline(
+	sources, dsts = elf.get_sources_targets_sequential(placement)
+	pipe = elf.Pipeline(
 		parts,
 		None,
 		partitioner=False,
@@ -228,7 +217,7 @@ if __name__ == "__main__":
 	if args.only == "elf":
 		torch_time, torch_mem = (0.0, 0.0)
 	else:
-		torch_time, torch_mem = pippy()
+		torch_time, torch_mem = benchmark_pippy()
 
 	dist.barrier()
 	torch.cuda.empty_cache()
@@ -237,7 +226,7 @@ if __name__ == "__main__":
 	if args.only == "torch":
 		elf_time, elf_mem = (0.0, 0.0)
 	else:
-		elf_time, elf_mem = elf()
+		elf_time, elf_mem = benchmark_elf()
 
 	# Gather memory stats from all GPUs
 	elf_mems = (

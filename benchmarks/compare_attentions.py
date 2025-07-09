@@ -1,30 +1,24 @@
 import os
 import sys
+import datetime
+
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+import torch.cuda.profiler as profiler
+
+from torch.cuda import cudart
 
 sys.path.append(".")
 
-from models.simple import FullTransformer, ChainTransformer
-from elf.utils import TimerGPU
 from elf import Pipeline
+from elf.utils import TimerGPU
 from elf.pipeline import get_sources_targets_sequential
-
-import torch
-import torch.distributed as dist
-import datetime
-import torch.cuda.profiler as profiler
-from torch.cuda import cudart
-import torch.nn as nn
+from models.simple import FullTransformer, ChainTransformer
+from models.utils import get_dtype, get_sdpa
+from benchmark_utils import meta_to_device
 
 import argparse
-
-
-def meta_to_gpu(model):
-	model.to_empty(device="cuda")
-	for param in model.parameters():
-		if hasattr(param, "reset_parameters"):
-			param.reset_parameters()
-
-	return model
 
 
 def get_blocks(rank, placements, model):
@@ -51,7 +45,7 @@ def get_grouped_blocks(rank, placement):
 		start_idx = end_idx
 
 	parts = [parts[i] for i, p in enumerate(placement) if p == rank]
-	parts = [meta_to_gpu(p) for p in parts]
+	parts = [meta_to_device(p) for p in parts]
 	return parts
 
 
@@ -87,15 +81,9 @@ if __name__ == "__main__":
 	embed_dim = num_heads * head_dim
 	hidden_dim = embed_dim  # 4096
 	placements = [0, 1, 2, 3, 4, 5, 6, 7][:4]
-	print(args.sdp_backend)
 
-	match args.dtype:
-		case "float32":
-			dtype = torch.float32
-		case "float16":
-			dtype = torch.float16
-		case "bfloat16":
-			dtype = torch.bfloat16
+	dtype = get_dtype(args.dtype)
+	sdp_backend = get_sdpa(args.sdp_backend)
 
 	if torch.cuda.is_available():
 		# device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
@@ -111,7 +99,7 @@ if __name__ == "__main__":
 				n_blocks=n_blocks,
 				seq_len=seq_len,
 				num_heads=num_heads,
-				sdp_backend=args.sdp_backend,
+				sdp_backend=sdp_backend,
 			).to(dtype)
 	else:
 		with torch.device("meta"):
@@ -120,10 +108,9 @@ if __name__ == "__main__":
 				n_blocks=n_blocks,
 				seq_len=seq_len,
 				num_heads=num_heads,
-				sdp_backend=args.sdp_backend,
+				sdp_backend=sdp_backend,
 			).to(dtype)
 
-	print("HOHO Model created!")
 	sample = model.get_sample(batch_size).to(device)  # keep as long for embedding
 	if args.transformer_type == "chain":
 		sample = sample.to(dtype)
@@ -132,13 +119,8 @@ if __name__ == "__main__":
 	if args.transformer_type == "chain":
 		target = target.to(dtype)
 
-	print("Samples/targets are created!")
-
-	# rank_blocks = get_blocks(rank, placements, model)
 	rank_blocks = get_grouped_blocks(rank, placements)
 	sources, targets = get_sources_targets_sequential(placements)
-
-	print("Blocks are moved to GPUs!")
 
 	pipe = Pipeline(
 		rank_blocks,
@@ -152,7 +134,6 @@ if __name__ == "__main__":
 	loss_fn = nn.MSELoss()
 	optimizer = torch.optim.Adam(pipe.parameters())
 
-	print("WARM WARM UP")
 	# Warmup iterations
 	for _ in range(3):
 		_ = pipe(sample, target, loss_fn, split_size=mb_size, profile=False)

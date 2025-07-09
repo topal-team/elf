@@ -61,7 +61,7 @@ class Placement(List[int]):
 		"""
 		Get the ids of the pipeline blocks that are on the given rank.
 		"""
-		return [self[i] for i in range(len(self)) if self[i] == rank]
+		return [i for i in range(len(self)) if self[i] == rank]
 
 	@staticmethod
 	def default(scheduler, pp):

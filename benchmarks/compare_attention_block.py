@@ -40,18 +40,6 @@ if __name__ == "__main__":
 		print("\n=========\n")
 		tmp_stats = []
 		for seq_len in [seq_len_base * i for i in range(1, 15)]:
-			# try:
-			# model = (
-			#     ChainTransformer(
-			#         hidden_dim=hidden_dim,
-			#         n_blocks=n_blocks,
-			#         seq_len=seq_len,
-			#         num_heads=num_heads,
-			#         sdp_backend=sdp_backend,
-			#     )
-			#     .to(device)
-			#     .to(dtype)
-			# )
 			sample = (
 				torch.randn(batch_size, seq_len, hidden_dim).to(device).to(dtype)
 			)  # keep as long for embedding
@@ -82,10 +70,5 @@ if __name__ == "__main__":
 					mem_peak / (1024 * 1024),
 				]
 			)
-		# except:
-		#     print(f'SeqLen: {seq_len}, Dtype: {dtype}, SDPBackend: {sdp_backend}: OOM most probably!')
-		#     tmp_stats.append([seq_len, None, None, None])
-
-		# stats[(sdp_backend, dtype)] = tmp_stats
 
 	print(stats)

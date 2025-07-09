@@ -2,7 +2,7 @@ import sys
 
 sys.path.append(".")
 from elf.scheduling import OpOptions, OperationType, Operation
-from elf.schedules import _add_forward_pass, _add_backward_pass, _add_backward_params
+from elf.scheduling.schedulers import _add_forward_pass, _add_backward_pass, _add_backward_params
 from models.simple import Attention, TransformerBlock
 
 

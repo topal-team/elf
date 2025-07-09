@@ -2,21 +2,20 @@ import json
 import os
 import gc
 import sys
+import logging
+
 from datetime import timedelta
 from argparse import ArgumentParser
-import numpy as np
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
 sys.path.append(".")
-from elf.pipeline import Pipeline, get_sources_targets_sequential
+from elf import Pipeline, get_sources_targets_sequential, replace_linear_with_linear_dw
 from elf.utils import Timer, pretty_print_params
-from elf.zb_utils import replace_linear_with_linear_dw
-from benchmarks.benchmark_utils import get_handcrafted_imbalanced_partition
 from models.utils import add_transformer_args, build_model_from_args, get_dtype
-
-import logging
+from benchmarks.benchmark_utils import get_handcrafted_imbalanced_partition, meta_to_device
 
 logger = logging.getLogger("benchmark")
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 if __name__ == "__main__":
 	parser = ArgumentParser(description="Benchmark different schedules")
 	parser.add_argument(
-		"--log", choices=["debug", "info", "none"], default="info", required=False, help="logging level"
+		"--log", choices=["debug", "info", "none"], default="none", required=False, help="logging level"
 	)
 	parser.add_argument(
 		"--partitioner",
@@ -114,6 +113,8 @@ if __name__ == "__main__":
 		else:
 			parts = model
 			sources, dsts = None, None
+			if rank == 0:
+				model = meta_to_device(model)
 
 		if "ZB" in s and not replaced_dw:
 			replaced_dw = True
