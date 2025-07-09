@@ -227,9 +227,13 @@ class Engine:
 						with Timer(name=f"backward({block.id}:{op.mb_id})") as timer:
 							grads = grad_fn()
 						block.compute_time.append(timer)
+
+						# Don't start offloading until we finished computing!
+						self.offload_stream.wait_stream(torch.cuda.current_stream())
 						with torch.cuda.stream(self.offload_stream):
 							with torch.no_grad():
 								result[op.mb_id] = result[op.mb_id].to("cpu", non_blocking=True)
+
 						for grad, var in zip(grads, block.output_variables):
 							for dst in var:  # should be only one destination
 								dst.set(dst.to_process, op.mb_id, _fake_p2p(grad))

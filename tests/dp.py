@@ -1,12 +1,14 @@
 import os
 import sys
 import copy
+import traceback
 import torch
-from torch.optim import SGD
+
 import torch.distributed as dist
+
+from torch.optim import SGD
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-
 
 sys.path.append("./")
 from elf.pipeline import Pipeline
@@ -256,7 +258,7 @@ if __name__ == "__main__":
 	rank = int(os.getenv("RANK"))
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl")
+	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
 	match args.model:
 		case "cnn":
@@ -272,7 +274,7 @@ if __name__ == "__main__":
 	model = model.cuda()
 	gt = copy.deepcopy(model)
 
-	match args.schedule:
+	match args.scheduler:
 		case "afab" | "1f1b":
 			placement = [i for i in range(args.pp)] * args.interleaving
 		case "hanayo" | "zbv":
@@ -284,7 +286,7 @@ if __name__ == "__main__":
 				logger.warning("Interleaving is not supported for ZB schedules")
 			replace_linear_with_linear_dw(model, rank)
 		case _:
-			raise ValueError(f"Unknown schedule {args.schedule}")
+			raise ValueError(f"Unknown scheduler {args.scheduler}")
 
 	pipe = Pipeline(
 		copy.deepcopy(model),
@@ -321,7 +323,8 @@ if __name__ == "__main__":
 			if pipe.placement[-1] != 0:
 				y = torch.empty_like(z)
 				dist.recv(y, pipe.placement[-1])
-				torch.cuda.synchronize()
+			else:
+				y = torch.cat(y, dim=0).cuda()
 
 			assert torch.allclose(y, z, rtol=relative_tolerance, atol=absolute_tolerance), (
 				f"Wrong output for pipelined model. Difference norm = {torch.linalg.norm(y - z)}"
@@ -329,7 +332,13 @@ if __name__ == "__main__":
 			print("Test passed successfully")
 
 		elif rank == pipe.placement[-1]:
+			y = torch.cat(y, dim=0).cuda()
 			dist.send(y, 0)
+
+	except Exception as e:
+		traceback.print_exc()
+		print(e)
+
 	finally:
 		pipe.clear()
 		dist.destroy_process_group()

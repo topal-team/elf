@@ -181,11 +181,6 @@ class PipelineBlock:
 		# Strategy manager to handle RBF and RBB strategies
 		self.remat_manager = RematManager(self)
 
-		self.recv_fwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-		self.recv_bwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-		self.send_fwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-		self.send_bwd_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-
 	def __str__(self) -> str:
 		return f"Rank {self.rank} - Layer {self.id}"
 
@@ -410,8 +405,7 @@ class PipelineBlock:
 
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
 				logger.debug(f"{self} - Sending outputs to rank {rank}")
-				with torch.cuda.stream(self.send_fwd_stream):
-					dist.isend(outputs, rank, group=self.pp_group)
+				dist.isend(outputs, rank, group=self.pp_group)
 
 	def send_backward(self, mb_id, **options):
 		"""
@@ -431,8 +425,7 @@ class PipelineBlock:
 
 			rank = self.placement[dst]
 			logger.debug(f"{self} - Sending gradients to rank {rank}")
-			with torch.cuda.stream(self.send_bwd_stream):
-				dist.isend(grads, rank, group=self.pp_group)
+			dist.isend(grads, rank, group=self.pp_group)
 
 	def recv_forward(self, mb_id, mb_size, **options):
 		"""
@@ -460,8 +453,7 @@ class PipelineBlock:
 
 			rank = self.placement[src]
 			logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
-			with torch.cuda.stream(self.recv_fwd_stream):
-				work = dist.irecv(buffer, rank, group=self.pp_group)
+			work = dist.irecv(buffer, rank, group=self.pp_group)
 
 			var.set(var.to_process, mb_id, (work, buffer.requires_grad_(True)))
 
@@ -487,8 +479,7 @@ class PipelineBlock:
 
 				rank = self.placement[src]
 				logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
-				with torch.cuda.stream(self.recv_bwd_stream):
-					work = dist.irecv(buffer, rank, group=self.pp_group)
+				work = dist.irecv(buffer, rank, group=self.pp_group)
 
 				target.set(target.to_process, mb_id, (work, buffer))
 
