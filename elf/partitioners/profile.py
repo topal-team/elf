@@ -93,7 +93,6 @@ class Profiler(torch.fx.Interpreter):
 def get_memory(x):
 	"""
 	Estimates memory used by ``x`` if it is a tensor
-	If ``x`` is an iterable or dictionary, recursively count memory for every tensor contained in it
 
 	:param x: object to estimate
 	:type x: Any

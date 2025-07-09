@@ -108,7 +108,7 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 	)
 
 	# Sequence length
-	add("--seq-len", type=int, help="Sequence length")
+	add("--seq-len", "--seqlen", type=int, help="Sequence length")
 
 	# Attention heads
 	add(

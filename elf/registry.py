@@ -33,7 +33,7 @@ T = TypeVar("T", bound=Callable[..., object])
 class Registry(Generic[T]):
 	"""Minimal dictionary-backed registry.
 
-	:param name: Human-readable name used in error messages (e.g. *"scheduler"*).
+	:param name: Name used in error messages (e.g. *"scheduler"*).
 	:type name: str
 	"""
 
@@ -42,7 +42,6 @@ class Registry(Generic[T]):
 		self._values: Dict[str, T] = {}
 		self._descriptions: Dict[str, str] = {}
 
-	# Private helper
 	def _add(self, keys: str | Iterable[str], obj: T, description: str = "") -> None:
 		"""Internal primitive that inserts *(key → obj)*, with duplicate-check."""
 		if isinstance(keys, str):

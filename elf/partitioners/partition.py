@@ -3,7 +3,6 @@ API and main utils for graph partition
 """
 
 import torch
-import numpy as np
 
 from ..registry import PARTITIONERS
 from .tracing import try_extract_graph
@@ -261,7 +260,7 @@ def partition_graph(model, n, sample, partitioner="naive"):
 		blocks.append(subgraph)
 		logger.debug(f"Part {i} - signature = {signatures[i]}")
 
-	estimated_times = [sum([np.median(times.get(n.name, 0)) for n in part]) for part in parts]
+	estimated_times = [sum([times.get(n.name, 0) for n in part]) for part in parts]
 	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
 	logger.info(f"Estimated times : {['%.3fs' % t for t in estimated_times]}")
 	logger.info(f"Estimated memory transfers : {['%.1fMB' % t for t in estimated_mems]}")

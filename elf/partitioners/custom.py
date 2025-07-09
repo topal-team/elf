@@ -2,8 +2,6 @@
 Handmade partition methods
 """
 
-import numpy as np
-
 
 def split_graph(graph, times, memories, n=3):
 	"""
@@ -24,7 +22,7 @@ def split_graph(graph, times, memories, n=3):
 	:rtype: List[List[fx.Node]]
 	"""
 	nodes = list(graph.graph.nodes)
-	total_time = sum(np.median(times.get(node.name, 0)) for node in nodes)
+	total_time = sum(times.get(node.name, 0) for node in nodes)
 	target_time = total_time / n
 
 	parts = []
@@ -32,7 +30,7 @@ def split_graph(graph, times, memories, n=3):
 	current_time = 0
 
 	for node in nodes:
-		node_time = np.median(times.get(node.name, 0))
+		node_time = times.get(node.name, 0)
 		if current_time > target_time * (len(parts) + 1) and len(parts) < n:
 			parts.append(current_part)
 			current_part = []
@@ -49,7 +47,7 @@ def _evaluate_partition_balance(parts, times):
 	"""
 	if any(len(part) == 0 for part in parts):
 		return -100
-	loads = [sum(np.median(times.get(node.name, 0)) for node in part) for part in parts]
+	loads = [sum(times.get(node.name, 0) for node in part) for part in parts]
 	avg_load = sum(loads) / len(loads)
 	balance = avg_load / max(loads)
 	return balance
@@ -85,7 +83,6 @@ def split_graph_constrained(graph, times, memories, n):
 		new_parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio)
 		new_score = _evaluate_partition_balance(new_parts, times)
 		if new_score < score:
-			parts = new_parts
 			break
 
 		parts = new_parts
@@ -102,7 +99,7 @@ def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio):
 		raise ValueError("Failed to partition the graph: imbalance ratio set to 1")
 
 	nodes = list(graph.graph.nodes)
-	total_time = sum(np.median(times.get(node.name, 0)) for node in nodes)
+	total_time = sum(times.get(node.name, 0) for node in nodes)
 	target_time = total_time / n
 	imbalance_margin = imbalance_ratio * target_time
 
@@ -122,7 +119,7 @@ def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio):
 			current_time = 0
 			needed_inputs = []
 		parts[current_part].insert(0, node)
-		current_time += np.median(times.get(node.name, 0))
+		current_time += times.get(node.name, 0)
 		for dep in node.all_input_nodes:
 			if dep.name not in needed_inputs and dep not in parts[current_part]:
 				needed_inputs.append(dep.name)
