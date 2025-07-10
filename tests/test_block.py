@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import pytest
 
-from elf.block import PipelineBlock, Variable
+from elf.execution.block import PipelineBlock, Variable
 from elf.utils import TensorMetadata
 from elf.partitioners.utils import Signature
 
