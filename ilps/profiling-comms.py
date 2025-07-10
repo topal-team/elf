@@ -23,22 +23,24 @@ import os
 import sys
 import json
 import argparse
+import traceback
+
 import torch
 import torch.distributed as dist
 
 sys.path.append(".")
 
-from models.utils import get_dtype
+from models.utils import get_dtype, add_transformer_args, model_config_from_args
+
+
+# -----------------------------------------------------------------------------
+# CLI parsing
+# -----------------------------------------------------------------------------
 
 
 def parse_args():
 	parser = argparse.ArgumentParser(description="Measure communication time between GPUs")
-	parser.add_argument(
-		"--config-file",
-		type=str,
-		default="ilps/configs/default.json",
-		help="Path to the configuration file to update",
-	)
+	# Script-specific arguments
 	parser.add_argument(
 		"--output-file",
 		type=str,
@@ -53,6 +55,10 @@ def parse_args():
 	parser.add_argument(
 		"--precision", type=str, default="fp32", help="Precision to use (default: fp32)"
 	)
+
+	# Add model hyper-parameter flags (provides --config-file, etc.)
+	add_transformer_args(parser, model_type="chain")
+
 	return parser.parse_args()
 
 
@@ -67,23 +73,23 @@ def main():
 		print("Exiting without making changes to the configuration file.")
 		sys.exit(1)
 
-	# Read the configuration file to get model parameters
-	config_file = args.config_file
+	# ------------------------------------------------------------------
+	# Build model configuration using shared helper
+	# ------------------------------------------------------------------
+	config = model_config_from_args(args, model_type="chain")
+	hidden_size = config["hidden_dim"]
+	seq_len = config["seq_len"]
+	print("Using model configuration from CLI / config file:")
+	print(f"  hidden_dim: {hidden_size}")
+	print(f"  seq_len: {seq_len}")
+
+	# Load JSON config (if provided) for later update of Tcomm
+	config_file = args.config_file or "ilps/configs/default.json"
 	try:
 		with open(config_file, "r") as f:
-			config = json.load(f)
-
-		# Get hidden size and sequence length from config
-		hidden_size = config["model"]["hidden_dim"]
-		seq_len = config["model"]["seq_len"]
-		print(f"Using model configuration from {config_file}:")
-		print(f"  hidden_dim: {hidden_size}")
-		print(f"  seq_len: {seq_len}")
-	except Exception as e:
-		print(f"Error reading configuration file: {e}")
-		print("Using default values")
-		hidden_size = 1024
-		seq_len = 256
+			config_json = json.load(f)
+	except Exception:
+		config_json = None
 
 	rank = int(os.environ.get("RANK", "0"))
 	local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -159,20 +165,24 @@ def main():
 		print(f"Average communication time: {avg_comm:.3f} ms")
 		print(f"Message size: {x.element_size() * x.nelement() / 1024 / 1024:.2f} MB")
 
-		# Update configuration file
-		output_file = args.output_file if args.output_file else config_file
+		# Update configuration file if we managed to read it
+		if config_json is not None:
+			output_file = args.output_file if args.output_file else config_file
 
-		try:
-			for stage in config["stages"]:
-				stage["Tcomm"] = avg_comm
+			try:
+				for stage in config_json["stages"]:
+					stage["Tcomm"] = avg_comm
 
-			os.makedirs(os.path.dirname(output_file), exist_ok=True)
-			with open(output_file, "w") as f:
-				json.dump(config, f, indent=2)
+				os.makedirs(os.path.dirname(output_file), exist_ok=True)
+				with open(output_file, "w") as f:
+					json.dump(config_json, f, indent=2)
 
-			print(f"Updated Tcomm value ({avg_comm:.6f} ms) in {output_file}")
-		except Exception as e:
-			print(f"Error updating configuration file: {e}")
+				print(f"Updated Tcomm value ({avg_comm:.6f} ms) in {output_file}")
+			except Exception as e:
+				print(f"Error updating configuration file: {e}")
+				print(traceback.format_exc())
+		else:
+			print("No configuration JSON provided/read; skipping Tcomm update.")
 
 	if dist.is_initialized():
 		dist.destroy_process_group()

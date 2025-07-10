@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import argparse
 import logging
 
@@ -11,10 +12,14 @@ sys.path.append(".")
 
 from elf import Pipeline, PipelineConfig, get_sources_targets_sequential, Placement
 from elf.zb_utils import replace_linear_with_linear_dw
-from elf.scheduling import JsonScheduler
 from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import get_handcrafted_partition, meta_to_device
-from models.utils import add_transformer_args, build_model_from_args, get_dtype
+from models.utils import (
+	add_transformer_args,
+	build_model_from_args,
+	get_dtype,
+	model_config_from_args,
+)
 
 
 class DummyOptimizer:
@@ -129,9 +134,9 @@ def parse_args():
 	parser.add_argument(
 		"--opt-dtype",
 		type=str,
-		default="float32",
+		default=None,
 		choices=["float16", "bfloat16", "float32", "fp16", "bf16", "fp32"],
-		help="Optimizer data type",
+		help="Optimizer data type (defaults to same as dtype)",
 	)
 	parser.add_argument(
 		"--opt-device", type=str, default="cuda", choices=["cpu", "cuda"], help="Optimizer device"
@@ -186,8 +191,12 @@ def main():
 	args = parse_args()
 	set_loglevel(args.log)
 
-	dtype = get_dtype(args.dtype)
-	opt_dtype = get_dtype(args.opt_dtype)
+	# Reading config file twice (once here and later with build_model_from_args)
+	# Because if dtype is in the file (and not args), we want to use the one in the file
+	config = model_config_from_args(args, model_type="full")
+
+	dtype = config["dtype"]
+	opt_dtype = get_dtype(args.opt_dtype) if args.opt_dtype is not None else dtype
 	opt_device = torch.device(args.opt_device)
 
 	pp = world_size // args.dp
@@ -204,8 +213,9 @@ def main():
 
 	if args.scheduler == "file":
 		assert args.schedule_file is not None, "Schedule file is required for file scheduler"
-		scheduler = JsonScheduler(args.schedule_file)
-		SCHEDULERS.register("file", scheduler)
+		with open(args.schedule_file, "r") as f:
+			schedule_dict = json.load(f)
+		scheduler = SCHEDULERS["fixed"](schedule_dict)
 	else:
 		scheduler = args.scheduler
 
@@ -230,11 +240,11 @@ def main():
 		if rank == 0:
 			model = meta_to_device(model, "cuda")
 
-	config = PipelineConfig(
+	pipe_config = PipelineConfig(
 		partitioner=args.partitioner, scheduler=scheduler, placement="auto", pp=pp, dp=args.dp
 	)
 
-	pipeline = Pipeline(parts, sample, config=config, sources=sources, targets=targets)
+	pipeline = Pipeline(parts, sample, config=pipe_config, sources=sources, targets=targets)
 
 	dist.barrier()
 	torch.cuda.synchronize()
@@ -286,7 +296,7 @@ def main():
 	if rank == 0:
 		time.sleep(world_size * 0.1)
 		print(
-			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.dp * batch_size * args.niters * args.seq_len) / training_time:.2f} tokens/s",
+			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.dp * batch_size * args.niters * config['seq_len']) / training_time:.2f} tokens/s",
 			flush=True,
 		)
 

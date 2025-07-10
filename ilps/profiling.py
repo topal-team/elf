@@ -28,19 +28,20 @@ from torch.utils.checkpoint import checkpoint
 sys.path.append(".")
 
 from models.simple import Attention, ChainTransformer
-from models.utils import get_sdpa, get_dtype
+from models.utils import add_transformer_args, model_config_from_args
 from elf.zb_utils import LayerDW, replace_linear_with_linear_dw
 from elf.utils import Timer
 
-# Default model hyperparameters
-default_config = {"hidden_dim": 4096, "seq_len": 1024, "num_heads": 32, "dropout": 0.1}
+# -----------------------------------------------------------------------------
+# CLI parsing
+# -----------------------------------------------------------------------------
 
 
 def parse_args():
 	parser = argparse.ArgumentParser(
 		description="Measure transformer performance with different configurations"
 	)
-	parser.add_argument("--config", "-c", type=str, help="JSON file with model hyperparameters")
+	# Script-specific arguments
 	parser.add_argument(
 		"--output",
 		"-o",
@@ -66,32 +67,23 @@ def parse_args():
 		"--iterations",
 		"-i",
 		type=int,
-		default=100,
-		help="Number of iterations to run for each configuration (default: 100)",
+		default=30,
+		help="Number of iterations to run for each configuration (default: 30)",
 	)
-	parser.add_argument(
-		"--sdp-backend", "-sdp", type=str, default=None, help="SDP backend to use (default: None)"
-	)
-	parser.add_argument(
-		"--precision", "-p", type=str, default="fp32", help="Precision to use (default: fp32)"
-	)
+
+	# Add model hyper-parameter flags from utils (includes --sdp-backend, --config-file, ...)
+	add_transformer_args(parser, model_type="chain")
+
 	return parser.parse_args()
 
 
-def load_config(config_path=None):
-	config = default_config.copy()
-
-	if config_path:
-		try:
-			with open(config_path, "r") as f:
-				user_config = json.load(f)
-			config.update(user_config["model"])
-			print(f"Loaded configuration from {config_path}")
-		except Exception as e:
-			print(f"Error loading config from {config_path}: {e}")
-			print("Using default configuration")
-
-	return config
+def create_model(config, n):
+	config["n_blocks"] = n
+	dtype = config.pop("dtype")
+	model = ChainTransformer(**config).to(dtype).to("cuda")
+	replace_linear_with_linear_dw(model, "cuda")
+	config["dtype"] = dtype
+	return model
 
 
 def bparams(model):
@@ -100,24 +92,6 @@ def bparams(model):
 			module.move_last_computed("input", 0)
 			module.move_last_computed("grad_output", 0)
 			module.backward(0)
-
-
-def create_model(n_blocks, config, sdp_backend, precision):
-	model = (
-		ChainTransformer(
-			config["hidden_dim"],
-			n_blocks,
-			config["seq_len"],
-			config["num_heads"],
-			config["dropout"],
-			config["ffn_dim"],
-			sdp_backend=get_sdpa(sdp_backend),
-		)
-		.to(precision)
-		.cuda()
-	)
-	replace_linear_with_linear_dw(model, "cuda:0")
-	return model
 
 
 def measure_times(model, batch_size, n_iter, precision):
@@ -260,9 +234,11 @@ def apply_checkpointing(model):
 
 def main():
 	args = parse_args()
-	config = load_config(args.config)
 
-	precision = get_dtype(args.precision)
+	# Build the model configuration using the shared helper
+	config = model_config_from_args(args, model_type="chain")
+
+	precision = config.get("dtype")
 
 	# Parse block sizes and batch sizes from command line
 	block_sizes = [int(x) for x in args.blocks.split(",")]
@@ -291,7 +267,7 @@ def main():
 	n = block_sizes[0]
 	bs = batch_sizes[0]
 	print(f"\nMeasuring memory for {n} blocks, batch size {bs}:")
-	model = create_model(n, config, args.sdp_backend, precision)
+	model = create_model(config, n)
 	mfp, mbp = measure_memory_only(model, bs, precision)
 	stats["mfp_per_block_batch"] = mfp
 	stats["mbp_per_block_batch"] = mbp
@@ -302,7 +278,7 @@ def main():
 		for bs in batch_sizes:
 			print(f"\nMeasuring for {n} blocks, batch size {bs}:")
 			try:
-				model = create_model(n, config, args.sdp_backend, precision)
+				model = create_model(config, n)
 				times, mems, param_size_per_block = measure_times(model, bs, n_iter, precision)
 
 				stats["no_recompute"]["times"].append(times)
@@ -318,7 +294,7 @@ def main():
 		for bs in batch_sizes:
 			print(f"\nMeasuring recompute for {n} blocks, batch size {bs}:")
 			try:
-				model = create_model(n, config, args.sdp_backend, precision)
+				model = create_model(config, n)
 				model = apply_checkpointing(model)
 				times, mems, param_size_per_block = measure_times(model, bs, n_iter, precision)
 				stats["recompute"]["times"].append(times)

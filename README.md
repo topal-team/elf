@@ -60,9 +60,10 @@ from elf.registry import SCHEDULERS, PARTITIONERS, TRACERS
 Register a new component by key:
 
 ```python
-@PARTITIONERS.register("my_algo", description="paper XYZ 2024")
 def my_partitioner(graph, times, memories, n_parts):
-...
+    ...
+
+PARTITIONERS.register("my_algo", my_partitioner, description="Algo from paper ...")
 ```
 
 Then simply reference it when building a pipeline: `Pipeline(..., partitioner="my_algo")`.

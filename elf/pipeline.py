@@ -1,5 +1,5 @@
 """
-Pipeline API and setup
+Pipeline API and orchestration
 """
 
 import os
@@ -160,7 +160,7 @@ class Pipeline:
 		:return: result of the forward pass and loss value if the last block of the pipeline is managed by this process
 		:rtype: (List[Tensor], Tensor) or (None, None)
 		.. warning::
-			The result is automatically offloaded to CPU. Since merging it back would cause a sync point, it is currently returned as a list of tensors, one for each micro-batch.
+			The result is automatically offloaded to CPU. Since merging it back would cause a sync point, it is currently returned as a list of tensors, one for each micro-batch. Avoid merging it back to a single tensor between iterations if you want to avoid performance issues.
 		"""
 		# We expect a list of arguments, not a single tensor
 		if isinstance(batch, torch.Tensor):
@@ -529,6 +529,8 @@ class Pipeline:
 				else:
 					send_models(blocks_on_d, dst=d, group=self.pp_group)
 					dist.send_object_list(signatures, dst=d, group=self.pp_group)
+					for block in blocks_on_d:
+						block.cpu()
 
 		elif rank < self.pp:
 			# First pipeline share to their DP replicas

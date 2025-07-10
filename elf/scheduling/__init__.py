@@ -51,4 +51,8 @@ SCHEDULERS.register(
 )
 
 
-__all__ = ["schedule_to_str", "check_schedule_validity", "reorder_communications", "JsonScheduler"]
+SCHEDULERS.register(
+	"fixed", FixedSchedule, "Fixed schedule. Use a dictionary to specify the schedule."
+)
+
+__all__ = ["schedule_to_str", "check_schedule_validity", "reorder_communications"]

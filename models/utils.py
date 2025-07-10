@@ -24,6 +24,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import json
+
+from pathlib import Path
 from typing import Literal, Any, Dict
 
 import torch
@@ -75,6 +78,43 @@ def get_sdpa(sdpa):
 			raise ValueError(f"Invalid SDPA implementation: {sdpa}")
 
 
+def _load_config_file(path: str) -> Dict[str, Any]:
+	"""Load a JSON or YAML configuration file and return it as a dictionary.
+
+	The config file is expected to have the following structure:
+	{
+		"model": {
+			"hidden_dim": ...,
+			...
+		},
+	}
+
+	The file can contain any subset of the model configuration parameters.
+	The CLI flags will ultimately take precedence over these values.
+	.. warning::
+		The keys in the config file must match the parameter names in the model, not the CLI flags.
+	"""
+	file_path = Path(path)
+	if not file_path.exists():
+		raise FileNotFoundError(f"Config file '{path}' does not exist")
+
+	ext = file_path.suffix.lower()
+	if ext == ".json":
+		with file_path.open("r", encoding="utf-8") as fh:
+			return json.load(fh)
+	elif ext in (".yml", ".yaml"):
+		try:
+			import yaml  # type: ignore
+		except ModuleNotFoundError as exc:
+			raise ModuleNotFoundError(
+				"PyYAML is required to read YAML configuration files. Install it with `pip install pyyaml`."
+			) from exc
+		with file_path.open("r", encoding="utf-8") as fh:
+			return yaml.safe_load(fh)
+	else:
+		raise ValueError(f"Unsupported config file extension '{ext}'. Use .json, .yml or .yaml.")
+
+
 def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -> None:
 	"""Register the arguments that are shared by both transformer variants.
 
@@ -94,6 +134,15 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 			choices=list(_FULL_PRESETS.keys()),
 			help="Preset model configuration (overridden by explicit flags)",
 		)
+
+	# External configuration file
+	add(
+		"--config-file",
+		dest="config_file",
+		type=str,
+		metavar="FILE",
+		help="Path to a JSON or YAML configuration file (overridden by explicit flags)",
+	)
 
 	# Hidden dimension of the model
 	add("--hidden-dim", type=int, help="Hidden dimension of the transformer")
@@ -136,7 +185,7 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 	add(
 		"--dtype",
 		type=str,
-		default="float32",
+		default=None,
 		choices=["float16", "bfloat16", "float32", "fp16", "fp32", "bf16"],
 		help="Floating-point precision to instantiate the model parameters with",
 	)
@@ -145,7 +194,7 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 	add(
 		"--sdp-backend",
 		type=str,
-		default="none",
+		default=None,
 		choices=["flash", "math", "efficient", "cudnn", "none"],
 		help="Scaled-dot-product attention backend to use (torch 2.1+)",
 	)
@@ -187,26 +236,45 @@ def model_config_from_args(args: argparse.Namespace, *, model_type: _ModelType) 
 	if model_type == "full" and getattr(args, "config", None):
 		cfg.update(_FULL_PRESETS[args.config])
 
+	# Load external config file if provided
+	if getattr(args, "config_file", None):
+		try:
+			cfg.update(_load_config_file(args.config_file)["model"])
+		except KeyError as e:
+			raise ValueError(
+				f"Error loading config file '{args.config_file}. Make sure it exists and has a 'model' key: {e}"
+			)
+
 	# Fill/override with CLI values
 	cfg.update(
 		{
 			"hidden_dim": args.hidden_dim if args.hidden_dim is not None else cfg.get("hidden_dim"),
 			"n_blocks": args.nblocks if args.nblocks is not None else cfg.get("n_blocks"),
-			"seq_len": args.seq_len,
+			"seq_len": args.seq_len if args.seq_len is not None else cfg.get("seq_len"),
 			"num_heads": args.num_heads if args.num_heads is not None else cfg.get("num_heads"),
-			"dropout": args.dropout,
+			"dropout": args.dropout if args.dropout is not None else cfg.get("dropout"),
 			"ffn_dim": args.ffn_dim if args.ffn_dim is not None else cfg.get("ffn_dim", None),
-			"sdp_backend": get_sdpa(args.sdp_backend),
-			"dtype": get_dtype(args.dtype),
+			"sdp_backend": args.sdp_backend if args.sdp_backend is not None else cfg.get("sdp_backend"),
+			"dtype": args.dtype if args.dtype is not None else cfg.get("dtype"),
 		}
 	)
+
+	# Defaults are added here and not in the argparse section because otherwise
+	# if the config file specifies them, they will get overwritten.
+	if "sdp_backend" in cfg:
+		cfg["sdp_backend"] = get_sdpa(cfg["sdp_backend"] or "none")
+	if "dtype" in cfg:
+		cfg["dtype"] = get_dtype(cfg["dtype"] or "float32")
 
 	if cfg["ffn_dim"] is None:
 		logger.warning(f"ffn_dim is not set, using 4 * hidden_dim = {cfg['hidden_dim'] * 4}")
 		cfg["ffn_dim"] = cfg["hidden_dim"] * 4
 
-	if model_type == "full":
+	if model_type == "full" and args.vocab_size is not None:
 		cfg["input_dim"] = args.vocab_size
+
+	if model_type == "chain":
+		cfg.pop("input_dim", None)
 
 	return cfg
 

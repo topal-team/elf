@@ -67,9 +67,9 @@ class Placement(List[int]):
 	def default(scheduler, pp):
 		if callable(scheduler):
 			logger.warning(
-				f"Placement.default() expects a scheduler name, not the scheduler object itself. Using {scheduler.__name__} as the scheduler name."
+				"Placement.default() expects a scheduler name, not the scheduler object itself. Using the default placement."
 			)
-			scheduler = scheduler.__name__
+			scheduler = ""
 
 		if scheduler == "hanayo" or scheduler == "zbv":
 			return Placement([i for i in range(pp)] + list(reversed([i for i in range(pp)])))
