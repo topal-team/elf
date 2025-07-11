@@ -272,10 +272,12 @@ def generate_zbh1_schedule(placement, n_micro_batches, signatures):
 		b += 1
 
 		for _ in range(rank):
-			_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
-			f += 1
-			_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
-			b += 1
+			if f < n_micro_batches:
+				_add_forward_pass(schedule, placement, rank, f, rank, signatures[rank])
+				f += 1
+			if b < n_micro_batches:
+				_add_backward_pass(schedule, placement, rank, b, rank, signatures[rank])
+				b += 1
 
 		while f < n_micro_batches or b < n_micro_batches or w < n_micro_batches:
 			if w < n_micro_batches:

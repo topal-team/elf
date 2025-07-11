@@ -232,10 +232,9 @@ def partition_graph(model, n, sample, partitioner, tracer):
 	:return:
 
 	        - ``n`` new modules corresponding to the partition
-	        - name of input variables for each module. Each one of them takes its inputs as named parameters with these names
-	        - name of output variables for each module. Each one of them outputs a dictionary with these names as keys
+			- ``signatures``: list of signatures for each part
 
-	:rtype: List[fx.GraphModule], List[List[str]], List[List[str]]
+	:rtype: List[fx.GraphModule], List[Signature]
 	"""
 	model.train()
 
@@ -249,6 +248,8 @@ def partition_graph(model, n, sample, partitioner, tracer):
 
 	# 3 - Partition using the selected partitioner
 	parts = split_graph(graph, times, memories, n, partitioner)
+
+	assert len(parts) == n, f"Expected {n} parts, got {len(parts)}"
 
 	# 4 - Find connections between parts
 	inputs, outputs = get_inputs_outputs(parts)

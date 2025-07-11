@@ -1,38 +1,14 @@
-import os
-from datetime import timedelta
-
 import pytest
+
+import torch
+import torch.nn as nn
 
 from elf.execution.block import PipelineBlock, Variable
 from elf.utils import TensorMetadata
 from elf.partitioners.utils import Signature
 
-import torch
-import torch.nn as nn
-import torch.distributed as dist
 
-
-@pytest.fixture(scope="session")
-def init_dist():
-	assert "RANK" in os.environ, "Cannot run multi-process tests without torchrun"
-
-	rank = int(os.getenv("RANK"))
-	local_rank = int(os.getenv("LOCAL_RANK"))
-	world_size = int(os.getenv("WORLD_SIZE"))
-	torch.cuda.set_device(local_rank)
-	try:
-		if not dist.is_initialized():
-			dist.init_process_group(
-				backend="nccl", timeout=timedelta(seconds=60), device_id=torch.device(local_rank)
-			)
-
-		yield rank, local_rank, world_size
-	finally:
-		if dist.is_initialized():
-			dist.destroy_process_group()
-
-
-@pytest.mark.single
+@pytest.mark.unit
 def test_variable_init():
 	var = Variable("test", peer=1, group=None)
 	assert var.name == "test"
@@ -45,7 +21,7 @@ def test_variable_init():
 	assert isinstance(var.to_send, list)
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_variable_wait_and_pop():
 	var = Variable("test", peer=1, group=None)
 	tensor = torch.randn(2, 3)
@@ -56,7 +32,7 @@ def test_variable_wait_and_pop():
 	assert all(value is None for value in var.to_process)
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_variable_get_buffer():
 	var = Variable("test", peer=1, group=None)
 	tensor = torch.randn(2, 3)
@@ -67,7 +43,7 @@ def test_variable_get_buffer():
 	assert buffer.dtype == tensor.dtype
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_pipeline_block_init():
 	model = nn.Linear(10, 5)
 	placement = [0, 1, 2]
@@ -87,7 +63,7 @@ def test_pipeline_block_init():
 	assert block.output_variables[0][0].name == "output"
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_pipeline_block_forward():
 	model = nn.Linear(2, 2)
 	model.weight.data = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
@@ -111,7 +87,7 @@ def test_pipeline_block_forward():
 	assert torch.allclose(actual, expected)
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_pipeline_block_backward():
 	model = nn.Linear(2, 2)
 	model.weight.data = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
@@ -137,71 +113,9 @@ def test_pipeline_block_backward():
 	block.backward_inputs(0)
 	block.backward_params(0)
 
-	# Check input gradients
 	expected_input_grad = torch.tensor([[4.0, 6.0]], device=device)
 	actual_input_grad = block.input_variables[0].get(block.input_variables[0].to_send, 0)
 	assert torch.allclose(actual_input_grad, expected_input_grad)
 
-	# Check weight gradients
 	expected_weight_grad = torch.tensor([[1.0, 2.0], [1.0, 2.0]], device=device)
 	assert torch.allclose(model.weight.grad, expected_weight_grad)
-
-
-@pytest.mark.multi
-def test_block_communication(init_dist):
-	rank, local_rank, world_size = init_dist
-
-	if world_size < 2:
-		pytest.skip("This test needs at least 2 processes to run")
-		return
-
-	# Create two connected blocks on different ranks
-	if rank == 0:
-		model = nn.Linear(2, 2)
-		model.weight.data = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device=local_rank)
-		model.bias.data = torch.tensor([0.1, 0.2], device=local_rank)
-
-		signature = Signature(inputs=["input"], outputs=["output"], sources=[None], targets=[[1]])
-
-		block = PipelineBlock(
-			model=model, id_=0, placement=[0, 1], signature=signature, pp_group=None, dp_group=None
-		)
-
-		# Forward pass
-		input_tensor = torch.tensor([[1.0, 2.0]], device=local_rank)
-		block.input_variables[0].set(block.input_variables[0].to_process, 0, (None, input_tensor))
-		block.forward(0)
-
-		# Send output to rank 1
-		block.send_forward(0, dst=1)
-
-		# Receive gradients from rank 1 for backward
-		block.recv_backward(0, mb_size=1, src=1)
-		block.backward_inputs(0)
-		block.backward_params(0)
-
-	elif rank == 1:
-		model = nn.Linear(2, 2)
-		model.weight.data = torch.tensor([[0.5, 0.6], [0.7, 0.8]], device=local_rank)
-		model.bias.data = torch.tensor([0.3, 0.4], device=local_rank)
-
-		signature = Signature(inputs=["input"], outputs=["output"], sources=[0], targets=[[None]])
-
-		block = PipelineBlock(
-			model=model, id_=1, placement=[0, 1], signature=signature, pp_group=None, dp_group=None
-		)
-
-		# Receive input from rank 0
-		block.recv_forward(0, mb_size=1, src=0)
-		block.forward(0)
-
-		# Create gradients and send back
-		grad_tensor = torch.tensor([[1.0, 1.0]], device=local_rank)
-		block.output_variables[0][0].set(
-			block.output_variables[0][0].to_process, 0, (None, grad_tensor)
-		)
-		block.backward_inputs(0)
-		block.backward_params(0)
-		block.send_backward(0, dst=0)
-
-	dist.barrier()  # Ensure both processes complete

@@ -1,10 +1,15 @@
-from elf.partitioners.utils import Signature
-from elf.scheduling import Operation, OperationType
-from elf.registry import SCHEDULERS
 import pytest
 
+from elf.registry import SCHEDULERS
+from elf.scheduling import Operation, OperationType
+from elf.partitioners.utils import (
+	Signature,
+	get_sources_targets_sequential,
+	signatures_from_sources_targets,
+)
 
-@pytest.mark.single
+
+@pytest.mark.unit
 def test_afab():
 	placement = [0, 1]
 	n_micro_batches = 2
@@ -55,7 +60,7 @@ def test_afab():
 	]
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_1f1b():
 	placement = [0, 1]
 	n_micro_batches = 4
@@ -222,27 +227,43 @@ def check_validity(schedule, placement, n_micro_batches):
 	assert n_all_reduce_param_grads == n_stages
 
 
-@pytest.mark.single
-@pytest.mark.skip("Need to update that test with src/dst")
-def test_schedule():
-	scheduler = SCHEDULERS["afab"]
-	for placement in [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]]:
-		for n_micro_batches in [2, 4, 8]:
-			schedule = scheduler(placement, n_micro_batches)
-			check_validity(schedule, placement, n_micro_batches)
+@pytest.mark.unit
+def test_schedulers():
+	setups = {
+		"gpipe": {
+			"placements": [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]],
+			"n_micro_batches": [2, 4, 8],
+		},
+		"1f1b": {
+			"placements": [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]],
+			"n_micro_batches": [2, 4, 8],
+		},
+		"hanayo": {
+			"placements": [
+				[0, 1, 2, 3, 3, 2, 1, 0],
+				[0, 1, 2, 3, 4, 5, 6, 7, 7, 6, 5, 4, 3, 2, 1, 0],
+				[0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0],
+			],
+			"n_micro_batches": [2, 4, 8],
+		},
+		"zbh1": {"placements": [[0, 1], [0, 1, 2, 3]], "n_micro_batches": [2, 4, 8]},
+		"zbh2": {"placements": [[0, 1], [0, 1, 2, 3]], "n_micro_batches": [2, 4, 8]},
+		"zbv": {
+			# Only tested with 8 micro batches right now
+			"placements": [[0, 1, 2, 3, 3, 2, 1, 0]],
+			"n_micro_batches": [8],
+		},
+	}
 
-	scheduler = SCHEDULERS["1f1b"]
-	for placement in [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3, 0, 1, 2, 3]]:
-		for n_micro_batches in [2, 4, 8]:
-			schedule = scheduler(placement, n_micro_batches)
-			check_validity(schedule, placement, n_micro_batches)
-
-	scheduler = SCHEDULERS["hanayo"]
-	for placement in [
-		[0, 1, 2, 3, 3, 2, 1, 0],
-		[0, 1, 2, 3, 4, 5, 6, 7, 7, 6, 5, 4, 3, 2, 1, 0],
-		[0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0],
-	]:
-		for n_micro_batches in [2, 4, 8]:
-			schedule = scheduler(placement, n_micro_batches)
-			check_validity(schedule, placement, n_micro_batches)
+	for scheduler_name, setup in setups.items():
+		scheduler = SCHEDULERS[scheduler_name]
+		for placement in setup["placements"]:
+			for n_micro_batches in setup["n_micro_batches"]:
+				signatures = signatures_from_sources_targets(*get_sources_targets_sequential(placement))
+				schedule = scheduler(placement, n_micro_batches, signatures=signatures)
+				try:
+					check_validity(schedule, placement, n_micro_batches)
+				except Exception as e:
+					pytest.fail(
+						f"Scheduler '{scheduler_name}' failed with placement={placement}, n_micro_batches={n_micro_batches}: {e}"
+					)

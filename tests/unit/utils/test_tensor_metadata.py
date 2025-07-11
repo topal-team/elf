@@ -3,7 +3,7 @@ import torch
 from elf.utils import TensorMetadata, dtypes
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_metadata():
 	# Test creation from class method from_tensor
 	received = torch.tensor([dtypes.index(torch.float32), 2, 3, 4])

@@ -1,11 +1,10 @@
-from elf.partitioners.profile import *
 import pytest
-
 import copy
 import psutil
-
 import torch
 import torch.nn as nn
+
+from elf.partitioners.profile import profile_operations
 
 
 def get_current_memory():
@@ -15,7 +14,7 @@ def get_current_memory():
 		return psutil.Process().memory_info().rss
 
 
-@pytest.mark.single
+@pytest.mark.unit
 def test_profile():
 	def check_model(model, sample):
 		trace = torch.fx.symbolic_trace(copy.deepcopy(model))

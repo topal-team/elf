@@ -51,7 +51,7 @@ class Pipeline:
 		sample,
 		# Legacy arguments
 		placement="auto",
-		partitioner="metis",
+		partitioner="constrained",
 		scheduler="1f1b",
 		dp=1,
 		worker=0,

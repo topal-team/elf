@@ -3,7 +3,7 @@ Handmade partition methods
 """
 
 
-def split_graph(graph, times, memories, n=3):
+def split_graph(graph, times, memories, n):
 	"""
 	Naively splits a graph into roughly equal blocks in terms of time.
 	This algorithm does not take into account the memory used or transferred.
@@ -31,7 +31,7 @@ def split_graph(graph, times, memories, n=3):
 
 	for node in nodes:
 		node_time = times.get(node.name, 0)
-		if current_time > target_time * (len(parts) + 1) and len(parts) < n:
+		if current_time > target_time * (len(parts) + 1) and len(parts) < n - 1:
 			parts.append(current_part)
 			current_part = []
 		current_part.append(node)

@@ -8,14 +8,16 @@ import torch.nn as nn
 
 class LinearDX(torch.autograd.Function):
 	@staticmethod
-	def forward(ctx, input, linear):
+	def forward(ctx, input, weight, bias, linear):
+		# We need to pass both weight/bias AND linear to backward, because
+		# We store the input in linear.last_input, with a side-effect,
+		# but if we don't have input tensors that require grad, autograd will not automatically mark the output as needing grad.
 		ctx.linear = linear
-		input = input.detach()
-		linear.last_input = input
+		linear.last_input = input.detach()
 		ctx.save_for_backward(
-			input
+			input.detach()
 		)  # used in dL/dw, we mark it as saved here to force torch.utils.checkpoint to recompute it
-		return torch.nn.functional.linear(input, linear.weight, linear.bias)
+		return torch.nn.functional.linear(input, weight, bias)
 
 	@staticmethod
 	def backward(ctx, grad_output):
@@ -25,7 +27,7 @@ class LinearDX(torch.autograd.Function):
 			grad_input = torch.matmul(grad_output, linear.weight)
 
 		# del ctx.linear # don't delete in case of multiple backward calls
-		return grad_input, None
+		return grad_input, None, None, None
 
 
 class LayerDW(nn.Module):
@@ -149,7 +151,7 @@ class LinearDW(nn.Linear, LayerDW):
 		# LinearDW.forward -> LinearDX.forward -> LinearDX.backward -> LinearDW.backward
 
 	def forward(self, x, *args, **kwargs):
-		return LinearDX.apply(x, self, *args, **kwargs)
+		return LinearDX.apply(x, self.weight, self.bias, self, *args, **kwargs)
 
 	def backward(self, mb_id):
 		assert len(self.ctx["grad_output"]) >= mb_id, "No grad kept for backward"

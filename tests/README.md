@@ -1,47 +1,66 @@
-## How to run tests
+# Test-suite layout
 
-### All tests
-Use script `scripts/test.sh` to run all tests, or run:
-```bash
-pytest -m single .
-torchrun --nproc-per-node 4 -m pytest -m multi .
+This repository now separates **fast unit checks** from **GPU / multi-process integration**.
+Everything is driven by *pytest* markers so you can cherry-pick exactly what you want to run.
+
+```
+ tests/
+ ├─ unit/              # ≤ a few seconds, CPU-only by default
+ │   ├─ utils/         # elf.utils helpers
+ │   ├─ partitioners/  # tracing / partition logic
+ │   └─ scheduling/    # static schedule generation
+ │
+ ├─ distributed/       # require CUDA devices + torch.distributed
+ │   ├─ execution/     # PipelineBlock P2P logic
+ │   └─ pipeline/      # end-to-end pipeline runs
+ │
+ └─ conftest.py        # auto-skip GPU / distributed tests when env is missing
 ```
 
-### Run a specific test
+## Markers
+The list is declared in `pytest.ini`:
+
+| marker          | meaning | typical runtime |
+|-----------------|---------|-----------------|
+| `unit`          | CPU-only, quick           | < 1 s |
+| `integration`   | single-process GPU tests  | ~ few s |
+| `distributed`   | multi-process / NCCL      | depends on model |
+| `gpu`           | needs at least one CUDA device | |
+| `slow`          | opt-in checks that take noticeable time | |
+| `single` / `multi` | legacy aliases kept for backward compatibility | |
+
+> `conftest.py` automatically skips `gpu` / `distributed` tests if the environment cannot satisfy their requirements, so `pytest` is always safe to run on any CI worker.
+
+## Quick recipes
+Activate your venv first (user rule):
 ```bash
-pytest -k test-name
+source /home/adrien/venv/bin/activate
 ```
 
-## Graph extraction
-Output of extracted graph is the same as initial module
-``model(x) == graph.module()(x)``
-and for weights grads too. 
+Run everything that is guaranteed to be fast and CPU-safe:
+```bash
+pytest -m unit -q
+```
 
-## Profiling
-``len(times) == len(fx_nodes)``  \
-for all placeholders/outputs, ``time = 0``  \
-after profiling, all parameters and buffers are the same  \
-check that outputs/grads are the same after profiling (graph not modified) 
+Run **all** tests that don’t need multiple ranks (CPU *and* single-GPU):
+```bash
+pytest -m "not distributed" -q
+```
 
-## Graph processing
-check that output/grads are the same as before inplace removal 
+Full distributed suite on 4 GPUs:
+```bash
+torchrun --standalone --nproc_per_node 4 \
+        -m pytest -m distributed --runslow -q
+```
 
-## Partition
-Number of parts == number of parts asked for  \
-Check that output  of sequentially computing the parts is the same as the original model \
-Every part should have 1 input and 1 output node  \
-Number of computational nodes is the same for original model and sum of parts.  \
-Output names of module $i$ = Input names of module $i+1$ 
+## Legacy helpers
+`tests/test.sh` still exists for backwards compatibility but simply calls the new marker layout; feel free to remove once your CI is updated.
 
-## Schedule
-$\#fwd=\#bwd=\#mb\times pp$  \
-(and same for recv and send)  \
-$\forall mb\_id$, $\#fwd = \#bwd = pp$  \
-$\forall mb\_id$, $recv\_fwd < fw < send\_fwd < recv\_bwd < bwd < send\_bwd$ 
-$\forall bwd < all\_reduce$  \
-$\#all\_reduce = pp$ 
+## What each folder covers
+* **unit/utils** – Timer, Placement, NameMapping, TensorMetadata, etc.
+* **unit/partitioners** – FX tracing, inplace-op removal, Metis/Custom partition correctness, operation profiling.
+* **unit/scheduling** – golden patterns for AFAB / 1F1B schedulers and helper invariants.
+* **distributed/execution** – single-rank logic plus 2-GPU Variable communication path.
+* **distributed/pipeline** – 4-GPU pipeline creation, correctness, inference path.
 
-## Pipeline
-Output/Gradients of forward == normal model , for different mb_sizes \
-Parameters are correctly updated with dp  \
-No memory leakage
+This structure lets you iterate quickly while still guarding the heavyweight distributed code-paths before each release.

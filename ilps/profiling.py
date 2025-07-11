@@ -226,7 +226,7 @@ def apply_checkpointing(model):
 			original_forward = getattr(module, "forward")
 
 			def wrapped_forward(*args, **kwargs):
-				return checkpoint(original_forward, *args, **kwargs, use_reentrant=False)
+				return checkpoint(original_forward, *args, **kwargs, use_reentrant=True)
 
 			setattr(module, "forward", wrapped_forward)
 	return model
