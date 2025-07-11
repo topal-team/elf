@@ -6,6 +6,7 @@ import copy
 import torch
 import numpy as np
 from elf.utils import Timer
+from elf.zb_utils import LayerDW
 
 DONT_CUT_HERE = 2 << 24
 
@@ -154,5 +155,11 @@ def profile_operations(graph_module, input_sample, niter=10):
 			profiler.times[node.name] = 0
 		if node.op == "output":
 			profiler.times[node.name] = 0
+
+	# LayerDWs need to be reset
+	for module in graph_module.modules():
+		if isinstance(module, LayerDW):
+			module.last_input = None
+			module.last_grad_output = None
 
 	return profiler.times, profiler.memories
