@@ -11,7 +11,7 @@ MEMGPU=$5
 SLURM_OPTS="$6 $7 $8 $9"
 
 # Run profiling
-python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json -i 30
+python -u ilps/profiling.py --config $CONFIG_FILE --output $RESULTS_DIR/profiling_${CONFIG_NAME}.json
 
 # Run regression
 echo "Running regression..."

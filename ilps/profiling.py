@@ -67,8 +67,8 @@ def parse_args():
 		"--iterations",
 		"-i",
 		type=int,
-		default=30,
-		help="Number of iterations to run for each configuration (default: 30)",
+		default=10,
+		help="Number of iterations to run for each configuration (default: 10)",
 	)
 
 	# Add model hyper-parameter flags from utils (includes --sdp-backend, --config-file, ...)
@@ -107,7 +107,7 @@ def measure_times(model, batch_size, n_iter, precision):
 	print(f"Param size per block: {param_size_per_block:.3f}MB / block")
 
 	# Warmup
-	sample = model.get_sample(batch_size, precision).cuda()
+	sample = model.get_sample(batch_size, precision, device="cuda")
 	for _ in range(10):
 		y = model(sample)
 		y.sum().backward()
@@ -120,7 +120,7 @@ def measure_times(model, batch_size, n_iter, precision):
 	mems = [0, 0, 0]
 
 	for i in range(n_iter):
-		sample = model.get_sample(batch_size, precision).cuda()
+		sample = model.get_sample(batch_size, precision, device="cuda")
 		start_mem = torch.cuda.memory_allocated()
 		with Timer() as t:
 			y = model(sample)
@@ -160,7 +160,7 @@ def measure_times(model, batch_size, n_iter, precision):
 def measure_memory_only(model, batch_size, precision):
 	"""Separate function to measure only Mfp and Mbp without doing timing measurements"""
 	n_blocks = len(model.blocks)
-	sample = model.get_sample(batch_size, precision).cuda()
+	sample = model.get_sample(batch_size, precision, device="cuda")
 
 	# Warmup for initial param grads allocations
 	y = model(sample)
@@ -194,7 +194,7 @@ def measure_memory_only(model, batch_size, precision):
 			layer.clear()
 
 	torch.cuda.empty_cache()
-	sample = model.get_sample(batch_size, precision).cuda()
+	sample = model.get_sample(batch_size, precision, device="cuda")
 
 	# Measure Mbp (memory for gradients)
 	start_mem = torch.cuda.memory_allocated()

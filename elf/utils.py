@@ -180,7 +180,7 @@ class NameMapping:
 
 class Timer:
 	"""
-	Utility context to time the execution of some code
+	Utility context to time the execution of some code, in seconds.
 	Uses GPU if cuda is available, else times CPU execution
 
 	Utilisation example: ::

@@ -1,6 +1,8 @@
-import copy
 import os
 import sys
+import time
+import copy
+
 from typing import List
 
 sys.path.append(".")
@@ -17,7 +19,7 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
-	n_iterations = 10
+	n_iterations = 30
 
 	microbatch_size = 1
 	n_micro_batches = world_size * 2
@@ -39,38 +41,36 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32):
 
 	# test_correctness(model, pipe)
 
-	inputs = model.get_sample(batch_size, dtype)
-	targets = model.get_target(batch_size, dtype)
-
 	# Warmup iterations
 	for _ in range(3):
-		_ = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=microbatch_size)
-
-	del inputs, targets
+		_ = pipe(
+			model.get_sample(batch_size, dtype, device="cuda"),
+			model.get_target(batch_size, dtype, device="cuda"),
+			loss_fn,
+			split_size=microbatch_size,
+		)
 
 	torch.cuda.synchronize()
-	torch.cuda.empty_cache()
 	dist.barrier()
-
-	# Time n iterations
-	start = torch.cuda.Event(enable_timing=True)
-	end = torch.cuda.Event(enable_timing=True)
 	torch.cuda.reset_peak_memory_stats()
 
-	start.record()
-	for i in range(n_iterations):
-		torch.cuda.reset_peak_memory_stats()
-		model.zero_grad()
-		inputs = model.get_sample(batch_size, dtype)
-		targets = model.get_target(batch_size, dtype)
-		_ = pipe(inputs, targets, loss_fn, split_size=microbatch_size)
+	start_time = time.time()
 
-	dist.barrier()
+	# Time n iterations
+	for i in range(n_iterations):
+		pipe.zero_grad()
+		_ = pipe(
+			model.get_sample(batch_size, dtype, device="cuda"),
+			model.get_target(batch_size, dtype, device="cuda"),
+			loss_fn,
+			split_size=microbatch_size,
+		)
+
 	torch.cuda.synchronize()
-	end.record()
+	dist.barrier()
 	peak_mem = torch.cuda.max_memory_allocated() / (2**30)
 
-	iter_time = start.elapsed_time(end) / (n_iterations * 1000)
+	iter_time = (time.time() - start_time) / n_iterations
 
 	all_peak_mems = (
 		[torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
@@ -78,7 +78,6 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32):
 	dist.gather(torch.tensor(peak_mem, device=local_rank), all_peak_mems, dst=0)
 
 	pipe.clear()
-	del inputs, targets
 	return iter_time, all_peak_mems
 
 
@@ -129,7 +128,7 @@ def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 
 
 def get_handcrafted_partition(model, rank, placement):
-	factors = [len(model.blocks) // len(placement)] * len(placement)
+	factors = balanced_partition(len(model.blocks), placement)
 	return get_handcrafted_imbalanced_partition(model, rank, placement, factors)
 
 

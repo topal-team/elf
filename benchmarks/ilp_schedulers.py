@@ -67,6 +67,9 @@ class RematScheduler:
 		recompute_all_activations = self.solution["full_fwd"][op.block_id][op.mb_id]
 		recompute_selective_activations = self.solution["selective_fwd"][op.block_id][op.mb_id]
 
+		if recompute_all_activations == 0 and recompute_selective_activations == 0:
+			return
+
 		def checkpoint_strategy(
 			name, module, rf=recompute_all_activations, rfsr=recompute_selective_activations
 		):

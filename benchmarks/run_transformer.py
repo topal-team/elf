@@ -269,20 +269,22 @@ def main():
 	if args.profile:
 		torch.cuda.cudart().cudaProfilerStart()
 
+	torch.cuda.synchronize()
 	dist.barrier()
 	start_time = time.time()
 
 	for i in range(args.niters):
 		optimizer.zero_grad()
 		y, loss = pipeline(
-			model.get_sample(batch_size),
-			model.get_target(batch_size),
+			model.get_sample(batch_size, device="cuda"),
+			model.get_target(batch_size, device="cuda"),
 			model.loss_fn,
 			split_size=mb_size,
 			profile=args.profile,
 		)
 		optimizer.step()
 
+	torch.cuda.synchronize()
 	dist.barrier()
 	training_time = time.time() - start_time
 

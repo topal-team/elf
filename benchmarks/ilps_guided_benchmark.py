@@ -185,7 +185,7 @@ def main():
 	dtype = config.pop("dtype")
 	with torch.device("meta"):
 		model = ChainTransformer(**config).to(dtype)
-	replace_linear_with_linear_dw(model, "meta")
+		replace_linear_with_linear_dw(model, "meta")
 	log_model_info(model, int(n), rank)
 
 	if rank == 0:
