@@ -25,11 +25,8 @@ NGPUS=4
 MIN_SEQLEN=128
 MAX_SEQLEN=2048
 STEP=128
-NBLOCKS=16
 SCHEDULER="zbh2"
 MEMGPU=28000
-SDP_BACKEND="None"
-PRECISION="fp32"
 SLURM_ACCOUNT=""
 SLURM_CONSTRAINT=""
 
@@ -56,24 +53,12 @@ while [[ $# -gt 0 ]]; do
             STEP="$2"
             shift 2
             ;;
-        --nblocks)
-            NBLOCKS="$2"
-            shift 2
-            ;;
         --scheduler)
             SCHEDULER="$2"
             shift 2
             ;;
         --memgpu)
             MEMGPU="$2"
-            shift 2
-            ;;
-        --sdp-backend)
-            SDP_BACKEND="$2"
-            shift 2
-            ;;
-        --precision)
-            PRECISION="$2"
             shift 2
             ;;
         --constraint)
@@ -94,7 +79,7 @@ done
 # Ensure config file is provided
 if [ -z "$BASE_CONFIG_FILE" ]; then
     echo "Error: No config file provided"
-    echo "Usage: $0 --config <base_config_file> [--ngpus N] [--min-seqlen N] [--max-seqlen N] [--step N] [--nblocks N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME]"
+    echo "Usage: $0 --config <base_config_file> [--ngpus N] [--min-seqlen N] [--max-seqlen N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME]"
     exit 1
 fi
 
@@ -140,7 +125,7 @@ echo "Found $(echo "$SEQLEN_CONFIGS" | wc -l) sequence length configs to benchma
 for CONFIG_FILE in $SEQLEN_CONFIGS; do
     CONFIG_NAME=$(basename $CONFIG_FILE .json)
     SEQLEN=$(echo $CONFIG_NAME | grep -o "seqlen_[0-9]*" | cut -d_ -f2)
-    sbatch $SLURM_OPTS --gpus 2 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err jz.sh --no-python ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $NBLOCKS $SCHEDULER $MEMGPU $NBLOCKS $SLURM_OPTS $PRECISION $SDP_BACKEND
+    sbatch $SLURM_OPTS --gpus 2 --time=01:00:00 --job-name=seqlen-${SEQLEN} --output=logs/seqlen-${SEQLEN}.out --error=logs/seqlen-${SEQLEN}.err jz.sh --no-python ilps/run_one_ilps_seqlen_benchmark.sh $CONFIG_FILE $RESULTS_DIR $NGPUS $SCHEDULER $MEMGPU $SLURM_OPTS
 done
 
 echo "All benchmark jobs enqueued, commands are appended to file $RESULTS_DIR/run_benchmarks_${BASE_CONFIG_NAME}.sh"

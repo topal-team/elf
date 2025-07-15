@@ -11,14 +11,7 @@ from typing import List
 
 
 def generate_job_commands(
-	solutions_file: str,
-	config_file: str,
-	output_file: str,
-	base_scheduler: str,
-	ngpus: int = 1,
-	slurm_opts: str = "",
-	sdp_backend: str = "None",
-	precision: str = "fp32",
+	solutions_file: str, config_file: str, output_file: str, ngpus: int = 1, slurm_opts: str = ""
 ) -> List[str]:
 	"""Generate SLURM job commands for each n value and solution type."""
 	with open(solutions_file, "r") as f:
@@ -41,13 +34,9 @@ def generate_job_commands(
 				f"--config-file {config_file} "
 				f"--solution-file {solutions_file} "
 				f"--output-file {output_file} "
-				f"--base {base_scheduler} "
 				f"--n {n} "
 				f"--solution-type {solution_type} "
-				f"--precision {precision} "
 			)
-			if sdp_backend:
-				cmd += f"--sdp_backend {sdp_backend}"
 
 			# Create the sbatch command that uses jz.sh
 			sbatch_cmd = (
@@ -69,26 +58,16 @@ def main():
 	parser.add_argument("--solutions-file", required=True, help="Path to solutions file")
 	parser.add_argument("--config-file", required=True, help="Path to config file")
 	parser.add_argument("--output-file", required=True, help="Path to output file")
-	parser.add_argument("--base-scheduler", default="zbh2", help="Base scheduler type")
 	parser.add_argument("--ngpus", type=int, default=1, help="Number of GPUs to use per job")
 	parser.add_argument("--slurm-opts", default="", help="Additional SLURM options")
 	parser.add_argument("--output-script", help="Path to output shell script")
-	parser.add_argument("--sdp-backend", default=None, help="SDP backend")
-	parser.add_argument("--precision", default="fp32", help="Precision")
 	args = parser.parse_args()
 
 	# Create logs directory if it doesn't exist
 	os.makedirs("logs", exist_ok=True)
 
 	commands = generate_job_commands(
-		args.solutions_file,
-		args.config_file,
-		args.output_file,
-		args.base_scheduler,
-		args.ngpus,
-		args.slurm_opts,
-		args.sdp_backend,
-		args.precision,
+		args.solutions_file, args.config_file, args.output_file, args.ngpus, args.slurm_opts
 	)
 
 	if args.output_script:

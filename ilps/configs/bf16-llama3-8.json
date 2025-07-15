@@ -1,0 +1,12 @@
+{
+  "model": {
+    "hidden_dim": 4096,
+    "ffn_dim": 14336,
+    "n_blocks": 32,
+    "seq_len": 8192,
+    "num_heads": 32,
+    "dropout": 0.1,
+    "dtype": "bfloat16",
+    "sdp_backend": "cudnn"
+  }
+}

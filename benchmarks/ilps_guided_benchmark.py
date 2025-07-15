@@ -39,7 +39,7 @@ import torch.distributed as dist
 sys.path.append(".")
 from elf import replace_linear_with_linear_dw
 from models.simple import ChainTransformer, FullTransformer  # noqa: F401
-from models.utils import get_dtype, get_sdpa
+from models.utils import add_transformer_args, model_config_from_args
 from benchmarks.benchmark_utils import bench, get_handcrafted_imbalanced_partition
 from benchmarks.ilp_schedulers import RematScheduler
 
@@ -78,31 +78,6 @@ def load_results(output_file: str, restart: bool) -> Dict:
 			return json.load(f)
 	except (FileNotFoundError, json.JSONDecodeError):
 		return {}
-
-
-def load_model_config(config_file: str) -> Dict:
-	"""Load model hyperparameters from config file."""
-	with open(config_file, "r") as f:
-		config = json.load(f)
-	return config["model"]
-
-
-def create_model(
-	model_config: Dict, n: int, sdp_backend: str, precision: torch.dtype
-) -> ChainTransformer:
-	"""Create and initialize the model."""
-	hidden_size = model_config["hidden_dim"]
-	seq_len = model_config["seq_len"]
-	num_heads = model_config["n_heads"]
-	dropout = model_config["dropout"]
-
-	with torch.device("meta"):
-		model = ChainTransformer(
-			hidden_size, n, seq_len, num_heads, dropout, sdp_backend=get_sdpa(sdp_backend)
-		).to(precision)
-
-	replace_linear_with_linear_dw(model, "meta")
-	return model
 
 
 def log_model_info(model: ChainTransformer, n: int, rank: int) -> None:
@@ -175,23 +150,15 @@ def main():
 		default="results/bench-ilps-default.json",
 		help="Path to the output file",
 	)
-	parser.add_argument(
-		"--config-file",
-		type=str,
-		default="ilps/configs/default.json",
-		help="Path to the ILP config file with model hyperparameters",
-	)
 	parser.add_argument("--n", type=int, required=True, help="Specific n value to benchmark")
 	parser.add_argument(
 		"--solution-type", type=str, required=True, help="Specific solution type to benchmark"
 	)
-	parser.add_argument("--sdp-backend", type=str, default=None, help="SDP backend")
-	parser.add_argument("--precision", type=str, default="fp32", help="Precision (dtype)")
+	add_transformer_args(parser, model_type="chain")
 	args = parser.parse_args()
 	setup_logging(args.log)
 
 	rank, world_size = setup_distributed()
-	precision = get_dtype(args.precision)
 
 	# Ensure output directory exists
 	if rank == 0:
@@ -200,11 +167,6 @@ def main():
 	# Load solutions and results
 	with open(args.solution_file, "r") as f:
 		ilp_solutions = json.load(f)
-
-	# Load model hyperparameters from config file
-	model_config = load_model_config(args.config_file)
-	if rank == 0:
-		print(f"Using model config from {args.config_file}: {model_config}")
 
 	n = str(args.n)
 	if n not in ilp_solutions:
@@ -219,7 +181,11 @@ def main():
 		return
 
 	# Create and initialize model
-	model = create_model(model_config, int(n), args.sdp_backend, precision)
+	config = model_config_from_args(args, model_type="chain")
+	dtype = config.pop("dtype")
+	with torch.device("meta"):
+		model = ChainTransformer(**config).to(dtype)
+	replace_linear_with_linear_dw(model, "meta")
 	log_model_info(model, int(n), rank)
 
 	if rank == 0:
@@ -233,7 +199,7 @@ def main():
 	solution = solutions.get(args.solution_type)
 	try:
 		iter_time, peak_mems = process_solution(
-			model, solution, args.solution_type, rank, int(n), precision
+			model, solution, args.solution_type, rank, int(n), dtype
 		)
 
 		if rank == 0 and iter_time is not None:
