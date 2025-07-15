@@ -229,14 +229,14 @@ def elf(args):
 
 	for part in parts:
 		if scheduler in ["zbh1", "zbv", "zbh2"]:
-			replace_linear_with_linear_dw(part, "cpu")
+			replace_linear_with_linear_dw(part, "cuda")
 
 	sources, dsts = MyPipe.get_sources_targets_sequential(placement)
 	pipe = MyPipe.Pipeline(
 		parts,
 		None,
 		partitioner=False,
-		schedule=scheduler,
+		scheduler=scheduler,
 		placement=placement,
 		sources=sources,
 		targets=dsts,
@@ -366,7 +366,7 @@ if __name__ == "__main__":
 	device = torch.device(f"cuda:{local_rank}")
 	torch.cuda.set_device(device)
 	torch.distributed.init_process_group(
-		backend="nccl", timeout=datetime.timedelta(seconds=10)
+		backend="nccl", timeout=datetime.timedelta(seconds=10), device_id=torch.device(local_rank)
 	)  ## , device_id=device)
 	torch.manual_seed(0)
 
