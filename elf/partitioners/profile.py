@@ -65,7 +65,12 @@ class Profiler(torch.fx.Interpreter):
 
 		# Special case: modules are not in args/kwargs but in target.
 		if node.op == "call_module":
-			self.to_device(self.fetch_attr(node.target), device)
+			module = self.fetch_attr(node.target)
+			self.to_device(module, device)
+
+			# LayerDWs need to be reset
+			if isinstance(module, LayerDW):
+				module.last_input = None
 
 	def run_node(self, node):
 		# Move all inputs to the specified device
@@ -155,11 +160,5 @@ def profile_operations(graph_module, input_sample, niter=10):
 			profiler.times[node.name] = 0
 		if node.op == "output":
 			profiler.times[node.name] = 0
-
-	# LayerDWs need to be reset
-	for module in graph_module.modules():
-		if isinstance(module, LayerDW):
-			module.last_input = None
-			module.last_grad_output = None
 
 	return profiler.times, profiler.memories
