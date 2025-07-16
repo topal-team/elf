@@ -1,3 +1,7 @@
+"""
+Scheduling strategies for both computations and communications.
+"""
+
 from .scheduling import schedule_to_str, check_schedule_validity
 from .comm_scheduling import reorder_communications
 from .schedulers import *

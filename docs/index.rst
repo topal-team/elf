@@ -60,6 +60,8 @@ Pipeline Object
    :recursive:
 
    elf
+   elf.execution
+   elf.scheduling
    elf.partitioners
 
 Indices and tables

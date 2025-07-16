@@ -50,8 +50,7 @@ class Registry(Generic[T]):
 			if existing is not None and existing is not obj:
 				raise KeyError(f"{self._name!s} '{k}' already registered with a different object")
 			self._values[k] = obj
-			if description:
-				self._descriptions[k] = description
+			self._descriptions[k] = description
 
 	# Public API
 	def register(self, key: str | Iterable[str], obj: T, description: str = ""):
@@ -108,9 +107,9 @@ class Registry(Generic[T]):
 
 
 # Global registries exposed by the library
-SCHEDULERS: Registry = Registry("scheduler")
-PARTITIONERS: Registry = Registry("partitioner")
-TRACERS: Registry = Registry("tracer")
+SCHEDULERS: Registry[SchedulerFn] = Registry("scheduler")
+PARTITIONERS: Registry[PartitionerFn] = Registry("partitioner")
+TRACERS: Registry[TracerFn] = Registry("tracer")
 
 
 def resolve(var: str | Callable, registry: Registry) -> T:

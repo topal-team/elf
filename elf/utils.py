@@ -3,7 +3,6 @@ Various useful classes / functions
 """
 
 import time
-import uuid
 import logging
 
 import torch
@@ -250,91 +249,91 @@ class TimerGPU:
 		return self.start_event.elapsed_time(self.end_event) / 1000
 
 
-class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
-	"""
-	Context to offload activations on CPU
+# class activations_offloading(torch.autograd.graph.saved_tensors_hooks):
+# 	"""
+# 	Context to offload activations on CPU
 
-	Usage: ::
+# 	Usage: ::
 
-		with activations_offloading():
-			y = model(x)
-		# do stuff
-		activations_offloading().wait_for_offloading() # GPU memory for activations is freed
-		# ...
-		activations_offloading().prefetch() # GPU memory is re-allocated and activations moved back to CPU
-		# ...
-		loss.backward() # all tensors are on GPU for backward
+# 		with activations_offloading():
+# 			y = model(x)
+# 		# do stuff
+# 		activations_offloading().wait_for_offloading() # GPU memory for activations is freed
+# 		# ...
+# 		activations_offloading().prefetch() # GPU memory is re-allocated and activations moved back to CPU
+# 		# ...
+# 		loss.backward() # all tensors are on GPU for backward
 
-	.. warning::
-		Activation offloading has some known issues that cause CPU memory to be overused.
+# 	.. warning::
+# 		Activation offloading has some known issues that cause CPU memory to be overused.
 
-	"""
+# 	"""
 
-	# Singleton pattern
-	_instance = None
+# 	# Singleton pattern
+# 	_instance = None
 
-	def __new__(class_):
-		if not isinstance(class_._instance, class_):
-			class_._instance = object.__new__(class_)
-			class_._instance.events = {}
-			class_._instance.tensors = {}
-			class_._instance.stream = torch.cuda.Stream()
-			class_._instance.single = False
-		return class_._instance
+# 	def __new__(class_):
+# 		if not isinstance(class_._instance, class_):
+# 			class_._instance = object.__new__(class_)
+# 			class_._instance.events = {}
+# 			class_._instance.tensors = {}
+# 			class_._instance.stream = torch.cuda.Stream()
+# 			class_._instance.single = False
+# 		return class_._instance
 
-	def __init__(self):
-		if self.single:
-			return
-		self.single = True
+# 	def __init__(self):
+# 		if self.single:
+# 			return
+# 		self.single = True
 
-		# When forward is done, we start sending to cpu asynchronously
-		def pack_to_cpu(tensor):
-			key = uuid.uuid4()
-			self.events[key] = torch.cuda.Event()
-			packed = torch.empty(tensor.size(), device=torch.device("cpu"), dtype=tensor.dtype)
-			with torch.cuda.stream(self.stream):
-				packed.copy_(tensor, non_blocking=True)
-				self.tensors[key] = packed
-				self.events[key].record(self.stream)
-				del tensor, packed
+# 		# When forward is done, we start sending to cpu asynchronously
+# 		def pack_to_cpu(tensor):
+# 			key = uuid.uuid4()
+# 			self.events[key] = torch.cuda.Event()
+# 			packed = torch.empty(tensor.size(), device=torch.device("cpu"), dtype=tensor.dtype)
+# 			with torch.cuda.stream(self.stream):
+# 				packed.copy_(tensor, non_blocking=True)
+# 				self.tensors[key] = packed
+# 				self.events[key].record(self.stream)
+# 				del tensor, packed
 
-			return key
+# 			return key
 
-		# Ensure the data movement was finished and return the device tensor
-		def unpack_from_cpu(key):
-			# If it wasn't prefetched just copy it
-			if not self.events.get(key):
-				print("Tensor was not prefetched :/")
-				return None
+# 		# Ensure the data movement was finished and return the device tensor
+# 		def unpack_from_cpu(key):
+# 			# If it wasn't prefetched just copy it
+# 			if not self.events.get(key):
+# 				print("Tensor was not prefetched :/")
+# 				return None
 
-			self.events[key].synchronize()
-			unpacked = self.tensors[key]
-			del self.events[key]
-			del self.tensors[key]
-			return unpacked
+# 			self.events[key].synchronize()
+# 			unpacked = self.tensors[key]
+# 			del self.events[key]
+# 			del self.tensors[key]
+# 			return unpacked
 
-		super().__init__(pack_to_cpu, unpack_from_cpu)
+# 		super().__init__(pack_to_cpu, unpack_from_cpu)
 
-	# At some point we need to free memory ; this means potentially waiting for the copy to finish, so we want to do it just in time, not too early
-	def wait_for_offloading(self):
-		"""
-		Wait for every activation to be completely moved to CPU, which allows CUDA to free their memory
-		"""
-		for key in list(self.events.keys()):
-			self.events[key].synchronize()
-			self.total_size += self.tensors[key].numel() * self.tensors[key].element_size()
-		# Here all tensors are effectively copied on cpu and memory on gpu is freed
+# 	# At some point we need to free memory ; this means potentially waiting for the copy to finish, so we want to do it just in time, not too early
+# 	def wait_for_offloading(self):
+# 		"""
+# 		Wait for every activation to be completely moved to CPU, which allows CUDA to free their memory
+# 		"""
+# 		for key in list(self.events.keys()):
+# 			self.events[key].synchronize()
+# 			self.total_size += self.tensors[key].numel() * self.tensors[key].element_size()
+# 		# Here all tensors are effectively copied on cpu and memory on gpu is freed
 
-	# Copy back from device to host, asynchronously
-	def prefetch(self):
-		for key in list(self.events.keys()):
-			self.events[key] = torch.cuda.Event()
-			tensor = self.tensors[key]
-			unpacked = torch.empty(tensor.size(), dtype=tensor.dtype, device=torch.cuda.current_device())
-			with torch.cuda.stream(self.stream):
-				unpacked.copy_(tensor, non_blocking=True)
-			self.tensors[key] = unpacked
-			self.events[key].record(self.stream)
+# 	# Copy back from device to host, asynchronously
+# 	def prefetch(self):
+# 		for key in list(self.events.keys()):
+# 			self.events[key] = torch.cuda.Event()
+# 			tensor = self.tensors[key]
+# 			unpacked = torch.empty(tensor.size(), dtype=tensor.dtype, device=torch.cuda.current_device())
+# 			with torch.cuda.stream(self.stream):
+# 				unpacked.copy_(tensor, non_blocking=True)
+# 			self.tensors[key] = unpacked
+# 			self.events[key].record(self.stream)
 
 
 # TODO: instead of sending full tensors, we could send parameter/buffers metadata only

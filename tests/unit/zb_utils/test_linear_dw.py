@@ -23,12 +23,14 @@ def test_linear_dw_match_linear():
 	lin_copy.load_state_dict(ref.state_dict())
 	ldw = LinearDW(lin_copy, device=torch.device("cpu"))
 
-	y = ldw(x)
+	x2 = x.clone().detach().requires_grad_(True)
+	y = ldw(x2)
 	assert torch.allclose(y, ref_out)
 
 	ldw.move_last_computed("input", 0)
 	loss = y.sum()
 	loss.backward()
+	assert torch.allclose(x2.grad, x.grad)
 	ldw.move_last_computed("grad_output", 0)
 
 	# Now compute parameter grads via decoupled backward
