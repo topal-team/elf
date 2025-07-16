@@ -48,7 +48,7 @@ class Pipeline:
 	def __init__(
 		self,
 		model,
-		sample,
+		sample=None,
 		# Legacy arguments
 		placement="auto",
 		partitioner="constrained",
@@ -428,9 +428,9 @@ class Pipeline:
 					"No sources and targets provided, assuming sequential partitioning. If this is not what you want, please explictly provide sources and targets when creating the pipeline."
 				)
 				sources, targets = get_sources_targets_sequential(self.placement)
-			else:
-				signatures = signatures_from_sources_targets(sources, targets)
+			signatures = signatures_from_sources_targets(sources, targets)
 		else:
+			assert sample is not None, "Sample is required for partitioning"
 			try:
 				parts, signatures = self._shared_partition(model, sample)
 			except Exception as e:
