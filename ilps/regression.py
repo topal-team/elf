@@ -51,14 +51,20 @@ recompute_data = data["recompute"]
 mfp_data = data["mfp_per_block_batch"]
 mbp_data = data["mbp_per_block_batch"]
 
+# Extract feature arrays
 X_no_recomp = np.array(no_recompute_data["features"])
 y_no_recomp = np.array(no_recompute_data["times"])
-mem_no_recomp = np.array(no_recompute_data["memory"])
+
+# Memory arrays (post-op and peak)
+mem_post_no_recomp = np.array(no_recompute_data["memory_post"])
+mem_peak_no_recomp = np.array(no_recompute_data["memory_peak"])
+
 param_size_per_block = np.array(no_recompute_data["param_size_per_block"])
 
 X_recomp = np.array(recompute_data["features"])
 y_recomp = np.array(recompute_data["times"])
-mem_recomp = np.array(recompute_data["memory"])
+mem_post_recomp = np.array(recompute_data["memory_post"])
+mem_peak_recomp = np.array(recompute_data["memory_peak"])
 
 # Create interaction feature manually (n_blocks * batch_size)
 X_poly_no_recomp = np.array([X_no_recomp[:, 0] * X_no_recomp[:, 1]]).T
@@ -70,18 +76,22 @@ print(f"Features: {feature_names}")
 
 stage_config = {}
 stage_config["Mparams"] = float(np.mean(param_size_per_block))
+# Post-operation memory (matches previous behaviour)
 stage_config["M"] = []
+# Peak memory values
+stage_config["Mpeak"] = []
 
 ops = ["f", "b", "w"]
 # Update runtime memory metrics in config
 # For no recomputation
 for i in range(len(ops)):
-	stage_config["M"].append(float(np.mean(mem_no_recomp[:, i])))
+	stage_config["M"].append(float(np.mean(mem_post_no_recomp[:, i])))
+	stage_config["Mpeak"].append(float(np.mean(mem_peak_no_recomp[:, i])))
 
 
 # For recomputation
-sr_mem_kept = float(np.mean(mem_recomp[:, ops.index("f")]))
-sr_mem_freed = stage_config["M"][ops.index("f")] - sr_mem_kept
+sr_mem_kept_peak = float(np.mean(mem_peak_recomp[:, ops.index("f")]))
+sr_mem_freed_peak = stage_config["Mpeak"][ops.index("f")] - sr_mem_kept_peak
 
 
 # Run regression for timing metrics and update config
@@ -96,16 +106,16 @@ for i, name in enumerate(["Tf", "Tb", "Tw"]):
 	print(f"{name}: {coef}")
 	print(f"R-squared: {model.score(X_poly_no_recomp, y_no_recomp[:, i])}")
 
-# For recomputation
+# For recomputation (time regression)
 model = LinearRegression(fit_intercept=False)
 model.fit(X_poly_recomp, y_recomp[:, ops.index("b")])
 Tb = float(model.coef_[0])
-print(f"Tb: {Tb}")
+print(f"Tb (with SR): {Tb}")
 print(f"R-squared: {model.score(X_poly_recomp, y_recomp[:, ops.index('b')])}")
 sr_time_overhead = Tb - stage_config["T"][ops.index("b")]
 
 stage_config["forward_remat_options"] = [
-	{"name": "selective_fwd", "overhead": sr_time_overhead, "mem_freed": sr_mem_freed}
+	{"name": "selective_fwd", "overhead": sr_time_overhead, "mem_freed": sr_mem_freed_peak}
 ]
 stage_config["backward_remat_options"] = [
 	{

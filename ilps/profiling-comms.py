@@ -14,7 +14,6 @@ Arguments:
     --output_file: Path to save the updated configuration file (defaults to overwriting config_file)
     --microbatch_size: Microbatch size for communication (default: 2)
     --iterations: Number of iterations for timing (default: 1000)
-	--precision: Precision to use (default: fp32)
 
 Note: This script must be run with at least 2 GPUs using torchrun or a similar launcher.
 """
@@ -30,7 +29,7 @@ import torch.distributed as dist
 
 sys.path.append(".")
 
-from models.utils import get_dtype, add_transformer_args, model_config_from_args
+from models.utils import add_transformer_args, model_config_from_args
 
 
 # -----------------------------------------------------------------------------
@@ -51,9 +50,6 @@ def parse_args():
 	)
 	parser.add_argument(
 		"--iterations", type=int, default=1000, help="Number of iterations for timing (default: 1000)"
-	)
-	parser.add_argument(
-		"--precision", type=str, default="fp32", help="Precision to use (default: fp32)"
 	)
 
 	# Add model hyper-parameter flags (provides --config-file, etc.)
@@ -79,9 +75,11 @@ def main():
 	config = model_config_from_args(args, model_type="chain")
 	hidden_size = config["hidden_dim"]
 	seq_len = config["seq_len"]
+	dtype = config["dtype"]
 	print("Using model configuration from CLI / config file:")
 	print(f"  hidden_dim: {hidden_size}")
 	print(f"  seq_len: {seq_len}")
+	print(f"  dtype: {dtype}")
 
 	# Load JSON config (if provided) for later update of Tcomm
 	config_file = args.config_file or "ilps/configs/default.json"
@@ -99,9 +97,7 @@ def main():
 
 	microbatch_size = args.microbatch_size
 
-	x = torch.randn(
-		microbatch_size, seq_len, hidden_size, dtype=get_dtype(args.precision), device="cuda"
-	)
+	x = torch.randn(microbatch_size, seq_len, hidden_size, dtype=dtype, device="cuda")
 	# Ensure all GPUs are synchronized before starting
 	dist.barrier()
 	torch.cuda.synchronize()
