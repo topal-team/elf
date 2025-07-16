@@ -42,10 +42,10 @@ args = parser.parse_args()
 nmb = args.pp * 2
 batch_size = args.mb_size * nmb
 with torch.device("meta"):
-	model = build_model_from_args(args, model_type="full")
+	model, dtype = build_model_from_args(args, model_type="full")
 
-inputs = model.get_sample(batch_size)
-targets = model.get_target(batch_size)
+inputs = model.get_sample(batch_size, dtype)
+targets = model.get_target(batch_size, dtype)
 loss_fn = model.loss_fn
 
 assert args.nblocks >= args.pp, (

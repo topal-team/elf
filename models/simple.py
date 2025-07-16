@@ -481,7 +481,7 @@ class FullTransformer(SimpleModel):
 
 	def get_sample(self, batch_size, dtype=torch.int64, device="cpu"):
 		return torch.randint(
-			0, self.input_dim, (batch_size, self.seq_len), dtype=dtype, device=device
+			0, self.input_dim, (batch_size, self.seq_len), dtype=torch.int64, device=device
 		)  # don't accept different dtype
 
 	def get_target(self, batch_size, dtype=torch.int64, device="cpu"):

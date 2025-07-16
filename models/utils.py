@@ -17,7 +17,7 @@ Example
 >>> parser = argparse.ArgumentParser()
 >>> add_transformer_args(parser, model_type="full")
 >>> args = parser.parse_args()
->>> model = build_model_from_args(args, model_type="full")
+>>> model, dtype = build_model_from_args(args, model_type="full")
 """
 
 from __future__ import annotations
@@ -279,22 +279,24 @@ def model_config_from_args(args: argparse.Namespace, *, model_type: _ModelType) 
 	return cfg
 
 
-def build_model_from_args(args: argparse.Namespace, *, model_type: _ModelType):
-	"""Convenience wrapper that instantiates and returns the requested model.
+def build_model_from_args(
+	args: argparse.Namespace, *, model_type: _ModelType
+) -> tuple[torch.nn.Module, torch.dtype]:
+	"""Convenience utility that instantiates and returns the requested model as well as the dtype.
 
 	Example
 	-------
 	>>> parser = argparse.ArgumentParser()
 	>>> add_transformer_args(parser, model_type="chain")
 	>>> args = parser.parse_args([])  # use defaults
-	>>> model = build_model_from_args(args, model_type="chain")
+	>>> model, dtype = build_model_from_args(args, model_type="chain")
 	"""
 
 	cfg = model_config_from_args(args, model_type=model_type)
 	dtype = cfg.pop("dtype")
 
 	if model_type == "full":
-		return FullTransformer(**cfg).to(dtype)
+		return FullTransformer(**cfg).to(dtype), dtype
 	else:  # chain
 		# `input_dim` is absent from cfg in this branch by construction.
-		return ChainTransformer(**cfg).to(dtype)
+		return ChainTransformer(**cfg).to(dtype), dtype

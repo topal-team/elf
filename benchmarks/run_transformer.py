@@ -14,12 +14,7 @@ from elf import Pipeline, PipelineConfig, get_sources_targets_sequential, Placem
 from elf.zb_utils import replace_linear_with_linear_dw
 from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import get_handcrafted_partition, meta_to_device
-from models.utils import (
-	add_transformer_args,
-	build_model_from_args,
-	get_dtype,
-	model_config_from_args,
-)
+from models.utils import add_transformer_args, build_model_from_args, get_dtype
 
 
 class DummyOptimizer:
@@ -191,14 +186,6 @@ def main():
 	args = parse_args()
 	set_loglevel(args.log)
 
-	# Reading config file twice (once here and later with build_model_from_args)
-	# Because if dtype is in the file (and not args), we want to use the one in the file
-	config = model_config_from_args(args, model_type="full")
-
-	dtype = config["dtype"]
-	opt_dtype = get_dtype(args.opt_dtype) if args.opt_dtype is not None else dtype
-	opt_device = torch.device(args.opt_device)
-
 	pp = world_size // args.dp
 
 	mb_size = args.mb_size
@@ -221,7 +208,7 @@ def main():
 
 	start_time = time.time()
 	with torch.device("meta"):
-		model = build_model_from_args(args, model_type="full")
+		model, dtype = build_model_from_args(args, model_type="full")
 		replace_linear_with_linear_dw(model, "meta")
 
 	if rank == 0:
@@ -249,6 +236,9 @@ def main():
 	dist.barrier()
 	torch.cuda.synchronize()
 	partition_time = time.time() - start_time
+
+	opt_dtype = get_dtype(args.opt_dtype) if args.opt_dtype is not None else dtype
+	opt_device = torch.device(args.opt_device)
 
 	all_params = [p for block in pipeline.blocks for p in block.model.parameters() if p.requires_grad]
 	if len(all_params) == 0:
@@ -298,7 +288,7 @@ def main():
 	if rank == 0:
 		time.sleep(world_size * 0.1)
 		print(
-			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.dp * batch_size * args.niters * config['seq_len']) / training_time:.2f} tokens/s",
+			f"Times:\n\tModel creation + partition = {partition_time:.2f}s\n\tTraining ({args.niters} iters) = {training_time:.2f}s ({training_time / args.niters:.2f}s / iter)\n\tThroughput: {(args.dp * batch_size * args.niters * model.seq_len) / training_time:.2f} tokens/s",
 			flush=True,
 		)
 

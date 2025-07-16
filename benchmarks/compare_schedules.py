@@ -14,7 +14,7 @@ import torch.distributed as dist
 sys.path.append(".")
 from elf import Pipeline, get_sources_targets_sequential, replace_linear_with_linear_dw
 from elf.utils import Timer, pretty_print_params
-from models.utils import add_transformer_args, build_model_from_args, get_dtype
+from models.utils import add_transformer_args, build_model_from_args
 from benchmarks.benchmark_utils import get_handcrafted_imbalanced_partition, meta_to_device
 
 logger = logging.getLogger("benchmark")
@@ -68,10 +68,8 @@ if __name__ == "__main__":
 
 	# torch.cuda.cudart().cudaProfilerStart()
 
-	dtype = get_dtype(args.dtype)
-
 	with torch.device("meta"):
-		model = build_model_from_args(args, model_type="chain")
+		model, dtype = build_model_from_args(args, model_type="chain")
 
 	if rank == 0:
 		print(f"Model has {pretty_print_params(sum(p.numel() for p in model.parameters()))} parameters")
