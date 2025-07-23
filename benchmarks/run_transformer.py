@@ -254,20 +254,25 @@ def main():
 			model.get_sample(batch_size), model.get_target(batch_size), model.loss_fn, split_size=mb_size
 		)
 
+	data = [
+		(model.get_sample(batch_size, device="cuda"), model.get_target(batch_size, device="cuda"))
+		for _ in range(args.niters)
+	]
+
 	torch.cuda.reset_peak_memory_stats()
+	torch.cuda.synchronize()
+	dist.barrier()
 
 	if args.profile:
 		torch.cuda.cudart().cudaProfilerStart()
 
-	torch.cuda.synchronize()
-	dist.barrier()
 	start_time = time.time()
 
-	for i in range(args.niters):
+	for sample, target in data:
 		optimizer.zero_grad()
 		y, loss = pipeline(
-			model.get_sample(batch_size, device="cuda"),
-			model.get_target(batch_size, device="cuda"),
+			sample,
+			target,
 			model.loss_fn,
 			split_size=mb_size,
 			profile=args.profile,

@@ -107,10 +107,10 @@ class SimpleResNet(SimpleModel):
 
 		return x
 
-	def get_sample(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_sample(self, batch_size, dtype=torch.float32, device=None):
 		return torch.randn((batch_size, 3, 224, 224), dtype=dtype, device=device)
 
-	def get_target(self, batch_size, dtype=torch.int64, device="cpu"):
+	def get_target(self, batch_size, dtype=torch.int64, device=None):
 		return torch.randint(0, self.fc.out_features, (batch_size,), dtype=dtype, device=device)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
@@ -174,10 +174,10 @@ class SimpleCNN(SimpleModel):
 		x = self.fc2(x)
 		return x
 
-	def get_sample(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_sample(self, batch_size, dtype=torch.float32, device=None):
 		return torch.randn((batch_size, 3, 224, 224), dtype=dtype, device=device)
 
-	def get_target(self, batch_size, dtype=torch.int64, device="cpu"):
+	def get_target(self, batch_size, dtype=torch.int64, device=None):
 		return torch.randint(0, 10, (batch_size,), dtype=dtype, device=device)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
@@ -220,10 +220,10 @@ class SimpleAttention(SimpleModel):
 
 		return context
 
-	def get_sample(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_sample(self, batch_size, dtype=torch.float32, device=None):
 		return torch.randn((batch_size, 64, self.hidden_dim), dtype=dtype, device=device)
 
-	def get_target(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_target(self, batch_size, dtype=torch.float32, device=None):
 		return self.get_sample(batch_size, dtype, device)  # same
 
 	def loss_fn(self, pred, target, *args, **kwargs):
@@ -255,10 +255,10 @@ class SimpleFastAttention(SimpleModel):
 			context = F.scaled_dot_product_attention(Q, K, V).squeeze(1)
 			return context
 
-	def get_sample(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_sample(self, batch_size, dtype=torch.float32, device=None):
 		return torch.randn((batch_size, 64, self.hidden_dim), dtype=dtype, device=device)
 
-	def get_target(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_target(self, batch_size, dtype=torch.float32, device=None):
 		return self.get_sample(batch_size, dtype, device)  # same
 
 	def loss_fn(self, pred, target, *args, **kwargs):
@@ -316,10 +316,10 @@ class SimpleTransformer(SimpleModel):
 		x = self.head(x)
 		return x
 
-	def get_sample(self, batch_size, dtype=torch.int64, device="cpu"):
+	def get_sample(self, batch_size, dtype=torch.int64, device=None):
 		return torch.randint(0, self.input_dim, (batch_size, self.seq_len), dtype=dtype, device=device)
 
-	def get_target(self, batch_size, dtype=torch.int64, device="cpu"):
+	def get_target(self, batch_size, dtype=torch.int64, device=None):
 		return self.get_sample(batch_size, dtype, device)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
@@ -479,12 +479,12 @@ class FullTransformer(SimpleModel):
 		x = self.head(x)
 		return x
 
-	def get_sample(self, batch_size, dtype=torch.int64, device="cpu"):
+	def get_sample(self, batch_size, dtype=torch.int64, device=None):
 		return torch.randint(
 			0, self.input_dim, (batch_size, self.seq_len), dtype=torch.int64, device=device
 		)  # don't accept different dtype
 
-	def get_target(self, batch_size, dtype=torch.int64, device="cpu"):
+	def get_target(self, batch_size, dtype=torch.int64, device=None):
 		return self.get_sample(batch_size, dtype, device)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
@@ -526,10 +526,10 @@ class ChainTransformer(SimpleModel):
 			x = b(x)
 		return x
 
-	def get_sample(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_sample(self, batch_size, dtype=torch.float32, device=None):
 		return torch.randn((batch_size, self.seq_len, self.hidden_dim), dtype=dtype, device=device)
 
-	def get_target(self, batch_size, dtype=torch.float32, device="cpu"):
+	def get_target(self, batch_size, dtype=torch.float32, device=None):
 		return self.get_sample(batch_size, dtype, device)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
