@@ -255,10 +255,10 @@ if __name__ == "__main__":
 		case "none":
 			logging.getLogger().setLevel(100)
 
-	rank = int(os.getenv("RANK"))
-	local_rank = int(os.getenv("LOCAL_RANK"))
+	rank = int(os.getenv("RANK", os.getenv("OMPI_COMM_WORLD_RANK")))
+	local_rank = int(os.getenv("LOCAL_RANK", os.getenv("OMPI_COMM_WORLD_LOCAL_RANK")))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="nccl", device_id=torch.device(local_rank))
+	dist.init_process_group(backend="mpi", device_id=torch.device(local_rank))
 
 	match args.model:
 		case "cnn":

@@ -81,13 +81,11 @@ class Pipeline:
 		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :pyfunc:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type targets: List[Dict[str, List[int]]]
 		"""
-		if not dist.is_initialized() or "RANK" not in os.environ.keys():
+		if not dist.is_initialized():
 			logger.warning(
 				"Trying to create a pipeline but no multi-gpu distributed setup has been found."
 			)
 		ws = dist.get_world_size()
-		local_rank = int(os.getenv("LOCAL_RANK"))
-		torch.cuda.set_device(local_rank)
 
 		cfg: dict[str, Any] = {}
 		if config is not None:
@@ -192,6 +190,7 @@ class Pipeline:
 
 		# First and last block have some remaining tensors
 		for block in self.blocks:
+			block._wait_for_send_ops()
 			for var in block.input_variables:
 				var.clear()
 			for var in block.output_variables:

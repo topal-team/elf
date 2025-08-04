@@ -1,5 +1,5 @@
 #!/bin/bash
-# 
+#
 # ILPS Benchmark Runner Script
 #
 # Steps:
@@ -10,7 +10,7 @@
 # 5. Benchmarking execution strategies (ilps_guided_benchmark.py)
 #
 # Usage:
-#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE] [--sdp-backend BACKEND] [--precision PRECISION]
+#   ./ilps/run_ilps_benchmark.sh --config CONFIG_FILE [--ngpus N] [--min-blocks N] [--max-blocks N] [--step N] [--scheduler NAME] [--memgpu N] [--account NAME] [--constraint NAME] [--regression-file FILE]
 #
 # Arguments:
 #   --config: Path to the configuration file with model hyperparameters
@@ -41,50 +41,50 @@ REGRESSION_FILE=""
 # Parse named parameters
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --config)
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
-        --ngpus)
-            NGPUS="$2"
-            shift 2
-            ;;
-        --min-blocks)
-            MIN_BLOCKS="$2"
-            shift 2
-            ;;
-        --max-blocks)
-            MAX_BLOCKS="$2"
-            shift 2
-            ;;
-        --step)
-            STEP="$2"
-            shift 2
-            ;;
-        --scheduler)
-            SCHEDULER="$2"
-            shift 2
-            ;;
-        --memgpu)
-            MEMGPU="$2"
-            shift 2
-            ;;
-        --account)
-            SLURM_ACCOUNT="$2"
-            shift 2
-            ;;
-        --constraint)
-            SLURM_CONSTRAINT="$2"
-            shift 2
-            ;;
-        --regression-file)
-            REGRESSION_FILE="$2"
-            shift 2
-            ;;
-        *)
-            echo "Unknown parameter: $1"
-            exit 1
-            ;;
+    --config)
+        CONFIG_FILE="$2"
+        shift 2
+        ;;
+    --ngpus)
+        NGPUS="$2"
+        shift 2
+        ;;
+    --min-blocks)
+        MIN_BLOCKS="$2"
+        shift 2
+        ;;
+    --max-blocks)
+        MAX_BLOCKS="$2"
+        shift 2
+        ;;
+    --step)
+        STEP="$2"
+        shift 2
+        ;;
+    --scheduler)
+        SCHEDULER="$2"
+        shift 2
+        ;;
+    --memgpu)
+        MEMGPU="$2"
+        shift 2
+        ;;
+    --account)
+        SLURM_ACCOUNT="$2"
+        shift 2
+        ;;
+    --constraint)
+        SLURM_CONSTRAINT="$2"
+        shift 2
+        ;;
+    --regression-file)
+        REGRESSION_FILE="$2"
+        shift 2
+        ;;
+    *)
+        echo "Unknown parameter: $1"
+        exit 1
+        ;;
     esac
 done
 
@@ -117,14 +117,14 @@ mkdir -p results/benchmarks
 # Function to setup environment based on GPU type
 setup_gpu_env() {
     export OMP_NUM_THREADS=4
-    
+
     if [[ "$SLURM_JOB_PARTITION" == "gpu_p5" ]]; then
         module load arch/a100
         source ~/scratch/venv-a100/bin/activate
         echo "Activated A100 virtual environment."
     elif [[ "$SLURM_JOB_PARTITION" == "gpu_p6" ]]; then
         module load arch/h100 cuda/12.8.0
-        source ~/work/venv-h100/bin/activate 
+        source ~/work/venv-h100/bin/activate
         echo "Activated H100 virtual environment."
     else
         source ~/elf-dev/venv/bin/activate
@@ -162,8 +162,6 @@ else
     echo "Using provided regression file: $REGRESSION_FILE"
 fi
 
-exit 0
-
 # Run ILP solving on the front node (no GPU needed)
 if [[ -f results/ilps-solutions/$CONFIG_NAME.json ]]; then
     echo "!! Warning: results/ilps-solutions/$CONFIG_NAME.json already exists, deleting it."
@@ -173,13 +171,13 @@ fi
 source ~/elf-dev/venv/bin/activate
 
 echo "Running ILP solving on front node..."
-for nblocks in $(seq $MIN_BLOCKS $STEP $MAX_BLOCKS) ; do
+for nblocks in $(seq $MIN_BLOCKS $STEP $MAX_BLOCKS); do
     python pipeline-ilps/runall.py --config $REGRESSION_FILE \
-                --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json \
-                --processors $NGPUS --time-limit 1800 --scheduler $SCHEDULER --mem $MEMGPU
+        --nblocks $nblocks --output results/ilps-solutions/$CONFIG_NAME.json \
+        --processors $NGPUS --time-limit 600 --scheduler $SCHEDULER --mem $MEMGPU
     python pipeline-ilps/generate_baselines.py --config $REGRESSION_FILE \
-                --output results/ilps-solutions/$CONFIG_NAME.json \
-                --processors $NGPUS --nblocks $nblocks --scheduler $SCHEDULER
+        --output results/ilps-solutions/$CONFIG_NAME.json \
+        --processors $NGPUS --nblocks $nblocks --scheduler $SCHEDULER
 done
 
 echo "Solutions generated. Generating benchmark jobs..."

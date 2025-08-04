@@ -28,7 +28,7 @@ class DirectedGraph:
 		self.adjacency_list: Dict[int, List[int]] = defaultdict(list)
 		self.reverse_adjacency_list: Dict[int, List[int]] = defaultdict(list)
 		self.edges: Set[Tuple[int, int]] = set()
-		self.adjacency_matrix = np.zeros((num_nodes, num_nodes), dtype=np.bool)
+		self.adjacency_matrix = np.zeros((num_nodes, num_nodes), dtype=bool)
 
 	def add_edge(self, source: int, target: int) -> None:
 		"""

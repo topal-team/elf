@@ -1,18 +1,40 @@
 import os
-import sys
 import time
 import copy
 
 from typing import List
 
-sys.path.append(".")
-
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 
-from models.simple import FullTransformer
-from elf.zb_utils import LayerDW
+from models.simple import FullTransformer, TransformerBlock
 from elf import Pipeline, get_sources_targets_sequential
+from elf.zb_utils import LayerDW
+from elf.registry import SCHEDULERS, resolve
+from elf.scheduling.scheduling import OpOptions, OperationType
+
+
+def init_dist(backend="nccl"):
+	"""
+	Initialize the distributed environment using the given backend.
+	Works with torchrun, mpirun, or srun.
+
+	Returns:
+		local_rank: int
+		rank: int
+		world_size: int
+	"""
+
+	# Either started with torchrun, mpirun, or srun
+	local_rank = int(
+		os.getenv("LOCAL_RANK", os.getenv("OMPI_COMM_WORLD_LOCAL_RANK", os.getenv("SLURM_LOCALID")))
+	)
+	torch.cuda.set_device(local_rank)
+
+	dist.init_process_group(backend=backend, device_id=torch.device(f"cuda:{local_rank}"))
+
+	return local_rank, dist.get_rank(), dist.get_world_size()
 
 
 def bench(model, parts, scheduler, placement, dtype=torch.float32):
@@ -219,3 +241,39 @@ def test_correctness(model, pipe):
 
 	pipe.blocks[0].model.cuda()  # move it back to gpu as it was before
 	model.train()
+
+
+def get_checkpointed_scheduler(scheduler, type):
+	"""
+	Get a checkpointed scheduler.
+
+	Args:
+		scheduler: The scheduler to checkpoint.
+		type: The type of checkpointing to use.
+			- "full": Checkpoint all operations.
+			- "simple": Checkpoint only operations that are simple modules (nn.GELU, nn.LayerNorm, nn.Dropout).
+
+	Returns:
+		A checkpointed scheduler.
+	"""
+	scheduler = resolve(scheduler, SCHEDULERS)
+	if type == "full":
+
+		def checkpoint(name, module):
+			return isinstance(module, TransformerBlock)
+	elif type == "simple":
+
+		def checkpoint(name, module):
+			return isinstance(module, (nn.GELU, nn.LayerNorm, nn.Dropout))
+	else:
+		raise ValueError(f"Invalid checkpointing type: {type}")
+
+	def checkpointed_scheduler(*args, **kwargs):
+		schedule = scheduler(*args, **kwargs)
+		for op in schedule:
+			if op.op == OperationType.FORWARD:
+				op.options[OpOptions.REMAT_STRATEGY] = checkpoint
+
+		return schedule
+
+	return checkpointed_scheduler

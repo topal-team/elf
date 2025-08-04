@@ -2,7 +2,10 @@
     "model": {
         "hidden_dim": 2304,
         "seq_len": 1024,
-        "n_heads": 24,
-        "dropout": 0.1
+        "num_heads": 24,
+        "dropout": 0.1,
+        "ffn_dim": 9216,
+        "sdp_backend": null,
+        "dtype": "float32"
     }
 }

@@ -2,7 +2,7 @@
   "model": {
     "hidden_dim": 1024,
     "seq_len": 256,
-    "n_heads": 32,
+    "num_heads": 32,
     "dropout": 0.1
   }
 } 

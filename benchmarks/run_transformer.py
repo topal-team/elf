@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 import json
@@ -13,7 +12,12 @@ sys.path.append(".")
 from elf import Pipeline, PipelineConfig, get_sources_targets_sequential, Placement
 from elf.zb_utils import replace_linear_with_linear_dw
 from elf.registry import SCHEDULERS
-from benchmarks.benchmark_utils import get_handcrafted_partition, meta_to_device
+from benchmarks.benchmark_utils import (
+	get_checkpointed_scheduler,
+	get_handcrafted_partition,
+	meta_to_device,
+	init_dist,
+)
 from models.utils import add_transformer_args, build_model_from_args, get_dtype
 
 
@@ -40,7 +44,7 @@ class MixedPrecisionOptimizer:
 		self.dtype = dtype
 		self.opt_dtype = opt_dtype
 		self.opt_device = opt_device
-		self.need_master_weights = dtype != opt_dtype or opt_device != "cuda"
+		self.need_master_weights = dtype != opt_dtype or opt_device != torch.device("cuda")
 
 		if self.need_master_weights:
 			# Create master weights in optimizer precision
@@ -155,7 +159,17 @@ def parse_args():
 	parser.add_argument("--dp", type=int, default=1, help="Data parallelism degree")
 	parser.add_argument("--niters", type=int, default=10, help="Number of training iterations")
 	parser.add_argument(
+		"--checkpointing",
+		type=str,
+		default=None,
+		choices=["full", "simple"],
+		help="Checkpointing strategy",
+	)
+	parser.add_argument(
 		"--log", type=str, choices=["none", "info", "debug"], default="info", help="Log level"
+	)
+	parser.add_argument(
+		"--backend", type=str, default="nccl", choices=["nccl", "mpi"], help="Backend"
 	)
 	parser.add_argument("--profile", action="store_true", help="Profile the training")
 
@@ -176,14 +190,10 @@ def set_loglevel(log):
 
 
 def main():
-	local_rank = int(os.getenv("LOCAL_RANK"))
-	dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
-	torch.cuda.set_device(local_rank)
-
-	rank = dist.get_rank()
-	world_size = dist.get_world_size()
-
 	args = parse_args()
+
+	local_rank, rank, world_size = init_dist(args.backend)
+
 	set_loglevel(args.log)
 
 	pp = world_size // args.dp
@@ -206,6 +216,13 @@ def main():
 	else:
 		scheduler = args.scheduler
 
+	placement = (
+		Placement.default(args.scheduler, pp) * args.interleaving
+	)  # get placement before potentially changing the scheduler
+
+	if args.checkpointing is not None:
+		scheduler = get_checkpointed_scheduler(scheduler, args.checkpointing)
+
 	start_time = time.time()
 	with torch.device("meta"):
 		model, dtype = build_model_from_args(args, model_type="full")
@@ -215,7 +232,6 @@ def main():
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
 
 	if args.partitioner == "handcrafted":
-		placement = Placement.default(args.scheduler, pp) * args.interleaving
 		parts = get_handcrafted_partition(model, rank, placement)
 		sources, targets = get_sources_targets_sequential(placement)
 		args.partitioner = False
@@ -228,7 +244,7 @@ def main():
 			model = meta_to_device(model, "cuda")
 
 	pipe_config = PipelineConfig(
-		partitioner=args.partitioner, scheduler=scheduler, placement="auto", pp=pp, dp=args.dp
+		partitioner=args.partitioner, scheduler=scheduler, placement=placement, pp=pp, dp=args.dp
 	)
 
 	pipeline = Pipeline(parts, sample, config=pipe_config, sources=sources, targets=targets)
@@ -270,13 +286,7 @@ def main():
 
 	for sample, target in data:
 		optimizer.zero_grad()
-		y, loss = pipeline(
-			sample,
-			target,
-			model.loss_fn,
-			split_size=mb_size,
-			profile=args.profile,
-		)
+		y, loss = pipeline(sample, target, model.loss_fn, split_size=mb_size, profile=args.profile)
 		optimizer.step()
 
 	torch.cuda.synchronize()
@@ -301,7 +311,7 @@ def main():
 
 	# test_correctness(model, pipeline)
 	# if rank == 0:
-	# 	print("\tPassed!", flush=True)
+	# print("\tPassed!", flush=True)
 
 	if dist.is_initialized():
 		dist.destroy_process_group()

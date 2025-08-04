@@ -181,6 +181,8 @@ class PipelineBlock:
 		# Take care of rematerialization
 		self.remat_manager = RematManager(self)
 
+		self.send_ops = []
+
 	def __str__(self) -> str:
 		return f"Rank {self.rank} - Layer {self.id}"
 
@@ -405,7 +407,8 @@ class PipelineBlock:
 
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
 				logger.debug(f"{self} - Sending outputs to rank {rank}")
-				dist.isend(outputs, rank, group=self.pp_group)
+				work = dist.isend(outputs, rank, group=self.pp_group)
+				self.send_ops.append(work)
 
 	def send_backward(self, mb_id, **options):
 		"""
@@ -425,7 +428,8 @@ class PipelineBlock:
 
 			rank = self.placement[dst]
 			logger.debug(f"{self} - Sending gradients to rank {rank}")
-			dist.isend(grads, rank, group=self.pp_group)
+			work = dist.isend(grads, rank, group=self.pp_group)
+			self.send_ops.append(work)
 
 	def recv_forward(self, mb_id, mb_size, **options):
 		"""
@@ -561,6 +565,16 @@ class PipelineBlock:
 					value[0]
 				)  # omit batch dimension ; if the tensor is not batched, this is wrong!
 			logger.debug(f"{self} - registered output metadata {var[0].metadata} for {var[0].name}")
+
+	def _wait_for_send_ops(self):
+		"""
+		With MPI process groups, tensors sent by a P2P are held by the AsyncWork object.
+		If we don't keep a reference to them, they are garbage collected and the memory is lost.
+		Instead, we keep a reference to the AsyncWork object and wait for it at the end (when it won't slow down anything).
+		"""
+		for op in self.send_ops:
+			op.wait()
+		self.send_ops.clear()
 
 	def _offload_dw(self, to="cpu"):
 		"""
