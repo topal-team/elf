@@ -3,6 +3,10 @@
     "hidden_dim": 1024,
     "seq_len": 256,
     "num_heads": 32,
-    "dropout": 0.1
+    "dropout": 0.1,
+    "n_blocks": 256,
+    "ffn_dim": 4096,
+    "sdp_backend": null,
+    "dtype": "float32"
   }
 } 

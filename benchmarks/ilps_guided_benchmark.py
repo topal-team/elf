@@ -182,6 +182,7 @@ def main():
 
 	# Create and initialize model
 	config = model_config_from_args(args, model_type="chain")
+	config["n_blocks"] = int(n)
 	dtype = config.pop("dtype")
 	with torch.device("meta"):
 		model = ChainTransformer(**config).to(dtype)
