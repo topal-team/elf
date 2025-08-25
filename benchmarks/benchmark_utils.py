@@ -8,11 +8,11 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from models.simple import FullTransformer, TransformerBlock
 from elf import Pipeline, get_sources_targets_sequential
 from elf.zb_utils import LayerDW
 from elf.registry import SCHEDULERS, resolve
 from elf.scheduling.scheduling import OpOptions, OperationType
+from models.simple import Attention, FullTransformer, TransformerBlock
 
 
 def init_dist(backend="nccl"):
@@ -265,6 +265,12 @@ def get_checkpointed_scheduler(scheduler, type):
 
 		def checkpoint(name, module):
 			return isinstance(module, (nn.GELU, nn.LayerNorm, nn.Dropout))
+
+	elif type == "selective":
+
+		def checkpoint(name, module):
+			return isinstance(module, Attention)
+
 	else:
 		raise ValueError(f"Invalid checkpointing type: {type}")
 

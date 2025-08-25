@@ -1,8 +1,11 @@
-{   
-    "model": {
-        "hidden_dim": 4096,
-        "seq_len": 2048,
-        "num_heads": 32,
-        "dropout": 0.1
-    }
-  } 
+{
+  "model": {
+    "hidden_dim": 4096,
+    "n_blocks": 32,
+    "seq_len": 2048,
+    "num_heads": 32,
+    "dropout": 0.1,
+    "dtype": "float32",
+    "sdp_backend": null
+  }
+}

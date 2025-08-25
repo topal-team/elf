@@ -36,7 +36,6 @@ from typing import Dict, List, Optional, Any
 import torch
 import torch.distributed as dist
 
-sys.path.append(".")
 from elf import replace_linear_with_linear_dw
 from models.simple import ChainTransformer, FullTransformer  # noqa: F401
 from models.utils import add_transformer_args, model_config_from_args

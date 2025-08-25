@@ -213,7 +213,9 @@ class Pipeline:
 			# Careful! if the result was offloaded to CPU, then this creates a sync point that slows down the execution
 			with torch.no_grad():
 				# result = torch.cat(result, dim=0)
-				losses = torch.tensor(losses, device=torch.cuda.current_device())
+				# This causes a stream synchronization ; maybe it can be avoided
+				# From looking at the profiler, it does not incur important overhead, but need to check
+				losses = torch.tensor(losses, device="cuda")
 				losses = losses.sum() / sum(mb_sizes)
 
 			if self.dp > 1:

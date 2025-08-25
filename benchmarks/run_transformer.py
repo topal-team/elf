@@ -140,6 +140,7 @@ def parse_args():
 	parser.add_argument(
 		"--opt-device", type=str, default="cuda", choices=["cpu", "cuda"], help="Optimizer device"
 	)
+	parser.add_argument("--no-optimizer", action="store_true", help="Do not use optimizer")
 	parser.add_argument(
 		"--partitioner",
 		type=str,
@@ -162,7 +163,7 @@ def parse_args():
 		"--checkpointing",
 		type=str,
 		default=None,
-		choices=["full", "simple"],
+		choices=["full", "simple", "selective"],
 		help="Checkpointing strategy",
 	)
 	parser.add_argument(
@@ -257,7 +258,7 @@ def main():
 	opt_device = torch.device(args.opt_device)
 
 	all_params = [p for block in pipeline.blocks for p in block.model.parameters() if p.requires_grad]
-	if len(all_params) == 0:
+	if len(all_params) == 0 or args.no_optimizer:
 		optimizer = DummyOptimizer()
 	else:
 		optimizer = MixedPrecisionOptimizer(
