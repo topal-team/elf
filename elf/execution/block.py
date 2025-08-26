@@ -222,7 +222,8 @@ class PipelineBlock:
 		with self.remat_manager.apply_selective_remat(remat_strategy, mb_id):
 			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
 
-			self.fwd_compute_events.append(torch.cuda.current_stream().record_event())
+			if torch.cuda.is_available():
+				self.fwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 			for module in self.model.modules():
 				if isinstance(module, LayerDW):
@@ -402,7 +403,8 @@ class PipelineBlock:
 		"""
 		dst = options.get("dst")
 
-		self.fwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
+		if torch.cuda.is_available():
+			self.fwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
 
 		if dst is None or self.placement[dst] == self.rank:
 			return
@@ -430,7 +432,8 @@ class PipelineBlock:
 		"""
 		dst = options.get("dst")
 
-		self.bwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
+		if torch.cuda.is_available():
+			self.bwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
 
 		if dst is None or self.placement[dst] == self.rank:
 			return
@@ -649,7 +652,8 @@ class PipelineBlock:
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
 		)
 
-		self.bwd_compute_events.append(torch.cuda.current_stream().record_event())
+		if torch.cuda.is_available():
+			self.bwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 		# Clean up hooks
 		for handle in handles:
