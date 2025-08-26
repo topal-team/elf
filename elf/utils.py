@@ -7,6 +7,7 @@ import logging
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 
 from typing import List
 
@@ -336,25 +337,159 @@ class TimerGPU:
 # 			self.events[key].record(self.stream)
 
 
-# TODO: instead of sending full tensors, we could send parameter/buffers metadata only
-# and then construct tensors on the recv side directly
-
-
 def send_models(models, dst, group=None):
 	"""
 	Sends a list of models using p2p comms
+	This method sends the model structure (nn.Module object, parameters metadata, etc) via pickled CPU comm, and the actual tensors via GPU comm.
+
+	:param models: list of models to send
+	:type models: list[nn.Module]
+	:param dst: destination rank
+	:type dst: int
+	:param group: communication group
+	:type group: dist.ProcessGroup | None
 	"""
-	# Send using CPU
-	dist.send_object_list(models, dst, group)
+
+	# Helper to split a qualified name like "a.b.weight" -> ("a.b", "weight")
+	def _split_qualified_name(qname: str):
+		if "." in qname:
+			path, leaf = qname.rsplit(".", 1)
+			return path, leaf
+		return "", qname
+
+	assert dist.is_initialized(), "torch.distributed must be initialized before calling send_models"
+
+	# 1) Build tensor-free payloads and gather tensors to transfer via GPU p2p
+	payloads = []
+	per_model_params = []
+	per_model_buffers = []
+	saved_params = []
+	saved_buffers = []
+
+	for model in models:
+		# Collect parameter names and tensors
+		param_names = []
+		param_requires = []
+		param_tensors = []
+		model_saved_params = []
+
+		for name, p in model.named_parameters(recurse=True):
+			param_names.append(name)
+			param_requires.append(bool(p.requires_grad))
+			pt = p.data
+			if not pt.is_cuda:
+				pt = pt.to(device="cuda")
+			else:
+				pt = pt.to(device=torch.cuda.current_device())
+			param_tensors.append(pt.contiguous())
+
+			module_path, leaf = _split_qualified_name(name)
+			submod = model.get_submodule(module_path) if module_path != "" else model
+			model_saved_params.append((submod, leaf, p))
+			submod._parameters[leaf] = None
+
+		# Collect buffer names and tensors
+		buffer_names = []
+		buffer_tensors = []
+		model_saved_buffers = []
+
+		for name, b in model.named_buffers(recurse=True):
+			buffer_names.append(name)
+			bt = b
+			if not bt.is_cuda:
+				bt = bt.to(device="cuda")
+			else:
+				bt = bt.to(device=torch.cuda.current_device())
+			buffer_tensors.append(bt.contiguous())
+
+			module_path, leaf = _split_qualified_name(name)
+			submod = model.get_submodule(module_path) if module_path != "" else model
+			model_saved_buffers.append((submod, leaf, b))
+			submod._buffers[leaf] = None
+
+		payloads.append((model, param_names, param_requires, buffer_names))
+		per_model_params.append(param_tensors)
+		per_model_buffers.append(buffer_tensors)
+		saved_params.append(model_saved_params)
+		saved_buffers.append(model_saved_buffers)
+
+	# 2) Send tensor-free module payloads via CPU object communication
+	dist.send_object_list(payloads, dst=dst, group=group)
+
+	# 3) Restore original params/buffers in local models
+	for model_saved_params in saved_params:
+		for submod, leaf, p in model_saved_params:
+			submod._parameters[leaf] = p
+	for model_saved_buffers in saved_buffers:
+		for submod, leaf, b in model_saved_buffers:
+			submod._buffers[leaf] = b
+
+	# 4) Send tensor metadata and data via GPU p2p
+	for model_params, model_buffers in zip(per_model_params, per_model_buffers):
+		for t in model_params:
+			meta = TensorMetadata(t).to_tensor()
+			dist.send(meta, dst=dst, group=group)
+			dist.send(t, dst=dst, group=group)
+		for t in model_buffers:
+			meta = TensorMetadata(t).to_tensor()
+			dist.send(meta, dst=dst, group=group)
+			dist.send(t, dst=dst, group=group)
 
 
 def recv_models(models, src, group=None):
 	"""
 	Receives a list of models using p2p comms
+
+	:param models: list object with correct size, that will be populated with the received models
+	:type models: list[Any]
+	:param src: source rank
+	:type src: int
+	:param group: communication group
+	:type group: dist.ProcessGroup | None
 	"""
-	dist.recv_object_list(models, src, group)
-	for m in models:
-		m.cuda()
+	assert dist.is_initialized(), "torch.distributed must be initialized before calling recv_models"
+
+	# Receive tensor-free module payloads
+	obj_list = [None for _ in range(len(models))]
+	dist.recv_object_list(obj_list, src=src, group=group)
+
+	# Receive tensors via GPU and attach to the received modules
+	for i, payload in enumerate(obj_list):
+		module, param_names, param_requires, buffer_names = payload
+
+		# Parameters
+		for name, req in zip(param_names, param_requires):
+			meta_tensor = torch.empty(TensorMetadata.MAX_SIZE, device=torch.cuda.current_device())
+			dist.recv(meta_tensor, src=src, group=group)
+			meta = TensorMetadata.from_tensor(meta_tensor)
+			tensor = torch.empty(tuple(meta.shape), dtype=meta.dtype, device=torch.cuda.current_device())
+			dist.recv(tensor, src=src, group=group)
+
+			if "." in name:
+				module_path, leaf = name.rsplit(".", 1)
+				submod = module.get_submodule(module_path)
+			else:
+				submod, leaf = module, name
+			param_obj = nn.Parameter(tensor, requires_grad=bool(req))
+			submod.register_parameter(leaf, param_obj)
+
+		# Buffers
+		for name in buffer_names:
+			meta_tensor = torch.empty(TensorMetadata.MAX_SIZE, device=torch.cuda.current_device())
+			dist.recv(meta_tensor, src=src, group=group)
+			meta = TensorMetadata.from_tensor(meta_tensor)
+			tensor = torch.empty(tuple(meta.shape), dtype=meta.dtype, device=torch.cuda.current_device())
+			dist.recv(tensor, src=src, group=group)
+
+			if "." in name:
+				module_path, leaf = name.rsplit(".", 1)
+				submod = module.get_submodule(module_path)
+			else:
+				submod, leaf = module, name
+			submod.register_buffer(leaf, tensor)
+
+		module.cuda()
+		models[i] = module
 
 
 def broadcast_models(models, src, group=None):
@@ -364,5 +499,3 @@ def broadcast_models(models, src, group=None):
 	dist.broadcast_object_list(models, src, group)
 	for m in models:
 		m.cuda()
-
-	return models

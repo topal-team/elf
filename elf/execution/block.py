@@ -181,7 +181,15 @@ class PipelineBlock:
 		# Take care of rematerialization
 		self.remat_manager = RematManager(self)
 
-		self.send_ops = []
+		self.send_ops = []  # need to be stored for MPI backend, see _wait_for_send_ops
+
+		# NCCL automatically synchronizes send stream with compute stream
+		# With MPI however, we need to manually make sure that computations are finished before sending. These events are used for that.
+		# note: we could optimize that a bit by:
+		# 1 - having a different stream for fwd and bwd (to avoid waiting for stuff we don't depend on)
+		# 2 - finding a way to insert events just after the computation that leads to the sendable tensor, instead of waiting for the whole computation to be finished (not sure if possible)
+		self.fwd_compute_events = []
+		self.bwd_compute_events = []
 
 	def __str__(self) -> str:
 		return f"Rank {self.rank} - Layer {self.id}"
@@ -213,6 +221,8 @@ class PipelineBlock:
 		handles = self.remat_manager.register_backward_hooks(rbb_strategy, mb_id)
 		with self.remat_manager.apply_selective_remat(remat_strategy, mb_id):
 			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
+
+			self.fwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 			for module in self.model.modules():
 				if isinstance(module, LayerDW):
@@ -392,6 +402,8 @@ class PipelineBlock:
 		"""
 		dst = options.get("dst")
 
+		self.fwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
+
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
@@ -417,6 +429,9 @@ class PipelineBlock:
 		:param **options: options to modify the send behaviour
 		"""
 		dst = options.get("dst")
+
+		self.bwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
+
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
@@ -575,6 +590,8 @@ class PipelineBlock:
 		for op in self.send_ops:
 			op.wait()
 		self.send_ops.clear()
+		self.fwd_compute_events.clear()
+		self.bwd_compute_events.clear()
 
 	def _offload_dw(self, to="cpu"):
 		"""
@@ -631,6 +648,8 @@ class PipelineBlock:
 		input_grads = self._compute_backward_inputs(
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
 		)
+
+		self.bwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 		# Clean up hooks
 		for handle in handles:

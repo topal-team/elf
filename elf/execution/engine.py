@@ -211,7 +211,7 @@ class Engine:
 							f"Loss forward for mb {op.mb_id} but only {len(result)} results computed"
 						)
 						loss, grad_fn = compute_loss(block, result[op.mb_id], microtargets[op.mb_id], loss_fn)
-						losses.append(loss.detach())
+						losses.append(loss)
 						grad_fns.append(grad_fn)
 						logger.debug(f"Rank {self.rank} - Finished forward of {block}")
 					else:
@@ -324,7 +324,9 @@ def compute_loss(block, output, target, loss_fn):
 			loss = loss_fn(output, target)
 
 	block.compute_time.append(timer)
-	loss = loss / (target.numel() // target.size(0))
+	loss = (
+		loss / (target.numel() // target.size(0))
+	)  # see documentation for torch losses: loss is reduced by default, but we will divide by batch size at the end (we only have micro-batch size here)
 
 	def grad_fn():
 		loss.backward()

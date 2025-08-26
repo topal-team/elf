@@ -208,9 +208,7 @@ class SimpleAttention(SimpleModel):
 		V = self.value(inputs)
 
 		# Compute attention scores
-		scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(
-			torch.tensor(self.hidden_dim, dtype=torch.float32)
-		)
+		scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.hidden_dim)
 
 		# Apply softmax to get attention weights
 		attention_weights = self.softmax(scores)

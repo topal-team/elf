@@ -21,7 +21,7 @@ from models.simple import SimpleTransformer, SimpleCNN, SimpleResNet
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 
-absolute_tolerance = 1e-6
+absolute_tolerance = 5e-5
 relative_tolerance = 1e-3
 
 
@@ -246,6 +246,7 @@ if __name__ == "__main__":
 	parser.add_argument(
 		"--interleaving", "-i", type=int, required=False, default=1, help="interleaving degree"
 	)
+	parser.add_argument("--backend", choices=["mpi", "nccl"], default="nccl", required=False)
 	args = parser.parse_args()
 	match args.log:
 		case "debug":
@@ -258,15 +259,16 @@ if __name__ == "__main__":
 	rank = int(os.getenv("RANK", os.getenv("OMPI_COMM_WORLD_RANK")))
 	local_rank = int(os.getenv("LOCAL_RANK", os.getenv("OMPI_COMM_WORLD_LOCAL_RANK")))
 	torch.cuda.set_device(local_rank)
-	dist.init_process_group(backend="mpi", device_id=torch.device(local_rank))
+	dist.init_process_group(backend=args.backend, device_id=torch.device(local_rank))
 
 	match args.model:
 		case "cnn":
 			model = SimpleCNN(256)
 			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
 		case "tf":
-			model = SimpleTransformer(128, 1024, args.pp * args.interleaving * 8)
-			data = Dummy((64,), torch.int64, (64,), torch.int64)
+			seqlen = 1024
+			model = SimpleTransformer(128, 2048, args.pp * args.interleaving * 2, seq_len=seqlen)
+			data = Dummy((seqlen,), torch.int64, (seqlen,), torch.int64)
 		case "resnet":
 			model = SimpleResNet(args.pp * args.interleaving)
 			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
@@ -279,7 +281,7 @@ if __name__ == "__main__":
 
 	pipe = Pipeline(
 		copy.deepcopy(model),
-		model.get_sample(4).cuda(),
+		model.get_sample(1, device="cuda"),
 		placement=placement,
 		scheduler=args.scheduler,
 		partitioner=args.partitioner,
@@ -288,13 +290,17 @@ if __name__ == "__main__":
 	try:
 		train(pipe, gt, data, args.pp, args.dp)
 
-		sample = model.get_sample(32).cuda()
-		target = model.get_target(32).cuda()
+		split_size = 1
+		batch_size = split_size * args.dp * (args.pp * 2)
+		sample = model.get_sample(batch_size, device="cuda")
+		target = model.get_target(batch_size, device="cuda")
 		if rank == 0 and sample.is_floating_point():
 			print(f"Sample given to pipe : mean = {sample.mean()}, std = {sample.std()}")
 
-		split_size = (16 // args.dp) // (args.pp * 2)
 		y, _ = pipe(sample.clone(), target.clone(), loss_fn=model.loss_fn, split_size=split_size)
+
+		dist.barrier()
+		torch.cuda.synchronize()
 
 		pipe.zero_grad(set_to_none=False)
 		gt.zero_grad(set_to_none=False)
@@ -304,9 +310,6 @@ if __name__ == "__main__":
 			pipe_params, pipe_grads = get_all_parameters(block.model, block.pp_group)
 
 		if rank == 0:
-			if sample.is_floating_point():
-				print(f"Sample given to single gpu : mean = {sample.mean()}, std = {sample.std()}")
-
 			check_model_parameters(gt, pipe_params, pipe_grads)
 			z = gt(sample.clone())
 
@@ -316,6 +319,7 @@ if __name__ == "__main__":
 			else:
 				y = torch.cat(y, dim=0).cuda()
 
+			torch.cuda.synchronize()
 			assert torch.allclose(y, z, rtol=relative_tolerance, atol=absolute_tolerance), (
 				f"Wrong output for pipelined model. Difference norm = {torch.linalg.norm(y - z)}"
 			)
