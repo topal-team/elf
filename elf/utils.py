@@ -253,6 +253,7 @@ class TimerGPU:
 		self.end_event.synchronize()
 		return self.start_event.elapsed_time(self.end_event) / 1000
 
+
 def send_models(models, dst, group=None):
 	"""
 	Sends a list of models using p2p comms
