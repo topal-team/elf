@@ -11,7 +11,7 @@ import torch.distributed as dist
 from elf import Pipeline, get_sources_targets_sequential
 from elf.zb_utils import LayerDW
 from elf.registry import SCHEDULERS, resolve
-from elf.scheduling.scheduling import OpOptions, OperationType
+from elf.scheduling.scheduling import Operation, OpOptions, OperationType, compute_types
 from models.simple import Attention, FullTransformer, TransformerBlock
 
 
@@ -283,3 +283,51 @@ def get_checkpointed_scheduler(scheduler, type):
 		return schedule
 
 	return checkpointed_scheduler
+
+
+def get_offloaded_scheduler(scheduler, ratio):
+	"""
+	Get an offloaded scheduler.
+
+	Args:
+		scheduler: The scheduler to offload.
+		ratio: The ratio of activations to offload.
+	"""
+	scheduler = resolve(scheduler, SCHEDULERS)
+
+	def offloaded_scheduler(*args, **kwargs):
+		schedule = scheduler(*args, **kwargs)
+
+		placement = args[0]
+		n_devices = max(placement) + 1
+
+		offloaded_mbs = [[] for _ in range(n_devices)]
+		for op in schedule:
+			if op.op == OperationType.FORWARD and op.mb_id % ratio == 0:
+				op.options[OpOptions.ACTIVATION_OFFLOAD] = True
+				offloaded_mbs[op.rank].append((op.mb_id, op.block_id))
+
+		# Start prefetching during a previous computation ("ratio" computations before the backward)
+		for rank in range(n_devices):
+			for mb, block_id in offloaded_mbs[rank]:
+				backward_inputs_idx = None
+				for i, op in enumerate(schedule):
+					if op.block_id == block_id and op.mb_id == mb and op.op == OperationType.BACKWARD_INPUTS:
+						backward_inputs_idx = i
+						break
+
+				# Count backward from BACKWARD_INPUTS to find kth computation
+				computation_count = 0
+				for i in range(backward_inputs_idx - 1, -1, -1):
+					op = schedule[i]
+					if op.rank == rank and op.op in compute_types:
+						computation_count += 1
+						if computation_count == ratio:
+							# Add prefetch operation before this computation
+							prefetch_op = Operation(block_id, mb, OperationType.PREFETCH_ACTIVATIONS, rank)
+							schedule.insert(i, prefetch_op)
+							break
+
+		return schedule
+
+	return offloaded_scheduler

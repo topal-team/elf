@@ -2,14 +2,17 @@
 Execution manager
 """
 
+import time
+import contextlib
+from collections import deque, OrderedDict
+
 import torch
 import torch.distributed as dist
 
-from collections import deque, OrderedDict
-import time
 
-from ..scheduling import OperationType
+from ..scheduling import OperationType, OpOptions
 from ..utils import Timer
+from .offload import OffloadToCPU, PinnedHostTensorPool
 
 import logging
 import os
@@ -64,6 +67,30 @@ def _time_end(start):
 		return time.time() - start
 
 
+def preallocate_pool(pool: PinnedHostTensorPool):
+	"""
+	Parse the preallocate pool environment variable, and fills the pool accordingly.
+	"""
+	val = os.environ.get("ELF_PREALLOCATE_POOL")
+	if val is None:
+		return
+
+	dtypes = {
+		"f16": torch.float16,
+		"f32": torch.float32,
+		"f64": torch.float64,
+		"bf16": torch.bfloat16,
+		"i8": torch.int8,
+		"i16": torch.int16,
+		"i32": torch.int32,
+	}
+
+	parts = val.split(",")
+	for part in parts:
+		dtype, size = part.split(":")
+		pool.reserve(int(size) * 1024**3, dtype=dtypes[dtype])
+
+
 class Engine:
 	"""
 	Coordinates the execution of a schedule on a list of blocks at a device/rank level.
@@ -84,6 +111,9 @@ class Engine:
 
 		self.id_to_block = {b.id: b for b in self.blocks}
 		self.offload_stream = torch.cuda.Stream()
+
+		self.pool = PinnedHostTensorPool()  # global memory pool for this process
+		preallocate_pool(self.pool)
 
 	def train_step(self, batch, target, loss_fn, schedule, mb_sizes, profile=False):
 		"""
@@ -123,10 +153,16 @@ class Engine:
 
 		:rtype: List[Tensor], List[Tensor], Dict[float], Dict[Dict[Operation, float]]
 		"""
+
 		split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]
 		microbatches = iter(zip(*split_batches))
 		if target is not None:
 			microtargets = target.split(mb_sizes, dim=0)
+
+		offloaders = {
+			id_: [OffloadToCPU(pool=self.pool) for _ in range(len(mb_sizes))] for id_ in self.id_to_block
+		}
+		# print(f"Rank {self.rank} - Pool size: {self.pool.size()}, offloaders: {offloaders}")
 
 		result = []
 		losses = []
@@ -161,7 +197,14 @@ class Engine:
 
 			match op.op:
 				case OperationType.FORWARD:
-					y = block.forward(op.mb_id, **op.options)
+					# Use offloader if activation offloading is enabled, otherwise use a dummy context
+					if op.options.get(OpOptions.ACTIVATION_OFFLOAD):
+						offloader = offloaders[block.id][op.mb_id]
+					else:
+						offloader = contextlib.nullcontext()
+
+					with offloader:
+						y = block.forward(op.mb_id, **op.options)
 					# If the block as multiple outputs, this flattens them
 					# TODO: correctly handle that in multiple result lists
 					if y is not None:
@@ -174,6 +217,9 @@ class Engine:
 
 				case OperationType.BACKWARD_INPUTS:
 					block.backward_inputs(op.mb_id, **op.options)
+
+					if op.options.get(OpOptions.ACTIVATION_OFFLOAD):
+						offloaders[block.id][op.mb_id].release()
 
 				case OperationType.BACKWARD_PARAMS:
 					block.backward_params(op.mb_id, **op.options)
@@ -247,6 +293,9 @@ class Engine:
 				case OperationType.RECOMPUTE_BACKWARD_INPUTS:
 					block.recompute_backward_inputs(op.mb_id, **op.options)
 
+				case OperationType.PREFETCH_ACTIVATIONS:
+					offloaders[block.id][op.mb_id].prefetch()
+
 				case OperationType.ALL_REDUCE_PARAM_GRADS:
 					block.scale_grads(sum(mb_sizes))  # we also average out the gradients here
 					block.all_reduce_param_grads(**op.options)
@@ -292,6 +341,9 @@ class Engine:
 			block.compute_time.clear()
 
 		torch.cuda.current_stream().wait_stream(self.offload_stream)
+		for offloaders_list in offloaders.values():
+			for offloader in offloaders_list:
+				offloader.release()
 
 		return result, losses, stats, detailed_stats
 

@@ -14,6 +14,7 @@ from elf.zb_utils import replace_linear_with_linear_dw
 from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import (
 	get_checkpointed_scheduler,
+	get_offloaded_scheduler,
 	get_handcrafted_partition,
 	meta_to_device,
 	init_dist,
@@ -166,6 +167,7 @@ def parse_args():
 		choices=["full", "simple", "selective"],
 		help="Checkpointing strategy",
 	)
+	parser.add_argument("--offloading", type=int, default=None, help="Offloading ratio")
 	parser.add_argument(
 		"--log", type=str, choices=["none", "info", "debug"], default="info", help="Log level"
 	)
@@ -223,6 +225,9 @@ def main():
 
 	if args.checkpointing is not None:
 		scheduler = get_checkpointed_scheduler(scheduler, args.checkpointing)
+
+	elif args.offloading is not None:
+		scheduler = get_offloaded_scheduler(scheduler, args.offloading)
 
 	start_time = time.time()
 	with torch.device("meta"):

@@ -2,7 +2,7 @@
 Scheduling strategies for both computations and communications.
 """
 
-from .scheduling import schedule_to_str, check_schedule_validity
+from .scheduling import schedule_to_str, check_schedule_validity, OpOptions
 from .comm_scheduling import reorder_communications
 from .schedulers import *
 
@@ -59,4 +59,4 @@ SCHEDULERS.register(
 	"fixed", FixedSchedule, "Fixed schedule. Use a dictionary to specify the schedule."
 )
 
-__all__ = ["schedule_to_str", "check_schedule_validity", "reorder_communications"]
+__all__ = ["schedule_to_str", "check_schedule_validity", "reorder_communications", "OpOptions"]

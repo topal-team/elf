@@ -12,7 +12,7 @@ logger = logging.getLogger("scheduling")
 class OperationType(Enum):
 	"""
 	Different type of operations that can be performed.
-	They can be both computation (forward, backward, ..) or communications (p2p send/recv, ..)
+	They can be both computation (forward, backward, ..) or communications (p2p send/recv, offloading, ..)
 	"""
 
 	RECV_FORWARD = 0
@@ -27,6 +27,8 @@ class OperationType(Enum):
 	ALL_REDUCE_PARAM_GRADS = 9
 	RECOMPUTE_FORWARD = 10
 	RECOMPUTE_BACKWARD_INPUTS = 11
+
+	PREFETCH_ACTIVATIONS = 12
 
 	def __repr__(self) -> str:
 		return self.name.lower()
@@ -65,6 +67,8 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	REMAT_STRATEGY = auto()
 	RBF_STRATEGY = auto()  # Recompute Backward-Forward (activations, between B and W)
 	RBB_STRATEGY = auto()  # Recompute Backward-Backward (gradients, between B and W)
+
+	ACTIVATION_OFFLOAD = auto()  # Offload activations to CPU
 
 	# for recompute forward, it's a boolean to save the computation graph for a second backward or not
 	SAVE = auto()
@@ -158,6 +162,7 @@ def schedule_to_str(schedule, print_comms=False):
 		OperationType.RECOMPUTE_FORWARD: "R",
 		OperationType.RECOMPUTE_BACKWARD_INPUTS: "R*",
 		OperationType.ALL_REDUCE_PARAM_GRADS: "(AR)",
+		OperationType.PREFETCH_ACTIVATIONS: "P",
 	}
 
 	def shorten(op):

@@ -372,7 +372,9 @@ def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[in
 		OperationType.LOSS_BACKWARD,
 		OperationType.RECOMPUTE_FORWARD,
 		OperationType.RECOMPUTE_BACKWARD_INPUTS,
+		# Count these 2 as computations to avoid moving them around
 		OperationType.ALL_REDUCE_PARAM_GRADS,
+		OperationType.PREFETCH_ACTIVATIONS,
 	}
 
 	# Create graph with one node per operation
