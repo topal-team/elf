@@ -29,6 +29,10 @@ dtypes = [
 ]
 
 
+def _is_mpi():
+	return dist.is_initialized() and dist.get_backend() == dist.Backend.MPI
+
+
 def pretty_print_params(n):
 	if n > 1e9:
 		return f"{n / 1e9:.1f}B"

@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from ..scheduling import OpOptions
-from ..utils import Timer, TensorMetadata
+from ..utils import Timer, TensorMetadata, _is_mpi
 from ..zb_utils import LayerDW
 from .remat import RematManager
 
@@ -403,7 +403,8 @@ class PipelineBlock:
 		"""
 		dst = options.get("dst")
 
-		if torch.cuda.is_available():
+		if torch.cuda.is_available() and _is_mpi():
+			# This is a sync point that is needed for MPI but not for NCCL
 			self.fwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
 
 		if dst is None or self.placement[dst] == self.rank:
@@ -432,7 +433,7 @@ class PipelineBlock:
 		"""
 		dst = options.get("dst")
 
-		if torch.cuda.is_available():
+		if torch.cuda.is_available() and _is_mpi():
 			self.bwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
 
 		if dst is None or self.placement[dst] == self.rank:

@@ -313,6 +313,10 @@ class OffloadToCPU:
 			if key in self._gpu_cache:
 				continue
 
+			# Allocate immediately, on compute stream to avoid caching allocator issues (see PipeOffload and https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html)
+			dev = self._orig_device.get(key, torch.device("cuda"))
+			gpu_tensor = torch.empty_like(base_cpu, device=dev)
+
 			# Make sure that offload is finished
 			off_ev = self._offload_events.get(key)
 			if off_ev is not None:
@@ -323,8 +327,7 @@ class OffloadToCPU:
 			)  # wait for current stream to finish (so that the prefetching starts when we want, and not before!)
 
 			with torch.cuda.stream(self._prefetch_stream):
-				dev = self._orig_device.get(key, torch.device("cuda"))
-				gpu_tensor = base_cpu.to(dev, non_blocking=True)
+				gpu_tensor.copy_(base_cpu, non_blocking=True)
 				self._gpu_cache[key] = gpu_tensor
 				ev = torch.cuda.Event()
 				ev.record(self._prefetch_stream)
