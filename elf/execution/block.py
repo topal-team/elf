@@ -222,7 +222,7 @@ class PipelineBlock:
 		with self.remat_manager.apply_selective_remat(remat_strategy, mb_id):
 			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
 
-			if torch.cuda.is_available():
+			if torch.cuda.is_available() and _is_mpi():
 				self.fwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 			for module in self.model.modules():
@@ -653,7 +653,7 @@ class PipelineBlock:
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
 		)
 
-		if torch.cuda.is_available():
+		if torch.cuda.is_available() and _is_mpi():
 			self.bwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 		# Clean up hooks

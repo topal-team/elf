@@ -1,9 +1,9 @@
-import weakref
+from weakref import ref
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-from torch.utils.weak import WeakRef
 
+WeakRef = ref  # type alias
 __all__ = ["OffloadToCPU", "PinnedHostTensorPool"]
 
 
@@ -69,7 +69,9 @@ class PinnedHostTensorPool:
 	def _alloc_parent(self, dtype: torch.dtype, min_elems: int) -> torch.Tensor:
 		"""Allocate a new pinned parent chunk for dtype with at least min_elems."""
 		parent_elems = self._bucket_size(min_elems)
-		parent = torch.empty(parent_elems, dtype=dtype, device=self.device, pin_memory=True)
+		parent = torch.empty(
+			parent_elems, dtype=dtype, device=self.device, pin_memory=True, requires_grad=False
+		)
 		self._parents_by_dtype.setdefault(dtype, []).append(parent)
 		self._free_segments[id(parent)] = [(0, parent_elems)]
 		return parent
@@ -182,15 +184,15 @@ class OffloadToCPU:
 		self, target_device: torch.device | str = "cpu", pool: Optional["PinnedHostTensorPool"] = None
 	) -> None:
 		self.target_device = torch.device(target_device)
-		# Maps (storage_ptr, dtype) -> tensor already moved to GPU
-		self._storage_map: Dict[WeakRef, torch.Tensor] = weakref.WeakKeyDictionary()
+		# Maps (storage ref) -> tensor already moved to GPU
+		self._storage_map: Dict[WeakRef, torch.Tensor] = {}
 		# Cache of GPU copies during backward to avoid duplicating transfers
-		self._gpu_cache: Dict[WeakRef, torch.Tensor] = weakref.WeakKeyDictionary()
-		self._offload_events: Dict[WeakRef, torch.cuda.Event] = weakref.WeakKeyDictionary()
-		self._prefetch_events: Dict[WeakRef, torch.cuda.Event] = weakref.WeakKeyDictionary()
+		self._gpu_cache: Dict[WeakRef, torch.Tensor] = {}
+		self._offload_events: Dict[WeakRef, torch.cuda.Event] = {}
+		self._prefetch_events: Dict[WeakRef, torch.cuda.Event] = {}
 		# Track how many elements were captured per storage
-		self._storage_len: Dict[WeakRef, int] = weakref.WeakKeyDictionary()
-		self._orig_device: Dict[WeakRef, torch.device] = weakref.WeakKeyDictionary()
+		self._storage_len: Dict[WeakRef, int] = {}
+		self._orig_device: Dict[WeakRef, torch.device] = {}
 		# Streams to overlap transfers
 		self._offload_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
 		self._prefetch_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
@@ -209,12 +211,16 @@ class OffloadToCPU:
 
 	# Hooks
 	def _save_hook(self, tensor: torch.Tensor) -> Dict[str, Any]:
-		"""Hook executed when autograd saves *tensor*.
+		"""Hook executed when autograd saves tensor.
 
 		Returns a lightweight payload that contains either the off-loaded tensor
 		(the first time we encounter its storage) or just view metadata.
 		"""
-		key = tensor.untyped_storage()
+		# if already on CPU, shortcut
+		if tensor.device.type == "cpu":
+			return tensor
+
+		key = ref(tensor.untyped_storage())
 
 		# Compute minimal required span for this view to be representable.
 		size_t = tuple(tensor.size())
@@ -234,6 +240,12 @@ class OffloadToCPU:
 			self._storage_len[key] = required_elems
 			self._orig_device[key] = tensor.device
 
+		if tensor.device.type == "cpu":
+			assert need_copy, "CPU tensor should have been copied"
+			print(
+				f"!!! CPU tensor first time encountered: {tensor.shape, tensor.dtype, tensor.device, tensor.item()} (rank {torch.distributed.get_rank()})"
+			)
+
 		payload = {
 			"key": key,
 			"size": tuple(tensor.size()),
@@ -245,8 +257,11 @@ class OffloadToCPU:
 
 		return payload
 
-	def _restore_hook(self, payload: Dict[str, Any]) -> torch.Tensor:
+	def _restore_hook(self, payload: Dict[str, Any] | torch.Tensor) -> torch.Tensor:
 		"""Recreate the original tensor from payload during the backward pass."""
+		if isinstance(payload, torch.Tensor):  # cpu tensor shortcut
+			return payload
+
 		# 1. Fetch the flat CPU tensor that owns the storage
 		restore_key = payload["key"]
 		base_cpu = self._storage_map[restore_key]
@@ -294,7 +309,11 @@ class OffloadToCPU:
 			return self._pool.allocate(required_elems, like_tensor.dtype)
 
 		return torch.empty(
-			required_elems, dtype=like_tensor.dtype, device=self.target_device, pin_memory=use_pinned
+			required_elems,
+			dtype=like_tensor.dtype,
+			device=self.target_device,
+			pin_memory=use_pinned,
+			requires_grad=False,
 		)
 
 	def _copy_to_cpu_async(self, cpu_storage: torch.Tensor, src: torch.Tensor) -> None:
@@ -314,7 +333,7 @@ class OffloadToCPU:
 
 		# Record completion event per storage so prefetch can depend on it
 		ev = torch.cuda.Event()
-		key = src.untyped_storage()
+		key = ref(src.untyped_storage())
 		(self._offload_events.setdefault(key, ev)).record(
 			self._offload_stream or torch.cuda.current_stream()
 		)

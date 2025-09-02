@@ -268,7 +268,7 @@ if __name__ == "__main__":
 			model = SimpleCNN(256)
 			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
 		case "tf":
-			seqlen = 1024
+			seqlen = 512
 			model = SimpleTransformer(128, 2048, args.pp * args.interleaving * 2, seq_len=seqlen)
 			data = Dummy((seqlen,), torch.int64, (seqlen,), torch.int64)
 		case "resnet":
