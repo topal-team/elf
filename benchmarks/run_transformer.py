@@ -1,4 +1,3 @@
-import sys
 import time
 import json
 import argparse
@@ -7,10 +6,7 @@ import logging
 import torch
 import torch.distributed as dist
 
-sys.path.append(".")
-
 from elf import Pipeline, PipelineConfig, get_sources_targets_sequential, Placement
-from elf.zb_utils import replace_linear_with_linear_dw
 from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import (
 	get_checkpointed_scheduler,
@@ -20,6 +16,8 @@ from benchmarks.benchmark_utils import (
 	init_dist,
 )
 from models.utils import add_transformer_args, build_model_from_args, get_dtype
+
+logger = logging.getLogger("run_transformer")
 
 
 class DummyOptimizer:
@@ -112,6 +110,22 @@ class MixedPrecisionOptimizer:
 		return getattr(self.optimizer, name)
 
 
+def write_detailed_stats(detailed_stats, stats_file):
+	rank, world_size = dist.get_rank(), dist.get_world_size()
+	for r in range(world_size):
+		dist.barrier()
+		if r == rank:
+			if r == 0:
+				with open(stats_file, "w") as f:
+					json.dump({rank: detailed_stats}, f, indent=2)
+			else:
+				with open(stats_file, "r") as f:
+					stats_data = json.load(f)
+				stats_data[rank] = detailed_stats
+				with open(stats_file, "w") as f:
+					json.dump(stats_data, f, indent=2)
+
+
 def parse_args():
 	"""Parse command-line options.
 
@@ -168,12 +182,14 @@ def parse_args():
 		help="Checkpointing strategy",
 	)
 	parser.add_argument("--offloading", type=int, default=None, help="Offloading ratio")
+	parser.add_argument("--prefetching-time", type=int, default=1, help="Prefetching time")
 	parser.add_argument(
 		"--log", type=str, choices=["none", "info", "debug"], default="info", help="Log level"
 	)
 	parser.add_argument(
-		"--backend", type=str, default="nccl", choices=["nccl", "mpi"], help="Backend"
+		"--backend", type=str, default="nccl", choices=["nccl", "mpi"], help="Distributed backend"
 	)
+	parser.add_argument("--stats-file", type=str, help="File to save detailed stats to")
 	parser.add_argument("--profile", action="store_true", help="Profile the training")
 
 	return parser.parse_args()
@@ -227,12 +243,12 @@ def main():
 		scheduler = get_checkpointed_scheduler(scheduler, args.checkpointing)
 
 	elif args.offloading is not None:
-		scheduler = get_offloaded_scheduler(scheduler, args.offloading)
+		scheduler = get_offloaded_scheduler(scheduler, args.offloading, args.prefetching_time)
 
 	start_time = time.time()
 	with torch.device("meta"):
 		model, dtype = build_model_from_args(args, model_type="full")
-		replace_linear_with_linear_dw(model, "meta")
+		# replace_linear_with_linear_dw(model, "meta")
 
 	if rank == 0:
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
@@ -245,7 +261,7 @@ def main():
 	else:
 		parts = model
 		sources, targets = None, None
-		sample = model.get_sample(mb_size)
+		sample = model.get_sample(mb_size, dtype=dtype)
 		if rank == 0:
 			model = meta_to_device(model, "cuda")
 
@@ -273,11 +289,17 @@ def main():
 	for _ in range(5):  # Warmup
 		optimizer.zero_grad()
 		y, loss = pipeline(
-			model.get_sample(batch_size), model.get_target(batch_size), model.loss_fn, split_size=mb_size
+			model.get_sample(batch_size, dtype=dtype),
+			model.get_target(batch_size, dtype=dtype),
+			model.loss_fn,
+			split_size=mb_size,
 		)
 
 	data = [
-		(model.get_sample(batch_size, device="cuda"), model.get_target(batch_size, device="cuda"))
+		(
+			model.get_sample(batch_size, dtype=dtype, device="cuda"),
+			model.get_target(batch_size, dtype=dtype, device="cuda"),
+		)
 		for _ in range(args.niters)
 	]
 
@@ -303,9 +325,13 @@ def main():
 		torch.cuda.cudart().cudaProfilerStop()
 
 	time.sleep(rank * 0.1)  # avoid all printing at the same time :)
-	print(
-		f"Rank {rank}: peak memory = {torch.cuda.max_memory_allocated() / 1024**3:.2f}GB", flush=True
-	)
+	if args.stats_file is not None:
+		write_detailed_stats(pipeline.detailed_stats, args.stats_file)
+	else:
+		print(
+			f"Rank {rank}: peak memory = {torch.cuda.max_memory_allocated() / 1024**3:.2f}GB", flush=True
+		)
+
 	if rank == 0:
 		time.sleep(world_size * 0.1)
 		print(

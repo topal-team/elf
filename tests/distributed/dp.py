@@ -1,5 +1,4 @@
 import os
-import sys
 import copy
 import traceback
 import logging
@@ -13,10 +12,10 @@ from torch.optim import SGD
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-sys.path.append(".")
 from elf.pipeline import Pipeline, Placement
 from elf.zb_utils import replace_linear_with_linear_dw
-from models.simple import SimpleTransformer, SimpleCNN, SimpleResNet
+from models.simple import SimpleFFN, SimpleTransformer, SimpleCNN, SimpleResNet
+from benchmarks.benchmark_utils import get_offloaded_scheduler
 
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
@@ -224,7 +223,7 @@ if __name__ == "__main__":
 	parser.add_argument(
 		"--model",
 		"-m",
-		choices=["cnn", "tf", "resnet"],
+		choices=["cnn", "tf", "resnet", "ffn"],
 		default="tf",
 		required=False,
 		help="model to use",
@@ -245,6 +244,9 @@ if __name__ == "__main__":
 	)
 	parser.add_argument(
 		"--interleaving", "-i", type=int, required=False, default=1, help="interleaving degree"
+	)
+	parser.add_argument(
+		"--offloading", type=int, default=None, required=False, help="Offloading ratio (1-m)"
 	)
 	parser.add_argument("--backend", choices=["mpi", "nccl"], default="nccl", required=False)
 	args = parser.parse_args()
@@ -272,12 +274,18 @@ if __name__ == "__main__":
 		case "resnet":
 			model = SimpleResNet(args.pp * args.interleaving)
 			data = Dummy((3, 224, 224), torch.float32, (), torch.int64)
+		case "ffn":
+			model = SimpleFFN(256, 1024, args.pp * args.interleaving)
+			data = Dummy((256,), torch.float32, (256,), torch.float32)
 
 	model = model.cuda()
 	gt = copy.deepcopy(model)
-	replace_linear_with_linear_dw(model, rank)
+	if not args.offloading:  # not supported yet
+		replace_linear_with_linear_dw(model, rank)
 
 	placement = Placement.default(args.scheduler, args.pp) * args.interleaving
+	if args.offloading is not None:
+		args.scheduler = get_offloaded_scheduler(args.scheduler, args.offloading)
 
 	pipe = Pipeline(
 		copy.deepcopy(model),
@@ -294,9 +302,6 @@ if __name__ == "__main__":
 		batch_size = split_size * args.dp * (args.pp * 2)
 		sample = model.get_sample(batch_size, device="cuda")
 		target = model.get_target(batch_size, device="cuda")
-		if rank == 0 and sample.is_floating_point():
-			print(f"Sample given to pipe : mean = {sample.mean()}, std = {sample.std()}")
-
 		y, _ = pipe(sample.clone(), target.clone(), loss_fn=model.loss_fn, split_size=split_size)
 
 		dist.barrier()

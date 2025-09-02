@@ -20,6 +20,7 @@ import os
 logger = logging.getLogger("engine")
 
 precise_timings = os.environ.get("ELF_TIMINGS", False)
+precise_memory = os.environ.get("ELF_MEMORY", False)
 
 
 def _fake_p2p(data):
@@ -149,7 +150,10 @@ class Engine:
 			- memories: total gpu memory allocated after each operation
 
 		.. warning::
-			If the environment variable ``ELF_TIMINGS`` is not set, the timings will be completely wrong.
+			If the environment variable ``ELF_TIMINGS`` is not set, the timings will be wrong.
+
+		.. warning::
+			If the environment variable ``ELF_MEMORY`` is not set, the peak memory stats will be wrong (normal allocated memory will still be right).
 
 		:rtype: List[Tensor], List[Tensor], Dict[float], Dict[Dict[Operation, float]]
 		"""
@@ -177,6 +181,10 @@ class Engine:
 		pipe_start = time.time()
 		warmup_time = None
 		memories = OrderedDict()
+		peak_memories = OrderedDict()
+
+		if precise_memory:
+			torch.cuda.reset_peak_memory_stats()
 
 		for op in schedule:
 			block = self.id_to_block.get(op.block_id)
@@ -187,6 +195,10 @@ class Engine:
 
 			if profile:
 				torch.cuda.nvtx.range_push(f"{block}:{op}")
+
+			if precise_memory:
+				torch.cuda.reset_peak_memory_stats()
+
 			if warmup_time is None and op.op != OperationType.RECV_FORWARD:
 				# Warmup time is the time spent waiting for the first forward
 				# The first operation after that is the end of warmup
@@ -205,12 +217,13 @@ class Engine:
 
 					with offloader:
 						y = block.forward(op.mb_id, **op.options)
+
 					# If the block as multiple outputs, this flattens them
 					# TODO: correctly handle that in multiple result lists
 					if y is not None:
 						for output in y:
 							if isinstance(output, torch.Tensor):
-								result.append(output.detach().requires_grad_(False))
+								result.append(output.detach())
 							else:
 								logger.warning("Non-tensor output")
 								result.append(output)
@@ -303,7 +316,12 @@ class Engine:
 				case _:
 					raise Exception(f"Unknown operation : {op}")
 
-			memories[op] = torch.cuda.memory_allocated()
+			if precise_memory:
+				torch.cuda.synchronize()
+
+			memories[str(op)] = torch.cuda.memory_allocated()
+			peak_memories[str(op)] = torch.cuda.max_memory_allocated()
+
 			if profile:
 				torch.cuda.nvtx.range_pop()
 
@@ -335,7 +353,7 @@ class Engine:
 		}
 		stats["bubble"] = stats["idle"] - stats["start_idle"] - stats["end_idle"]
 
-		detailed_stats = {"all_events": all_events, "memories": memories}
+		detailed_stats = {"all_events": all_events, "memories": memories, "peak_memory": peak_memories}
 
 		for block in self.blocks:
 			block.compute_time.clear()

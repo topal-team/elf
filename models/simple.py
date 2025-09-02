@@ -46,11 +46,11 @@ class SimpleFFN(SimpleModel):
 			x = block(x)
 		return x
 
-	def get_sample(self, batch_size, dtype=torch.float32):
-		return torch.randn((batch_size, self.hidden_size), dtype=dtype)
+	def get_sample(self, batch_size, dtype=torch.float32, device=None):
+		return torch.randn((batch_size, self.hidden_size), dtype=dtype, device=device)
 
-	def get_target(self, batch_size, dtype=torch.float32):
-		return torch.randn((batch_size, self.hidden_size), dtype=dtype)
+	def get_target(self, batch_size, dtype=torch.float32, device=None):
+		return torch.randn((batch_size, self.hidden_size), dtype=dtype, device=device)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)

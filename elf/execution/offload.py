@@ -1,5 +1,8 @@
-import torch
+import weakref
 from typing import Any, Dict, Optional, Tuple
+
+import torch
+from torch.utils.weak import WeakRef
 
 __all__ = ["OffloadToCPU", "PinnedHostTensorPool"]
 
@@ -11,6 +14,11 @@ class PinnedHostTensorPool:
 	- Sub-allocates non-overlapping views (offset/length) from parents
 	- Tracks free segments and coalesces on free
 	- Supports proactive reservation of big chunks via reserve()
+
+	:param amount: amount of memory to reserve in bytes
+	:type amount: int
+	:param dtype: dtype of the tensors to allocate
+	:type dtype: torch.dtype
 	"""
 
 	def __init__(
@@ -140,7 +148,8 @@ class PinnedHostTensorPool:
 		self._alloc_parent(dtype, elems_exact)
 
 	def size(self) -> int:
-		return sum(t.nbytes for t in self._parents_by_dtype.values())
+		# Sum bytes across all parent tensors for all dtypes
+		return sum(parent.nbytes for parents in self._parents_by_dtype.values() for parent in parents)
 
 
 _GLOBAL_PINNED_POOL: Optional[PinnedHostTensorPool] = (
@@ -166,50 +175,57 @@ class OffloadToCPU:
 	>>> model = MyLargeModel().cuda()
 	>>> with OffloadToCPU():
 	...     out = model(inp.cuda()).sum()
-	...     out.backward()
+	>>> out.backward()
 	"""
 
 	def __init__(
 		self, target_device: torch.device | str = "cpu", pool: Optional["PinnedHostTensorPool"] = None
 	) -> None:
 		self.target_device = torch.device(target_device)
-		# Maps (storage_ptr, dtype) -> tensor already moved to *target_device*
-		self._storage_map: Dict[Tuple[int, torch.dtype], torch.Tensor] = {}
+		# Maps (storage_ptr, dtype) -> tensor already moved to GPU
+		self._storage_map: Dict[WeakRef, torch.Tensor] = weakref.WeakKeyDictionary()
 		# Cache of GPU copies during backward to avoid duplicating transfers
-		self._gpu_cache: Dict[Tuple[int, torch.dtype], torch.Tensor] = {}
-		self._handle = None  # will hold the context object returned by saved_tensors_hooks
-		# Streams/events to overlap transfers
+		self._gpu_cache: Dict[WeakRef, torch.Tensor] = weakref.WeakKeyDictionary()
+		self._offload_events: Dict[WeakRef, torch.cuda.Event] = weakref.WeakKeyDictionary()
+		self._prefetch_events: Dict[WeakRef, torch.cuda.Event] = weakref.WeakKeyDictionary()
+		# Track how many elements were captured per storage
+		self._storage_len: Dict[WeakRef, int] = weakref.WeakKeyDictionary()
+		self._orig_device: Dict[WeakRef, torch.device] = weakref.WeakKeyDictionary()
+		# Streams to overlap transfers
 		self._offload_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
 		self._prefetch_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-		self._offload_events: Dict[Tuple[int, torch.dtype], torch.cuda.Event] = {}
-		self._prefetch_events: Dict[Tuple[int, torch.dtype], torch.cuda.Event] = {}
-		self._orig_device: Dict[Tuple[int, torch.dtype], torch.device] = {}
-		# Track how many elements were captured per storage
-		self._storage_len: Dict[Tuple[int, torch.dtype], int] = {}
-		# Shared pinned-host tensor pool (optional)
-		self._pool = pool or _GLOBAL_PINNED_POOL
 
-	# ---------------------------------------------------------------------
+		# Shared pinned-host memory pool (optional)
+		self._pool = pool or _GLOBAL_PINNED_POOL
+		self._handle = None  # will hold the context object returned by saved_tensors_hooks
+
+		# -- Why use WeakRef here? --
+		# If we use a storage's data_ptr, we only remember a memory address.
+		# After _save_hook returns, there is probably no reference left to that memory anymore!
+		# That's the point of doing offloading: those memory spaces can be freed.
+		# But, in that case, if the memory is freed and re-used for another tensor,
+		# we would incorrectly think that it is the same storage that we already offloaded.
+		# By using a WeakRef, we remember the reference to the actual **object**, without preventing it from being GC'ed.
+
 	# Hooks
-	# ---------------------------------------------------------------------
 	def _save_hook(self, tensor: torch.Tensor) -> Dict[str, Any]:
 		"""Hook executed when autograd saves *tensor*.
 
 		Returns a lightweight payload that contains either the off-loaded tensor
 		(the first time we encounter its storage) or just view metadata.
 		"""
-		storage_ptr = tensor.untyped_storage().data_ptr()
-		key = (storage_ptr, tensor.dtype)
+		key = tensor.untyped_storage()
 
-		# Compute minimal required span for this view to be representable
+		# Compute minimal required span for this view to be representable.
 		size_t = tuple(tensor.size())
 		stride_t = tuple(tensor.stride())
 		offset = int(tensor.storage_offset())
 		max_index = 0
 		for dim, st in zip(size_t, stride_t):
+			assert st > 0, "Stride must be positive"
 			max_index += (int(dim) - 1) * int(st)
-		required_elems = int(offset + max_index + 1)
 
+		required_elems = int(offset + max_index + 1)
 		need_copy = key not in self._storage_map or required_elems > self._storage_len.get(key, 0)
 		if need_copy:
 			cpu_storage = self._allocate_cpu_storage(required_elems, tensor)
@@ -219,7 +235,7 @@ class OffloadToCPU:
 			self._orig_device[key] = tensor.device
 
 		payload = {
-			"storage_ptr": storage_ptr,
+			"key": key,
 			"size": tuple(tensor.size()),
 			"stride": tuple(tensor.stride()),
 			"offset": tensor.storage_offset(),
@@ -230,22 +246,22 @@ class OffloadToCPU:
 		return payload
 
 	def _restore_hook(self, payload: Dict[str, Any]) -> torch.Tensor:
-		"""Recreate the original tensor from *payload* during the backward pass."""
+		"""Recreate the original tensor from payload during the backward pass."""
 		# 1. Fetch the flat CPU tensor that owns the storage
-		restore_key = (payload["storage_ptr"], payload["dtype"])
+		restore_key = payload["key"]
 		base_cpu = self._storage_map[restore_key]
 
-		# 2. Ensure a device copy exists. If prefetch in-flight, we'll wait below.
+		# 2. If not already in GPU cache, move to GPU
 		if restore_key not in self._gpu_cache:
 			self._gpu_cache[restore_key] = base_cpu.to(payload["device"], non_blocking=False)
 
 		base_dev = self._gpu_cache[restore_key]
 
-		# If a prefetch event exists, ensure current stream waits before using
-		if torch.cuda.is_available() and restore_key in self._prefetch_events:
+		# If a prefetch event exists, wait for it before using the tensor (is this needed?)
+		if restore_key in self._prefetch_events:
 			torch.cuda.current_stream().wait_event(self._prefetch_events[restore_key])
 
-		# 3. Recreate the (potentially strided) view expected by autograd.
+		# 3. Recreate the view expected by autograd
 		tensor = torch.as_strided(
 			base_dev, size=payload["size"], stride=payload["stride"], storage_offset=payload["offset"]
 		)
@@ -255,6 +271,7 @@ class OffloadToCPU:
 	def _clear_cache(self):
 		if self._prefetch_stream is not None:
 			self._prefetch_stream.synchronize()
+
 		# Return CPU buffers to pool when possible
 		if self._pool is not None:
 			for t in self._storage_map.values():
@@ -290,52 +307,54 @@ class OffloadToCPU:
 			self._offload_stream.wait_stream(torch.cuda.current_stream())
 			with torch.cuda.stream(self._offload_stream):
 				cpu_storage.copy_(flat_src, non_blocking=True)
+				# Prevent CUDA caching allocator from reusing/freeing src storage before copy completes
+				src.record_stream(self._offload_stream)
 		else:
 			cpu_storage.copy_(flat_src, non_blocking=False)
 
 		# Record completion event per storage so prefetch can depend on it
-		if torch.cuda.is_available():
-			ev = torch.cuda.Event()
-			key = (src.untyped_storage().data_ptr(), src.dtype)
-			(self._offload_events.setdefault(key, ev)).record(
-				self._offload_stream or torch.cuda.current_stream()
-			)
+		ev = torch.cuda.Event()
+		key = src.untyped_storage()
+		(self._offload_events.setdefault(key, ev)).record(
+			self._offload_stream or torch.cuda.current_stream()
+		)
 
 	def prefetch(self) -> None:
 		"""Asynchronously start copying all offloaded storages back to their original device.
 
 		Call this after forward and before backward to overlap H2D with other work.
 		"""
-		if not torch.cuda.is_available() or self._prefetch_stream is None:
+		if self._prefetch_stream is None:
 			return
 
 		for key, base_cpu in list(self._storage_map.items()):
 			if key in self._gpu_cache:
+				# Base storage already moved to GPU
 				continue
 
 			# Allocate immediately, on compute stream to avoid caching allocator issues (see PipeOffload and https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html)
 			dev = self._orig_device.get(key, torch.device("cuda"))
 			gpu_tensor = torch.empty_like(base_cpu, device=dev)
 
+			self._prefetch_stream.wait_stream(
+				torch.cuda.current_stream()
+			)  # wait for current stream to finish (so that the prefetching starts when we want, and not before!)
+
 			# Make sure that offload is finished
 			off_ev = self._offload_events.get(key)
 			if off_ev is not None:
 				self._prefetch_stream.wait_event(off_ev)
 
-			self._prefetch_stream.wait_stream(
-				torch.cuda.current_stream()
-			)  # wait for current stream to finish (so that the prefetching starts when we want, and not before!)
-
 			with torch.cuda.stream(self._prefetch_stream):
 				gpu_tensor.copy_(base_cpu, non_blocking=True)
+				# Keep the allocation alive on the prefetch stream until the copy completes
+				gpu_tensor.record_stream(self._prefetch_stream)
 				self._gpu_cache[key] = gpu_tensor
 				ev = torch.cuda.Event()
 				ev.record(self._prefetch_stream)
 				self._prefetch_events[key] = ev
 
-	# ------------------------------------------------------------------
 	# Context-manager plumbing
-	# ------------------------------------------------------------------
 	def __enter__(self) -> "OffloadToCPU":
 		# Register autograd hooks. ``saved_tensors_hooks`` returns a context-manager
 		# itself; we keep it so that we can call __exit__ on it later.

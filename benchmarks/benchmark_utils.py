@@ -285,7 +285,7 @@ def get_checkpointed_scheduler(scheduler, type):
 	return checkpointed_scheduler
 
 
-def get_offloaded_scheduler(scheduler, ratio):
+def get_offloaded_scheduler(scheduler, ratio, prefetching_time=1):
 	"""
 	Get an offloaded scheduler.
 
@@ -309,11 +309,14 @@ def get_offloaded_scheduler(scheduler, ratio):
 
 		# Start prefetching during a previous computation ("ratio" computations before the backward)
 		for rank in range(n_devices):
+			backward_op = None
 			for mb, block_id in offloaded_mbs[rank]:
 				backward_inputs_idx = None
 				for i, op in enumerate(schedule):
 					if op.block_id == block_id and op.mb_id == mb and op.op == OperationType.BACKWARD_INPUTS:
 						backward_inputs_idx = i
+						backward_op = op
+						backward_op.options[OpOptions.ACTIVATION_OFFLOAD] = True
 						break
 
 				# Count backward from BACKWARD_INPUTS to find kth computation
@@ -322,8 +325,23 @@ def get_offloaded_scheduler(scheduler, ratio):
 					op = schedule[i]
 					if op.rank == rank and op.op in compute_types:
 						computation_count += 1
-						if computation_count == ratio:
-							# Add prefetch operation before this computation
+						if op.op == OperationType.FORWARD and op.mb_id == mb:
+							# This is the offloaded forward ; there is no time to prefetch
+							# We just disable offloading for this forward
+							op.options[OpOptions.ACTIVATION_OFFLOAD] = False
+							backward_op.options[OpOptions.ACTIVATION_OFFLOAD] = False
+							break
+
+						if computation_count == prefetching_time:
+							# If last op is the offloaded forward, skip prefetching
+							for j in range(i - 1, -1, -1):
+								if schedule[j].rank == rank and schedule[j].op in compute_types:
+									if schedule[j].op == OperationType.FORWARD and schedule[j].mb_id == mb:
+										schedule[j].options[OpOptions.ACTIVATION_OFFLOAD] = False
+										backward_op.options[OpOptions.ACTIVATION_OFFLOAD] = True
+									break
+
+							# Otherwise, add prefetch operation before this computation
 							prefetch_op = Operation(block_id, mb, OperationType.PREFETCH_ACTIVATIONS, rank)
 							schedule.insert(i, prefetch_op)
 							break
