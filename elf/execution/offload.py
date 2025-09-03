@@ -240,12 +240,6 @@ class OffloadToCPU:
 			self._storage_len[key] = required_elems
 			self._orig_device[key] = tensor.device
 
-		if tensor.device.type == "cpu":
-			assert need_copy, "CPU tensor should have been copied"
-			print(
-				f"!!! CPU tensor first time encountered: {tensor.shape, tensor.dtype, tensor.device, tensor.item()} (rank {torch.distributed.get_rank()})"
-			)
-
 		payload = {
 			"key": key,
 			"size": tuple(tensor.size()),
@@ -272,7 +266,7 @@ class OffloadToCPU:
 
 		base_dev = self._gpu_cache[restore_key]
 
-		# If a prefetch event exists, wait for it before using the tensor (is this needed?)
+		# If a prefetch event exists, wait for it before using the tensor
 		if restore_key in self._prefetch_events:
 			torch.cuda.current_stream().wait_event(self._prefetch_events[restore_key])
 
@@ -367,7 +361,7 @@ class OffloadToCPU:
 			with torch.cuda.stream(self._prefetch_stream):
 				gpu_tensor.copy_(base_cpu, non_blocking=True)
 				# Keep the allocation alive on the prefetch stream until the copy completes
-				gpu_tensor.record_stream(self._prefetch_stream)
+				# gpu_tensor.record_stream(self._prefetch_stream)
 				self._gpu_cache[key] = gpu_tensor
 				ev = torch.cuda.Event()
 				ev.record(self._prefetch_stream)

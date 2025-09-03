@@ -323,9 +323,9 @@ def get_offloaded_scheduler(scheduler, ratio, prefetching_time=1):
 				computation_count = 0
 				for i in range(backward_inputs_idx - 1, -1, -1):
 					op = schedule[i]
-					if op.rank == rank and op.op in compute_types:
+					if op.rank == rank and op.op in compute_types and op.op != OperationType.BACKWARD_PARAMS: # ZB not supported yet
 						computation_count += 1
-						if op.op == OperationType.FORWARD and op.mb_id == mb:
+						if op.op == OperationType.FORWARD and op.mb_id == mb and op.block_id == block_id:
 							# This is the offloaded forward ; there is no time to prefetch
 							# We just disable offloading for this forward
 							op.options[OpOptions.ACTIVATION_OFFLOAD] = False
@@ -336,7 +336,7 @@ def get_offloaded_scheduler(scheduler, ratio, prefetching_time=1):
 							# If last op is the offloaded forward, skip prefetching
 							for j in range(i - 1, -1, -1):
 								if schedule[j].rank == rank and schedule[j].op in compute_types:
-									if schedule[j].op == OperationType.FORWARD and schedule[j].mb_id == mb:
+									if schedule[j].op == OperationType.FORWARD and schedule[j].mb_id == mb and schedule[j].block_id == block_id:
 										schedule[j].options[OpOptions.ACTIVATION_OFFLOAD] = False
 										backward_op.options[OpOptions.ACTIVATION_OFFLOAD] = True
 									break
