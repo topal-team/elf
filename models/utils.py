@@ -74,6 +74,8 @@ def get_sdpa(sdpa):
 			return "EFFICIENT_ATTENTION"
 		case "cudnn":
 			return "CUDNN_ATTENTION"
+		case "fatt3":
+			return "fatt3"
 		case _:
 			raise ValueError(f"Invalid SDPA implementation: {sdpa}")
 
@@ -195,8 +197,8 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 		"--sdp-backend",
 		type=str,
 		default=None,
-		choices=["flash", "math", "efficient", "cudnn", "none"],
-		help="Scaled-dot-product attention backend to use (torch 2.1+)",
+		choices=["flash", "math", "efficient", "cudnn", "none", "fatt3"],
+		help="Scaled-dot-product attention backend to use (torch 2.1+). Special cases: 'fatt3' for Flash Attention 3 from flash-attn library",
 	)
 
 

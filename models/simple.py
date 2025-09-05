@@ -5,6 +5,11 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 # Fused kernels (Flash, Mem-Efficient, CuDNN) require float16 or bfloat16
 
+if torch.cuda.is_available():
+	from flash_attn import flash_attn_func  # pyright: ignore[reportMissingImports]
+else:
+	flash_attn_func = None
+
 """
 This is a model zoo for tests and benchmarks.
 Most model implement a get_sample(), get_target(), and loss_fn() method for better interoperability.
@@ -249,9 +254,13 @@ class SimpleFastAttention(SimpleModel):
 		Q = self.query(inputs).unsqueeze(1)
 		K = self.key(inputs).unsqueeze(1)
 		V = self.value(inputs).unsqueeze(1)
-		with sdpa_kernel(backends=[SDPBackend.__dict__[self.sdp_backend]]):
-			context = F.scaled_dot_product_attention(Q, K, V).squeeze(1)
-			return context
+		if self.sdp_backend == "fatt3":
+			return flash_attn_func(
+				Q.transpose(1, 2), K.transpose(1, 2), V.transpose(1, 2), dropout_p=self.dropout
+			).squeeze(1)
+		else:
+			with sdpa_kernel(backends=[SDPBackend.__dict__[self.sdp_backend]]):
+				return F.scaled_dot_product_attention(Q, K, V, dropout_p=self.dropout).squeeze(1)
 
 	def get_sample(self, batch_size, dtype=torch.float32, device=None):
 		return torch.randn((batch_size, 64, self.hidden_dim), dtype=dtype, device=device)
@@ -353,9 +362,11 @@ class FastAttention(nn.Module):
 		self.sdp_backend = sdp_backend
 
 	def forward(self, q, k, v):
-		with sdpa_kernel(backends=[SDPBackend.__dict__[self.sdp_backend]]):
-			context = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
-			return context
+		if self.sdp_backend == "fatt3":
+			return flash_attn_func(q, k, v, dropout_p=self.dropout)
+		else:
+			with sdpa_kernel(backends=[SDPBackend.__dict__[self.sdp_backend]]):
+				return F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
 
 
 class MultiHeadAttention(nn.Module):
@@ -375,6 +386,8 @@ class MultiHeadAttention(nn.Module):
 		self.k_proj = nn.Linear(dim, dim, bias=False)
 		self.v_proj = nn.Linear(dim, dim, bias=False)
 
+		self.sdp_backend = sdp_backend
+
 		if sdp_backend is not None:
 			self.attn = FastAttention(self.head_dim, dropout, sdp_backend=sdp_backend)
 		else:
@@ -389,14 +402,19 @@ class MultiHeadAttention(nn.Module):
 		v = self.v_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
 
 		# Transpose for attention: (batch, num_heads, seq, head_dim)
-		q = q.transpose(1, 2)
-		k = k.transpose(1, 2)
-		v = v.transpose(1, 2)
+		# FlashAttention expects (b,s,a,h), torch expects (b,a,s,h)
+		if self.sdp_backend != "fatt3":
+			q = q.transpose(1, 2)
+			k = k.transpose(1, 2)
+			v = v.transpose(1, 2)
 
 		out = self.attn(q, k, v)
 
 		# Reshape back: (batch, seq, dim)
-		out = out.transpose(1, 2).reshape(batch_size, seq_len, self.dim)
+		if self.sdp_backend != "fatt3":
+			out = out.transpose(1, 2)
+
+		out = out.reshape(batch_size, seq_len, self.dim)
 
 		return out
 
