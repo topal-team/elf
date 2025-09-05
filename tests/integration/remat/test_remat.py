@@ -36,7 +36,7 @@ def test_selective_remat():
 	x = torch.randn(b, h, device=device, requires_grad=True)
 
 	def remat_strategy(name, module):
-		return name in ["1", "2"]
+		return name in ["1", "2"] and isinstance(module, nn.Sequential)
 
 	torch.cuda.reset_peak_memory_stats()
 	mem_before_forward_no_remat = torch.cuda.memory_allocated()

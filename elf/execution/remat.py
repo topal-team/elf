@@ -5,6 +5,7 @@ Rematerialization manager.
 from contextlib import contextmanager
 import functools
 
+import torch.nn as nn
 from torch.utils.checkpoint import (
 	checkpoint,
 	create_selective_checkpoint_contexts,
@@ -12,6 +13,23 @@ from torch.utils.checkpoint import (
 )
 
 from ..zb_utils import LayerDW
+
+
+class CheckpointWrapper(nn.Module):
+	"""Wrap a module so its forward is executed under torch.utils.checkpoint.checkpoint.
+
+	This avoids monkey-patching the original submodule. Parameters/buffers remain intact.
+	"""
+
+	def __init__(self, wrapped_module: nn.Module):
+		super().__init__()
+		self.wrapped_module = wrapped_module
+
+	def forward(self, *args, **kwargs):
+		def _forward(*a, **kw):
+			return self.wrapped_module(*a, **kw)
+
+		return checkpoint(_forward, *args, **kwargs, use_reentrant=True)
 
 
 class RematManager:
@@ -37,31 +55,32 @@ class RematManager:
 		:rtype: contextlib.ContextManager
 		"""
 
+		def _recursive_wrap(module, remat_strategy):
+			for name, child in list(module.named_children()):
+				if remat_strategy(name, child):
+					setattr(module, name, CheckpointWrapper(child))
+				else:
+					_recursive_wrap(child, remat_strategy)
+
+		def _recursive_unwrap(module):
+			for name, child in list(module.named_children()):
+				if isinstance(child, CheckpointWrapper):
+					setattr(module, name, child.wrapped_module)
+
+				_recursive_unwrap(child)
+
 		@contextmanager
 		def _selective_remat():
 			# Save original forwards and wrap with checkpoint
-			for name, module in self.block.model.named_modules():
-				if remat_strategy(name, module):
-					original = getattr(module, "forward")
-					setattr(module, "_elf_original_forward", original)
+			_recursive_wrap(self.block.model, remat_strategy)
 
-					# Be careful about the scope of "original" here!
-					def wrapped_forward(*args, original=original, **kwargs):
-						return checkpoint(original, *args, **kwargs, use_reentrant=True)
-
-					setattr(module, "forward", wrapped_forward)
 			try:
 				yield
 			finally:
-				for name, module in self.block.model.named_modules():
-					if remat_strategy(name, module):
-						# Delete unwanted activations
-						for submodule in module.modules():
-							if isinstance(submodule, LayerDW):
-								submodule.delete("input", mb_id)
-						# Restore original forwards
-						setattr(module, "forward", getattr(module, "_elf_original_forward"))
-						delattr(module, "_elf_original_forward")
+				_recursive_unwrap(self.block.model)
+				for module in self.block.model.modules():
+					if isinstance(module, LayerDW):
+						module.delete("input", mb_id)
 
 		return _selective_remat()
 
