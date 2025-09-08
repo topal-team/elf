@@ -5,9 +5,9 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 # Fused kernels (Flash, Mem-Efficient, CuDNN) require float16 or bfloat16
 
-if torch.cuda.is_available():
+try:
 	from flash_attn import flash_attn_func  # pyright: ignore[reportMissingImports]
-else:
+except ImportError:
 	flash_attn_func = None
 
 """
