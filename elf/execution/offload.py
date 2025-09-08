@@ -1,5 +1,5 @@
 from weakref import ref
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
@@ -163,21 +163,25 @@ class OffloadToCPU:
 	"""Context-manager that off-loads activation tensors to CPU during the forward pass.
 
 	It relies on ``torch.autograd.graph.saved_tensors_hooks``. When the forward pass
-	stores an activation needed for the backward pass, the *save* hook is called. We
-	immediately copy the tensor to *target_device* (default: CPU) **once per physical
-	storage**. If later tensors that *view* the same storage are saved, we only record
+	stores an activation needed for the backward pass, the save hook is called. We
+	immediately copy the tensor to target_device (default: CPU) once per physical
+	storage. If later tensors that view the same storage are saved, we only record
 	lightweight metadata (shape/stride/offset).
 
-	During the backward pass the *restore* hook reconstructs the original tensor on
+	During the backward pass the restore hook reconstructs the original tensor on
 	its original device (typically CUDA). If the saved tensor was a view, we
-	re-create the view with ``torch.as_strided`` so that storage is still shared.
+	re-create the view with torch.as_strided so that storage is still shared.
 
 	Example
 	-------
-	>>> model = MyLargeModel().cuda()
-	>>> with OffloadToCPU():
-	...     out = model(inp.cuda()).sum()
-	>>> out.backward()
+	>>> model = MyModel()
+	>>> with OffloadToCPU() as offloader:
+	...     loss = loss_fn(model(inp))
+	>>> ...
+	>>> offloader.prefetch()
+	>>> ...
+	>>> loss.backward()
+	>>> offloader.release()
 	"""
 
 	def __init__(
@@ -193,6 +197,8 @@ class OffloadToCPU:
 		# Track how many elements were captured per storage
 		self._storage_len: Dict[WeakRef, int] = {}
 		self._orig_device: Dict[WeakRef, torch.device] = {}
+
+		self._excluded_storages: set[WeakRef] = set()
 		# Streams to overlap transfers
 		self._offload_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
 		self._prefetch_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
@@ -200,6 +206,8 @@ class OffloadToCPU:
 		# Shared pinned-host memory pool (optional)
 		self._pool = pool or _GLOBAL_PINNED_POOL
 		self._handle = None  # will hold the context object returned by saved_tensors_hooks
+
+		self._copied_bytes = 0  # just a counter for debugging
 
 		# -- Why use WeakRef here? --
 		# If we use a storage's data_ptr, we only remember a memory address.
@@ -209,6 +217,9 @@ class OffloadToCPU:
 		# we would incorrectly think that it is the same storage that we already offloaded.
 		# By using a WeakRef, we remember the reference to the actual **object**, without preventing it from being GC'ed.
 
+	def _is_excluded(self, key: WeakRef) -> bool:
+		return key in self._excluded_storages
+
 	# Hooks
 	def _save_hook(self, tensor: torch.Tensor) -> Dict[str, Any]:
 		"""Hook executed when autograd saves tensor.
@@ -216,11 +227,11 @@ class OffloadToCPU:
 		Returns a lightweight payload that contains either the off-loaded tensor
 		(the first time we encounter its storage) or just view metadata.
 		"""
-		# if already on CPU, shortcut
-		if tensor.device.type == "cpu":
-			return tensor
-
 		key = ref(tensor.untyped_storage())
+
+		# if already on CPU, shortcut
+		if tensor.device.type == "cpu" or self._is_excluded(key):
+			return tensor
 
 		# Compute minimal required span for this view to be representable.
 		size_t = tuple(tensor.size())
@@ -294,6 +305,7 @@ class OffloadToCPU:
 		self._prefetch_events.clear()
 		self._orig_device.clear()
 		self._storage_len.clear()
+		self._copied_bytes = 0
 
 	# ------------------------------ helpers ------------------------------
 	def _allocate_cpu_storage(self, required_elems: int, like_tensor: torch.Tensor) -> torch.Tensor:
@@ -325,12 +337,17 @@ class OffloadToCPU:
 		else:
 			cpu_storage.copy_(flat_src, non_blocking=False)
 
+		self._copied_bytes += flat_src.nbytes
+
 		# Record completion event per storage so prefetch can depend on it
 		ev = torch.cuda.Event()
 		key = ref(src.untyped_storage())
 		(self._offload_events.setdefault(key, ev)).record(
 			self._offload_stream or torch.cuda.current_stream()
 		)
+
+	def exclude(self, storages: Iterable[torch.Tensor]) -> None:
+		self._excluded_storages.update(ref(p.untyped_storage()) for p in storages)
 
 	def prefetch(self) -> None:
 		"""Asynchronously start copying all offloaded storages back to their original device.

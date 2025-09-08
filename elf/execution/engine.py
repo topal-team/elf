@@ -166,6 +166,9 @@ class Engine:
 		offloaders = {
 			id_: [OffloadToCPU(pool=self.pool) for _ in range(len(mb_sizes))] for id_ in self.id_to_block
 		}
+		for id_, block in self.id_to_block.items():
+			for offloader in offloaders[id_]:
+				offloader.exclude(block.model.parameters())
 		# print(f"Rank {self.rank} - Pool size: {self.pool.size()}, offloaders: {offloaders}")
 
 		result = []
