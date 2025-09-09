@@ -6,7 +6,13 @@ import logging
 import torch
 import torch.distributed as dist
 
-from elf import Pipeline, PipelineConfig, get_sources_targets_sequential, Placement
+from elf import (
+	Pipeline,
+	PipelineConfig,
+	get_sources_targets_sequential,
+	Placement,
+	replace_linear_with_linear_dw,  # noqa: F401
+)
 from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import (
 	get_checkpointed_scheduler,

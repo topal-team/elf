@@ -230,7 +230,8 @@ class OffloadToCPU:
 		key = ref(tensor.untyped_storage())
 
 		# if already on CPU, shortcut
-		if tensor.device.type == "cpu" or self._is_excluded(key):
+		# We also skip small tensors to avoid the overhead of small memcpys
+		if tensor.device.type == "cpu" or self._is_excluded(key) or tensor.nbytes <= (2**20):
 			return tensor
 
 		# Compute minimal required span for this view to be representable.

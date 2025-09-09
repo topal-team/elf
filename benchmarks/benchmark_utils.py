@@ -12,7 +12,7 @@ from elf import Pipeline, get_sources_targets_sequential
 from elf.zb_utils import LayerDW
 from elf.registry import SCHEDULERS, resolve
 from elf.scheduling.scheduling import Operation, OpOptions, OperationType, compute_types
-from models.simple import Attention, FullTransformer, TransformerBlock
+from models.simple import Attention, FastAttention, FullTransformer, TransformerBlock
 
 
 def init_dist(backend="nccl"):
@@ -269,7 +269,7 @@ def get_checkpointed_scheduler(scheduler, type):
 	elif type == "selective":
 
 		def checkpoint(name, module):
-			return isinstance(module, Attention)
+			return isinstance(module, (Attention, FastAttention))
 
 	else:
 		raise ValueError(f"Invalid checkpointing type: {type}")
@@ -323,7 +323,9 @@ def get_offloaded_scheduler(scheduler, ratio, prefetching_time=1):
 				computation_count = 0
 				for i in range(backward_inputs_idx - 1, -1, -1):
 					op = schedule[i]
-					if op.rank == rank and op.op in compute_types and op.op != OperationType.BACKWARD_PARAMS: # ZB not supported yet
+					if (
+						op.rank == rank and op.op in compute_types and op.op != OperationType.BACKWARD_PARAMS
+					):  # ZB not supported yet
 						computation_count += 1
 						if op.op == OperationType.FORWARD and op.mb_id == mb and op.block_id == block_id:
 							# This is the offloaded forward ; there is no time to prefetch
@@ -336,7 +338,11 @@ def get_offloaded_scheduler(scheduler, ratio, prefetching_time=1):
 							# If last op is the offloaded forward, skip prefetching
 							for j in range(i - 1, -1, -1):
 								if schedule[j].rank == rank and schedule[j].op in compute_types:
-									if schedule[j].op == OperationType.FORWARD and schedule[j].mb_id == mb and schedule[j].block_id == block_id:
+									if (
+										schedule[j].op == OperationType.FORWARD
+										and schedule[j].mb_id == mb
+										and schedule[j].block_id == block_id
+									):
 										schedule[j].options[OpOptions.ACTIVATION_OFFLOAD] = False
 										backward_op.options[OpOptions.ACTIVATION_OFFLOAD] = True
 									break
