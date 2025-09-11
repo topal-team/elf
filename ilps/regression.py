@@ -57,14 +57,12 @@ y_no_recomp = np.array(no_recompute_data["times"])
 
 # Memory arrays (post-op and peak)
 mem_post_no_recomp = np.array(no_recompute_data["memory_post"])
-mem_peak_no_recomp = np.array(no_recompute_data["memory_peak"])
 
 param_size_per_block = np.array(no_recompute_data["param_size_per_block"])
 
 X_recomp = np.array(recompute_data["features"])
 y_recomp = np.array(recompute_data["times"])
 mem_post_recomp = np.array(recompute_data["memory_post"])
-mem_peak_recomp = np.array(recompute_data["memory_peak"])
 
 # Create interaction feature manually (n_blocks * batch_size)
 X_poly_no_recomp = np.array([X_no_recomp[:, 0] * X_no_recomp[:, 1]]).T
@@ -79,19 +77,17 @@ stage_config["Mparams"] = float(np.mean(param_size_per_block))
 # Post-operation memory (matches previous behaviour)
 stage_config["M"] = []
 # Peak memory values
-stage_config["Mpeak"] = []
 
 ops = ["f", "b", "w"]
 # Update runtime memory metrics in config
 # For no recomputation
 for i in range(len(ops)):
 	stage_config["M"].append(float(np.mean(mem_post_no_recomp[:, i])))
-	stage_config["Mpeak"].append(float(np.mean(mem_peak_no_recomp[:, i])))
 
 
 # For recomputation
-sr_mem_kept_peak = float(np.mean(mem_peak_recomp[:, ops.index("f")]))
-sr_mem_freed_peak = stage_config["Mpeak"][ops.index("f")] - sr_mem_kept_peak
+sr_mem_kept_peak = float(np.mean(mem_post_recomp[:, ops.index("f")]))
+sr_mem_freed_peak = stage_config["M"][ops.index("f")] - sr_mem_kept_peak
 
 
 # Run regression for timing metrics and update config

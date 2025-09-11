@@ -17,15 +17,12 @@ Arguments:
     --iterations, -i: Number of iterations for each configuration (default: 100)
 """
 
-import sys
 import json
 import argparse
 import os
 
 import torch
 from torch.utils.checkpoint import checkpoint
-
-sys.path.append(".")
 
 from models.simple import Attention, ChainTransformer
 from models.utils import add_transformer_args, model_config_from_args
@@ -80,7 +77,8 @@ def parse_args():
 def create_model(config, n):
 	config["n_blocks"] = n
 	dtype = config.pop("dtype")
-	model = ChainTransformer(**config).to(dtype).to("cuda")
+	with torch.device("cuda"):
+		model = ChainTransformer(**config).to(dtype)
 	replace_linear_with_linear_dw(model, "cuda")
 	config["dtype"] = dtype
 	return model
@@ -115,7 +113,6 @@ def measure_times(model, batch_size, n_iter, precision):
 	ops = ["F", "B", "W"]
 	times = [[], [], []]
 	post_mems = [[], [], []]
-	peak_mems = [[], [], []]
 
 	for i in range(n_iter):
 		sample = model.get_sample(batch_size, precision, device="cuda")
@@ -127,7 +124,6 @@ def measure_times(model, batch_size, n_iter, precision):
 			y = model(sample)
 		torch.cuda.synchronize()
 		times[0].append(t.time())
-		peak_mems[0].append(torch.cuda.max_memory_allocated() - start_mem)
 		post_mems[0].append(torch.cuda.memory_allocated() - start_mem)
 
 		# Backward pass (B)
@@ -139,7 +135,6 @@ def measure_times(model, batch_size, n_iter, precision):
 		times[1].append(t.time())
 		# Peak is the additional memory, not counting what's already in memory
 		# So we subtract the post-op memory from the previous one
-		peak_mems[1].append(torch.cuda.max_memory_allocated() - start_mem - post_mems[0][-1])
 		post_mems[1].append(torch.cuda.memory_allocated() - start_mem)
 
 		# Weight update (W)
@@ -148,37 +143,27 @@ def measure_times(model, batch_size, n_iter, precision):
 			bparams(model)
 		torch.cuda.synchronize()
 		times[2].append(t.time())
-		peak_mems[2].append(torch.cuda.max_memory_allocated() - start_mem - post_mems[1][-1])
 		post_mems[2].append(torch.cuda.memory_allocated() - start_mem)
 
 	avg_times = []
 	avg_post_mems_per_block_batch = []
-	avg_peak_mems_per_block_batch = []
 
 	for i in range(len(ops)):
 		t = 1000 * sum(times[i]) / len(times[i])
 		post_m = sum(post_mems[i]) / len(post_mems[i]) / 1024 / 1024
-		peak_m = sum(peak_mems[i]) / len(peak_mems[i]) / 1024 / 1024
 		post_mem_per_block_batch = post_m / (n_blocks * batch_size)
-		peak_mem_per_block_batch = peak_m / (n_blocks * batch_size)
 		print(
 			f"{ops[i]}: {t:.3f}ms ({t / n_blocks:.3f} / block), "
-			f"{post_mem_per_block_batch:.3f}MB post | {peak_mem_per_block_batch:.3f}MB peak / block / batch size"
+			f"{post_mem_per_block_batch:.3f}MB post / block / batch size"
 		)
 		avg_times.append(t)
 		avg_post_mems_per_block_batch.append(post_mem_per_block_batch)
-		avg_peak_mems_per_block_batch.append(peak_mem_per_block_batch)
 
 	# Cleanup
 	del model
 	torch.cuda.empty_cache()
 
-	return (
-		avg_times,
-		avg_post_mems_per_block_batch,
-		avg_peak_mems_per_block_batch,
-		param_size_per_block,
-	)
+	return (avg_times, avg_post_mems_per_block_batch, param_size_per_block)
 
 
 def measure_memory_only(model, batch_size, precision):
@@ -279,20 +264,8 @@ def main():
 	print(f"  iterations: {n_iter}")
 
 	stats = {
-		"no_recompute": {
-			"times": [],
-			"features": [],
-			"memory_post": [],
-			"memory_peak": [],
-			"param_size_per_block": [],
-		},
-		"recompute": {
-			"times": [],
-			"features": [],
-			"memory_post": [],
-			"memory_peak": [],
-			"param_size_per_block": [],
-		},
+		"no_recompute": {"times": [], "features": [], "memory_post": [], "param_size_per_block": []},
+		"recompute": {"times": [], "features": [], "memory_post": [], "param_size_per_block": []},
 		"mfp_per_block_batch": 0,
 		"mbp_per_block_batch": 0,
 	}
@@ -315,14 +288,11 @@ def main():
 			print(f"\nMeasuring for {n} blocks, batch size {bs}:")
 			try:
 				model = create_model(config, n)
-				times, mems_post, mems_peak, param_size_per_block = measure_times(
-					model, bs, n_iter, precision
-				)
+				times, mems_post, param_size_per_block = measure_times(model, bs, n_iter, precision)
 
 				stats["no_recompute"]["times"].append(times)
 				stats["no_recompute"]["features"].append([n, bs])
 				stats["no_recompute"]["memory_post"].append(mems_post)
-				stats["no_recompute"]["memory_peak"].append(mems_peak)
 				stats["no_recompute"]["param_size_per_block"].append(param_size_per_block)
 			except torch.cuda.OutOfMemoryError:
 				print(f"CUDA out of memory for {n} blocks, batch size {bs}, skipping")
@@ -335,13 +305,10 @@ def main():
 			try:
 				model = create_model(config, n)
 				model = apply_checkpointing(model)
-				times, mems_post, mems_peak, param_size_per_block = measure_times(
-					model, bs, n_iter, precision
-				)
+				times, mems_post, param_size_per_block = measure_times(model, bs, n_iter, precision)
 				stats["recompute"]["times"].append(times)
 				stats["recompute"]["features"].append([n, bs])
 				stats["recompute"]["memory_post"].append(mems_post)
-				stats["recompute"]["memory_peak"].append(mems_peak)
 				stats["recompute"]["param_size_per_block"].append(param_size_per_block)
 			except torch.cuda.OutOfMemoryError:
 				print(f"CUDA out of memory for {n} blocks, batch size {bs}, skipping")
