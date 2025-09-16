@@ -1,21 +1,12 @@
 #!/usr/bin/env python
 """
-Communication profiling script for distributed model execution.
+Communication profiling for distributed model execution.
 
-This script measures the time required for communication between GPUs in a
-distributed setting. It performs send/receive operations to calculate average
-communication time and updates the configuration file with the Tcomm parameter.
+Measures average communication time (send/recv) for a tensor shaped like a stage
+boundary activation and writes the scalar Tcomm into all stages of the config.
 
 Usage:
-    torchrun --nproc-per-node=2 ilps/profiling-comms.py --config CONFIG_FILE [options]
-
-Arguments:
-    --config_file: Path to the configuration file to update (default: ilps/configs/default.json)
-    --output_file: Path to save the updated configuration file (defaults to overwriting config_file)
-    --microbatch_size: Microbatch size for communication (default: 2)
-    --iterations: Number of iterations for timing (default: 1000)
-
-Note: This script must be run with at least 2 GPUs using torchrun or a similar launcher.
+    torchrun --nproc-per-node=2 ilps/profiling-comms.py --config-file CONFIG_JSON [options]
 """
 
 import os
@@ -41,19 +32,19 @@ def parse_args():
 	parser = argparse.ArgumentParser(description="Measure communication time between GPUs")
 	# Script-specific arguments
 	parser.add_argument(
-		"--output-file",
+		"--output",
 		type=str,
 		help="Path to save the updated configuration file (defaults to overwriting config_file)",
 	)
 	parser.add_argument(
-		"--microbatch_size", type=int, default=2, help="Microbatch size for communication (default: 2)"
+		"--microbatch_size", type=int, default=1, help="Microbatch size for communication (default: 1)"
 	)
 	parser.add_argument(
-		"--iterations", type=int, default=1000, help="Number of iterations for timing (default: 1000)"
+		"--iterations", type=int, default=100, help="Number of iterations for timing (default: 100)"
 	)
 
 	# Add model hyper-parameter flags (provides --config-file, etc.)
-	add_transformer_args(parser, model_type="chain")
+	add_transformer_args(parser, model_type="full")
 
 	return parser.parse_args()
 
@@ -72,7 +63,7 @@ def main():
 	# ------------------------------------------------------------------
 	# Build model configuration using shared helper
 	# ------------------------------------------------------------------
-	config = model_config_from_args(args, model_type="chain")
+	config = model_config_from_args(args, model_type="full")
 	hidden_size = config["hidden_dim"]
 	seq_len = config["seq_len"]
 	dtype = config["dtype"]
@@ -163,17 +154,17 @@ def main():
 
 		# Update configuration file if we managed to read it
 		if config_json is not None:
-			output_file = args.output_file if args.output_file else config_file
+			output = args.output if args.output else config_file
 
 			try:
 				for stage in config_json["stages"]:
 					stage["Tcomm"] = avg_comm
 
-				os.makedirs(os.path.dirname(output_file), exist_ok=True)
-				with open(output_file, "w") as f:
+				os.makedirs(os.path.dirname(output), exist_ok=True)
+				with open(output, "w") as f:
 					json.dump(config_json, f, indent=2)
 
-				print(f"Updated Tcomm value ({avg_comm:.6f} ms) in {output_file}")
+				print(f"Updated Tcomm value ({avg_comm:.6f} ms) in {output}")
 			except Exception as e:
 				print(f"Error updating configuration file: {e}")
 				print(traceback.format_exc())

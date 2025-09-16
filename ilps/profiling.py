@@ -1,20 +1,20 @@
 #!/usr/bin/env python
 """
-Profiling script for transformer model performance measurement.
+Per-stage profiling for partitioned FullTransformer models.
 
-This script measures forward, backward, and weight update times and memory usage
-for different transformer model configurations. It collects performance metrics
-with and without activation recomputation (checkpointing).
+Profiles each stage of a partitioned FullTransformer individually and emits raw
+per-stage statistics without linear regression or scaling. These raw stats can
+be consumed directly by the ILPs.
+
+Measured per stage (no recompute and selective forward recompute):
+  - Times: [Tf, Tb, Tw] in milliseconds
+  - Post-op memory deltas: [Mf, Mb, Mw] in MB
+  - Peak memory per op: [PeakF, PeakB, PeakW] in MB
+  - Parameter size: Mparams in MB
+Additionally, we measure per-stage Mfp and Mbp.
 
 Usage:
-    python ilps/profiling.py --config CONFIG_FILE --output OUTPUT_FILE [options]
-
-Arguments:
-    --config, -c: JSON file with model hyperparameters
-    --output, -o: Output file path for the statistics
-    --blocks, -b: Comma-separated list of block sizes to test (default: 1,2,4)
-    --batch-sizes, -bs: Comma-separated list of batch sizes to test (default: 1,2,4)
-    --iterations, -i: Number of iterations for each configuration (default: 100)
+    python ilps/profiling.py --output OUTPUT_FILE --nstages 4 [model options]
 """
 
 import json
@@ -24,10 +24,11 @@ import os
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from models.simple import Attention, ChainTransformer
+from models.simple import Attention, FullTransformer
 from models.utils import add_transformer_args, model_config_from_args
 from elf.zb_utils import LayerDW, replace_linear_with_linear_dw
 from elf.utils import Timer
+from benchmarks.benchmark_utils import meta_to_device
 
 # -----------------------------------------------------------------------------
 # CLI parsing
@@ -36,201 +37,190 @@ from elf.utils import Timer
 
 def parse_args():
 	parser = argparse.ArgumentParser(
-		description="Measure transformer performance with different configurations"
+		description="Per-stage profiling for partitioned FullTransformer"
 	)
 	# Script-specific arguments
 	parser.add_argument(
 		"--output",
 		"-o",
 		type=str,
-		default="results/regression_stats.json",
-		help="Output file path for the statistics (default: results/regression_stats.json)",
+		default="results/stage_stats.json",
+		help="Output file path for the statistics (default: results/stage_stats.json)",
 	)
 	parser.add_argument(
-		"--blocks",
-		"-b",
-		type=str,
-		default="1,2,4",
-		help="Comma-separated list of block sizes to test (default: 1,2,4)",
+		"--nstages",
+		"-n",
+		type=int,
+		default=4,
+		help="Number of partitions/stages to split the model into (default: 4)",
 	)
 	parser.add_argument(
-		"--batch-sizes",
-		"-bs",
-		type=str,
-		default="1,2,4",
-		help="Comma-separated list of batch sizes to test (default: 1,2,4)",
+		"--batch-size", "-bs", type=int, default=1, help="Batch size for profiling (default: 1)"
 	)
 	parser.add_argument(
 		"--iterations",
 		"-i",
 		type=int,
-		default=10,
-		help="Number of iterations to run for each configuration (default: 10)",
+		default=5,
+		help="Number of iterations for timing averages (default: 5)",
 	)
 
 	# Add model hyper-parameter flags from utils (includes --sdp-backend, --config-file, ...)
-	add_transformer_args(parser, model_type="chain")
+	add_transformer_args(parser, model_type="full")
 
 	return parser.parse_args()
 
 
-def create_model(config, n):
-	config["n_blocks"] = n
-	dtype = config.pop("dtype")
-	with torch.device("cuda"):
-		model = ChainTransformer(**config).to(dtype)
-	replace_linear_with_linear_dw(model, "cuda")
-	config["dtype"] = dtype
-	return model
+def _partition_full_transformer(model: FullTransformer, nstages: int):
+	"""Create a simple sequential partition of a FullTransformer into nstages.
+
+	The first stage wraps the embedding + a slice of blocks, the last stage wraps
+	the remaining blocks + output head, intermediate stages contain only blocks.
+	"""
+	assert len(model.blocks) >= nstages, "nstages must be <= number of blocks"
+	num_blocks = len(model.blocks)
+	base = num_blocks // nstages
+	rem = num_blocks % nstages
+
+	parts = []
+	start = 0
+	for i in range(nstages):
+		count = base + (1 if i < rem else 0)
+		end = start + count
+		modules = []
+		if i == 0:
+			modules.append(model.embed)
+		modules.extend(model.blocks[start:end])
+		if i == nstages - 1:
+			modules.append(model.head)
+		parts.append(torch.nn.Sequential(*modules))
+		start = end
+	return parts
 
 
-def bparams(model):
-	for module in model.modules():
+def _stage_bparams(stage: torch.nn.Module):
+	for module in stage.modules():
 		if isinstance(module, LayerDW):
 			module.move_last_computed("input", 0)
 			module.move_last_computed("grad_output", 0)
 			module.backward(0)
 
 
-def measure_times(model, batch_size, n_iter, precision):
-	n_blocks = model.num_blocks if hasattr(model, "num_blocks") else len(model.blocks)
-	# Calculate parameter memory
-	param_size = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024 / 1024
-	param_size_per_block = param_size / n_blocks
+def _stage_clear(stage: torch.nn.Module):
+	for module in stage.modules():
+		if isinstance(module, LayerDW):
+			module.clear()
 
-	print(f"Param size per block: {param_size_per_block:.3f}MB / block")
+
+def _get_stage_sample(
+	stage: torch.nn.Sequential, batch_size: int, dtype: torch.dtype, hidden_dim: int, seq_len: int
+):
+	# If the first submodule is embedding, feed token ids; otherwise feed hidden states
+	first = stage[0]
+	if isinstance(first, torch.nn.Embedding):
+		return torch.randint(
+			0, first.num_embeddings, (batch_size, seq_len), dtype=torch.int64, device="cuda"
+		)
+	else:
+		return torch.randn(batch_size, seq_len, hidden_dim, dtype=dtype, device="cuda")
+
+
+def _measure_stage_times(stage: torch.nn.Module, sample, n_iter: int):
+	ops = ["f", "b", "w"]
+	times = {k: [] for k in ops}
+	mems = {k: [] for k in ops}
+	peaks = {k: [] for k in ops}
 
 	# Warmup
-	sample = model.get_sample(batch_size, precision, device="cuda")
-	for _ in range(5):
-		y = model(sample)
-		y.sum().backward()
-		bparams(model)
-
-	del y
+	y = stage(sample)
+	y.sum().backward()
+	_stage_bparams(stage)
 	torch.cuda.synchronize()
 
-	ops = ["F", "B", "W"]
-	times = [[], [], []]
-	post_mems = [[], [], []]
-
-	for i in range(n_iter):
-		sample = model.get_sample(batch_size, precision, device="cuda")
-
-		# Forward pass (F)
-		start_mem = torch.cuda.memory_allocated()
+	for _ in range(n_iter):
+		# Forward
 		torch.cuda.reset_peak_memory_stats()
+		start_mem = torch.cuda.memory_allocated()
 		with Timer() as t:
-			y = model(sample)
+			y = stage(sample)
 		torch.cuda.synchronize()
-		times[0].append(t.time())
-		post_mems[0].append(torch.cuda.memory_allocated() - start_mem)
+		times["f"].append(1000 * t.time())
+		mems["f"].append((torch.cuda.memory_allocated() - start_mem) / 1024 / 1024)
+		peaks["f"].append((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
 
-		# Backward pass (B)
+		# Backward
 		torch.cuda.reset_peak_memory_stats()
 		with Timer() as t:
 			y.sum().backward()
 			del y
 		torch.cuda.synchronize()
-		times[1].append(t.time())
-		# Peak is the additional memory, not counting what's already in memory
-		# So we subtract the post-op memory from the previous one
-		post_mems[1].append(torch.cuda.memory_allocated() - start_mem)
+		times["b"].append(1000 * t.time())
+		mems["b"].append((torch.cuda.memory_allocated() - start_mem) / 1024 / 1024)
+		peaks["b"].append((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
 
-		# Weight update (W)
+		# Weight update
 		torch.cuda.reset_peak_memory_stats()
 		with Timer() as t:
-			bparams(model)
+			_stage_bparams(stage)
 		torch.cuda.synchronize()
-		times[2].append(t.time())
-		post_mems[2].append(torch.cuda.memory_allocated() - start_mem)
+		times["w"].append(1000 * t.time())
+		mems["w"].append((torch.cuda.memory_allocated() - start_mem) / 1024 / 1024)
+		peaks["w"].append((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
 
-	avg_times = []
-	avg_post_mems_per_block_batch = []
-
-	for i in range(len(ops)):
-		t = 1000 * sum(times[i]) / len(times[i])
-		post_m = sum(post_mems[i]) / len(post_mems[i]) / 1024 / 1024
-		post_mem_per_block_batch = post_m / (n_blocks * batch_size)
-		print(
-			f"{ops[i]}: {t:.3f}ms ({t / n_blocks:.3f} / block), "
-			f"{post_mem_per_block_batch:.3f}MB post / block / batch size"
-		)
-		avg_times.append(t)
-		avg_post_mems_per_block_batch.append(post_mem_per_block_batch)
-
-	# Cleanup
-	del model
-	torch.cuda.empty_cache()
-
-	return (avg_times, avg_post_mems_per_block_batch, param_size_per_block)
+	avg_times = [float(sum(times[k]) / len(times[k])) for k in ops]
+	avg_mems = [float(sum(mems[k]) / len(mems[k])) for k in ops]
+	avg_peaks = [float(sum(peaks[k]) / len(peaks[k])) for k in ops]
+	return avg_times, avg_mems, avg_peaks
 
 
-def measure_memory_only(model, batch_size, precision):
-	"""Separate function to measure only Mfp and Mbp without doing timing measurements"""
-	n_blocks = len(model.blocks)
-	sample = model.get_sample(batch_size, precision, device="cuda")
+def _measure_stage_mfp_mbp(stage: torch.nn.Module, sample) -> tuple[float, float]:
+	"""Measure Mfp and Mbp (in MB) for a single stage.
 
+	- Mfp: memory kept by activations after backward (inputs kept, grad_outputs cleared)
+	- Mbp: memory kept by gradients after forward (grad_outputs kept, inputs cleared)
+	"""
 	# Warmup for initial param grads allocations
-	y = model(sample)
+	y = stage(sample)
 	y.sum().backward()
 
 	# Clear all saved tensors
 	del y
-	for layer in model.modules():
+	for layer in stage.modules():
 		if isinstance(layer, LayerDW):
 			layer.clear()
 
-	# Measure Mfp (memory for activations)
+	# Measure Mfp
 	start_mem = torch.cuda.memory_allocated()
-	y = model(sample)
+	y = stage(sample)
 	y.sum().backward()
-
 	del y
-
-	# Clear gradient outputs while keeping inputs
-	for layer in model.modules():
+	for layer in stage.modules():
 		if isinstance(layer, LayerDW):
 			layer.last_grad_output = None
+	mfp_mb = (torch.cuda.memory_allocated() - start_mem) / 1024 / 1024
 
-	mfp_val = torch.cuda.memory_allocated() - start_mem
-	mfp_per_block_batch = mfp_val / (n_blocks * batch_size) / 1024 / 1024
-	print(f"Mfp: {mfp_per_block_batch:.3f}MB")
-
-	# Reset for next measurement
-	for layer in model.modules():
+	# Reset
+	for layer in stage.modules():
 		if isinstance(layer, LayerDW):
 			layer.clear()
-
 	torch.cuda.empty_cache()
-	sample = model.get_sample(batch_size, precision, device="cuda")
 
-	# Measure Mbp (memory for gradients)
+	# Mbp
 	start_mem = torch.cuda.memory_allocated()
-	y = model(sample)
+	y = stage(sample)
 	y.sum().backward()
-
 	del y
-
-	# Clear inputs while keeping gradient outputs
-	for layer in model.modules():
+	for layer in stage.modules():
 		if isinstance(layer, LayerDW):
 			layer.last_input = None
+	mbp_mb = (torch.cuda.memory_allocated() - start_mem) / 1024 / 1024
 
-	mbp_val = torch.cuda.memory_allocated() - start_mem
-	mbp_per_block_batch = mbp_val / (n_blocks * batch_size) / 1024 / 1024
-	print(f"Mbp: {mbp_per_block_batch:.3f}MB")
-
-	# Cleanup
-	del model
-	torch.cuda.empty_cache()
-
-	return mfp_per_block_batch, mbp_per_block_batch
+	return float(mfp_mb), float(mbp_mb)
 
 
-def apply_checkpointing(model):
-	"""Apply selective recomputation via checkpointing to attention layers"""
-	for name, module in model.named_modules():
+def _apply_checkpointing(stage: torch.nn.Module):
+	"""Apply selective recomputation via checkpointing to attention layers in a stage"""
+	for _, module in stage.named_modules():
 		if isinstance(module, Attention):
 			original_forward = getattr(module, "forward")
 
@@ -238,90 +228,118 @@ def apply_checkpointing(model):
 				return checkpoint(original_forward, *args, **kwargs, use_reentrant=True)
 
 			setattr(module, "forward", wrapped_forward)
-	return model
+	return stage
 
 
 def main():
 	args = parse_args()
 
 	# Build the model configuration using the shared helper
-	config = model_config_from_args(args, model_type="chain")
-
-	precision = config.get("dtype")
-
-	# Parse block sizes and batch sizes from command line
-	block_sizes = [int(x) for x in args.blocks.split(",")]
-	batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
-	n_iter = args.iterations
+	config = model_config_from_args(args, model_type="full")
+	dtype = config.get("dtype")
+	hidden_dim = config["hidden_dim"]
+	seq_len = config["seq_len"]
 
 	print("Using model configuration:")
 	for key, value in config.items():
 		print(f"  {key}: {value}")
+	print(f"nstages: {args.nstages}")
+	print(f"batch_size: {args.batch_size}")
+	print(f"iterations: {args.iterations}")
 
-	print("Testing with:")
-	print(f"  block_sizes: {block_sizes}")
-	print(f"  batch_sizes: {batch_sizes}")
-	print(f"  iterations: {n_iter}")
+	# Instantiate full model once on CUDA
+	with torch.device("meta"):
+		model = FullTransformer(**{k: v for k, v in config.items() if k != "dtype"}).to(dtype)
+	# Partition into stages (simple balanced split)
+	stages = _partition_full_transformer(model, args.nstages)
+	# Replace linears with LayerDW for each stage for W update simulation
+	for s in stages:
+		replace_linear_with_linear_dw(s, "meta")
 
-	stats = {
-		"no_recompute": {"times": [], "features": [], "memory_post": [], "param_size_per_block": []},
-		"recompute": {"times": [], "features": [], "memory_post": [], "param_size_per_block": []},
-		"mfp_per_block_batch": 0,
-		"mbp_per_block_batch": 0,
-	}
+	# Measure per stage
+	staged_stats = []
 
-	# First, collect Mfp and Mbp metrics (just once, as they are normalized per block and batch)
-	print("\nMeasuring Mfp and Mbp metrics:")
-	# Use the first block size and batch size for measurement
-	n = block_sizes[0]
-	bs = batch_sizes[0]
-	print(f"\nMeasuring memory for {n} blocks, batch size {bs}:")
-	model = create_model(config, n)
-	mfp, mbp = measure_memory_only(model, bs, precision)
-	stats["mfp_per_block_batch"] = mfp
-	stats["mbp_per_block_batch"] = mbp
+	# Dedup identical stages by structural signature (parameter shapes and module types)
+	def stage_signature(stage: torch.nn.Module) -> tuple:
+		mods = []
+		for name, mod in stage.named_modules():
+			if name == "":
+				continue
+			mods.append(type(mod).__name__)
+		params = [(tuple(p.shape), p.dtype) for p in stage.parameters(recurse=True)]
+		return (tuple(mods), tuple(params))
 
-	# Then measure performance without recomputation
-	print("\nMeasuring performance without recomputation:")
-	for n in block_sizes:
-		for bs in batch_sizes:
-			print(f"\nMeasuring for {n} blocks, batch size {bs}:")
-			try:
-				model = create_model(config, n)
-				times, mems_post, param_size_per_block = measure_times(model, bs, n_iter, precision)
+	sig_to_stats: dict[tuple, dict] = {}
+	for idx, stage in enumerate(stages):
+		print(f"\nProfiling stage {idx}/{len(stages) - 1}")
+		sig = stage_signature(stage)
+		if sig in sig_to_stats:
+			print("Identical stage detected; reusing measured stats.")
+			staged_stats.append(sig_to_stats[sig])
+			continue
+		stage = meta_to_device(stage)
+		sample = _get_stage_sample(stage, args.batch_size, dtype, hidden_dim, seq_len)
 
-				stats["no_recompute"]["times"].append(times)
-				stats["no_recompute"]["features"].append([n, bs])
-				stats["no_recompute"]["memory_post"].append(mems_post)
-				stats["no_recompute"]["param_size_per_block"].append(param_size_per_block)
-			except torch.cuda.OutOfMemoryError:
-				print(f"CUDA out of memory for {n} blocks, batch size {bs}, skipping")
+		# No recompute
+		times_nr, mems_nr, peaks_nr = _measure_stage_times(stage, sample, args.iterations)
 
-	print("\n-- With selective recomputation --\n")
+		# SR on forward (attention only)
+		stage_sr = _apply_checkpointing(stage)
+		times_sr, mems_sr, peaks_sr = _measure_stage_times(stage_sr, sample, args.iterations)
 
-	for n in block_sizes:
-		for bs in batch_sizes:
-			print(f"\nMeasuring recompute for {n} blocks, batch size {bs}:")
-			try:
-				model = create_model(config, n)
-				model = apply_checkpointing(model)
-				times, mems_post, param_size_per_block = measure_times(model, bs, n_iter, precision)
-				stats["recompute"]["times"].append(times)
-				stats["recompute"]["features"].append([n, bs])
-				stats["recompute"]["memory_post"].append(mems_post)
-				stats["recompute"]["param_size_per_block"].append(param_size_per_block)
-			except torch.cuda.OutOfMemoryError:
-				print(f"CUDA out of memory for {n} blocks, batch size {bs}, skipping")
+		# Mfp/Mbp for backward remat options
+		mfp_mb, mbp_mb = _measure_stage_mfp_mbp(stage, sample)
 
-	# Save stats to file
+		# Parameter memory in MB for stage
+		mparams_mb = sum(p.numel() * p.element_size() for p in stage.parameters()) / 1024 / 1024
+
+		# Forward SR: memory freed and overhead
+		sr_mem_freed = max(mems_nr[0] - mems_sr[0], 0.0)
+		sr_overhead = max(times_sr[1] - times_nr[1], 0.0)  # additional backward time
+
+		stage_cfg = {
+			"T": times_nr,  # [Tf, Tb, Tw]
+			"M": mems_nr,  # [Mf, Mb, Mw]
+			"Mpeak": peaks_nr,  # [PeakF, PeakB, PeakW]
+			"Mparams": float(mparams_mb),
+			"Tcomm": 0.0,  # to be filled by profiling-comms.py
+			"forward_remat_options": [
+				{"name": "selective_fwd", "overhead": float(sr_overhead), "mem_freed": float(sr_mem_freed)}
+			],
+			"backward_remat_options": [
+				{"name": "activations_bwd", "overhead": float(times_nr[0]), "mem_freed": float(mfp_mb)}
+			],
+			# Keep Mbp in case downstream consumers need it
+			"Mfp": float(mfp_mb),
+			"Mbp": float(mbp_mb),
+		}
+		staged_stats.append(stage_cfg)
+		sig_to_stats[sig] = stage_cfg
+
+		_stage_clear(stage)
+		stage.to("meta")
+
+	# Save results merged into provided config JSON if available
 	output_path = args.output
-	print(f"Saving results to {output_path}")
+	print(f"\nSaving results to {output_path}")
 
-	# Ensure the directory exists
+	merged = None
+	base_cfg_path = getattr(args, "config_file", None)
+	if base_cfg_path:
+		try:
+			with open(base_cfg_path, "r") as f:
+				merged = json.load(f)
+		except Exception:
+			merged = None
+
+	if merged is None:
+		merged = {"model": config}
+
+	merged["stages"] = staged_stats
+
 	os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
 	with open(output_path, "w") as f:
-		json.dump(stats, f)
+		json.dump(merged, f, indent=2)
 
 
 if __name__ == "__main__":
