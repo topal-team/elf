@@ -26,7 +26,7 @@ rule clean:
 		log_dir=config["LOG_DIR"],
 		results_dir=config["RESULTS_DIR"]
 	shell:
-		"rm -rf {params.results_dir}/*/* {params.log_dir}/*"
+		"rm -rfI {params.results_dir}/*/* {params.log_dir}/*"
 
 rule run_all:
 	input:

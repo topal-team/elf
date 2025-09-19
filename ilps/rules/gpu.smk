@@ -6,7 +6,7 @@ from smk_utils import (
 	build_sbatch_common,
 	build_gpu_flag,
 	build_sbatch_prefix,
-	list_methods,
+	existing_benchmark_files
 )
 
 CONFIG_NAME = get_config_name(config)
@@ -39,10 +39,8 @@ rule profiling_comms:
 		config["RESULTS_DIR"] + "/profiling/{config_name}.json"
 	output:
 		config["RESULTS_DIR"] + "/profiled/{config_name}.json"
-	resources:
-		ngpus=lambda wildcards: load_run_params(config, wildcards.config_name).get("ngpus", 1)
 	params:
-		gpu_flag=lambda wildcards, resources: build_gpu_flag(4, config),
+		gpu_flag=lambda wildcards: build_gpu_flag(4, config),
 		jobname=lambda wildcards: f"elf-{wildcards.config_name}-comms",
 		time=lambda wildcards: config.get("SLURM", {}).get("time", "00:03:00"),
 		sbatch_common=SBATCH_COMMON,
@@ -89,26 +87,33 @@ rule bench_method:
 	shell:
 		"sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap \"{params.prefix} srun torchrun {params.torchrun_flags} -- ../benchmarks/ilps_guided_benchmark.py --restart --solution-file {input.sol} --config-file {input.sol} --output-file {output} --solution-type {wildcards.method}\""
 
-# Merge method-level benchmark outputs to the main benchmark file
-rule merge_benchmarks:
+# Memory comparison benchmark with ELF_MEMORY=1
+rule memory_comparison:
 	input:
-		lambda wildcards: expand(
-			config["RESULTS_DIR"] + "/benchmarks/{config_name}/{method}.json",
-			config_name=wildcards.config_name,
-			method=list_methods(config, wildcards.config_name),
-		)
+		sol=lambda wildcards: config["RESULTS_DIR"] + f"/solutions/{wildcards.config_name}/{wildcards.method}.json",
+		prof=lambda wildcards: config["RESULTS_DIR"] + f"/profiled/{wildcards.config_name}.json"
 	output:
-		config["RESULTS_DIR"] + "/benchmarks/{config_name}.json"
-	wildcard_constraints:
-		config_name=r"[a-zA-Z0-9_-]+"
+		config["RESULTS_DIR"] + "/memory_comparison/{config_name}/{method}.json"
+	resources:
+		ngpus=lambda wildcards: load_run_params(config, wildcards.config_name).get("ngpus", 1)
+	params:
+		gpu_flag=lambda wildcards, resources: build_gpu_flag(resources.ngpus, config),
+		nnodes=lambda wildcards, resources: (resources.ngpus + int(config.get("SLURM", {}).get("gpus_per_node", 4)) - 1) // int(config.get("SLURM", {}).get("gpus_per_node", 4)),
+		torchrun_flags=lambda wildcards, resources: (
+			f"--standalone --nproc-per-node {min(resources.ngpus, int(config.get('SLURM', {}).get('gpus_per_node', 4)))}"
+			if ((resources.ngpus + int(config.get('SLURM', {}).get('gpus_per_node', 4)) - 1) // int(config.get('SLURM', {}).get('gpus_per_node', 4))) == 1
+			else (
+				f"--nnodes {(resources.ngpus + int(config.get('SLURM', {}).get('gpus_per_node', 4)) - 1) // int(config.get('SLURM', {}).get('gpus_per_node', 4))} "
+				f"--nproc-per-node {int(config.get('SLURM', {}).get('gpus_per_node', 4))} "
+				"--rdzv-id \$SLURM_JOBID --rdzv-backend c10d "
+				"--rdzv-endpoint \$(scontrol show hostnames \$SLURM_JOB_NODELIST | head -n1)"
+			)
+		),
+		jobname=lambda wildcards: f"elf-{wildcards.config_name}-memcomp-{wildcards.method}",
+		time=lambda wildcards: config.get("SLURM", {}).get("time", "01:00:00"),
+		sbatch_common=SBATCH_COMMON,
+		prefix=SBATCH_PREFIX
 	log:
-		LOG_DIR + "/{config_name}.merge_benchmarks"
-	run:
-		import json
-		merged = {}
-		for path in input:
-			with open(path, "r") as fh:
-				data = json.load(fh)
-				merged.update(data)
-		with open(output[0], "w") as fh:
-			json.dump(merged, fh, indent=1)
+		LOG_DIR + "/{config_name}.{method}.memcomp"
+	shell:
+		"sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap \"{params.prefix} srun torchrun {params.torchrun_flags} -- memory_comparison_benchmark.py --solution-file {input.sol} --config-file {input.prof} --output-file {output} --solution-type {wildcards.method}\""

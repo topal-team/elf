@@ -1,6 +1,7 @@
 import os
 import json
 from typing import Dict, Any
+from snakemake.io import Wildcards
 
 
 def get_config_name(config: Dict[str, Any]) -> str | None:
@@ -83,3 +84,12 @@ def list_methods(config: Dict[str, Any], config_name: str) -> list[str]:
 	if not isinstance(methods, list):
 		return []
 	return [str(m) for m in methods]
+
+
+# Put near the top of the file
+def existing_benchmark_files(config: Dict[str, Any], wildcards: Wildcards):
+	methods = list_methods(config, wildcards.config_name)
+	candidates = [
+		config["RESULTS_DIR"] + f"/benchmarks/{wildcards.config_name}/{m}.json" for m in methods
+	]
+	return [p for p in candidates if os.path.exists(p)]

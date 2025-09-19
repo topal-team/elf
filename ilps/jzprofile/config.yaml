@@ -10,3 +10,5 @@ default-resources:
 # Ensure localrules stay local even when using the Slurm executor
 local-cores: 1
 jobs: 4
+
+keep-incomplete: true # benchmarks write a file containing "error: OOM" if they fail to indicate that there is no need to rerun them. keep that file
