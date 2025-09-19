@@ -38,8 +38,12 @@ import torch.distributed as dist
 
 from elf import replace_linear_with_linear_dw
 from models.simple import ChainTransformer, FullTransformer  # noqa: F401
-from models.utils import add_transformer_args, model_config_from_args
-from benchmarks.benchmark_utils import bench, get_handcrafted_imbalanced_partition
+from models.utils import add_transformer_args, build_model_from_args
+from benchmarks.benchmark_utils import (
+	bench,
+	get_handcrafted_imbalanced_partition,
+	balanced_partition,
+)
 from benchmarks.ilp_schedulers import RematScheduler
 
 logging.basicConfig(level=logging.INFO)
@@ -114,7 +118,7 @@ def process_solution(
 	"""Process a single solution type and return benchmark results."""
 
 	placement = solution.get("placement")
-	balance = [int(b) for b in solution.get("b")]
+	balance = balanced_partition(len(model.blocks), placement)
 
 	if solution is None:
 		if rank == 0:
@@ -122,7 +126,7 @@ def process_solution(
 		return None, None
 
 	if rank == 0:
-		print(f"{solution_type.capitalize()}:")
+		print(f"{solution_type}:")
 
 	scheduler = RematScheduler(solution)
 
@@ -149,7 +153,7 @@ def main():
 	parser.add_argument(
 		"--solution-type", type=str, required=True, help="Specific solution type to benchmark"
 	)
-	add_transformer_args(parser, model_type="chain")
+	add_transformer_args(parser)
 	args = parser.parse_args()
 	setup_logging(args.log)
 
@@ -164,10 +168,8 @@ def main():
 		solutions = json.load(f).get("solutions", {})
 
 	# Create and initialize model
-	config = model_config_from_args(args, model_type="chain")
-	dtype = config.pop("dtype")
 	with torch.device("meta"):
-		model = ChainTransformer(**config).to(dtype)
+		model, dtype = build_model_from_args(args)
 		replace_linear_with_linear_dw(model, "meta")
 
 	log_model_info(model, rank)
@@ -195,6 +197,8 @@ def main():
 
 	except torch.cuda.OutOfMemoryError:
 		print(f"Out of memory on rank {rank} for {args.solution_type}")
+		with open(args.output_file, "w") as f:
+			json.dump({"error": f"Out of memory (rank {rank})"}, f, indent=4)
 		sys.exit(1)
 
 	# Print full stacktrace for any exceptions

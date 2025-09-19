@@ -1,0 +1,14 @@
+{
+    "model": {
+        "architecture": "qwen3",
+        "hidden_dim": 5120,
+        "ffn_dim": 17408,
+        "n_blocks": 40,
+        "seq_len": 8192,
+        "num_heads": 40,
+        "num_kv_heads": 8,
+        "input_dim": 151936,
+        "dropout": 0.1,
+        "dtype": "bfloat16"
+    }
+}

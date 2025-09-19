@@ -24,8 +24,8 @@ import os
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from models.simple import Attention, FullTransformer
-from models.utils import add_transformer_args, model_config_from_args
+from models.simple import Attention
+from models.utils import add_transformer_args, model_config_from_args, build_model_from_args
 from elf.zb_utils import LayerDW, replace_linear_with_linear_dw
 from elf.utils import Timer
 from benchmarks.benchmark_utils import meta_to_device
@@ -66,12 +66,12 @@ def parse_args():
 	)
 
 	# Add model hyper-parameter flags from utils (includes --sdp-backend, --config-file, ...)
-	add_transformer_args(parser, model_type="full")
+	add_transformer_args(parser)
 
 	return parser.parse_args()
 
 
-def _partition_full_transformer(model: FullTransformer, nstages: int):
+def _partition_full_transformer(model, nstages: int):
 	"""Create a simple sequential partition of a FullTransformer into nstages.
 
 	The first stage wraps the embedding + a slice of blocks, the last stage wraps
@@ -135,6 +135,7 @@ def _measure_stage_times(stage: torch.nn.Module, sample, n_iter: int):
 	y = stage(sample)
 	y.sum().backward()
 	_stage_bparams(stage)
+	del y
 	torch.cuda.synchronize()
 
 	for _ in range(n_iter):
@@ -150,22 +151,25 @@ def _measure_stage_times(stage: torch.nn.Module, sample, n_iter: int):
 
 		# Backward
 		torch.cuda.reset_peak_memory_stats()
+		before_b = torch.cuda.memory_allocated()
 		with Timer() as t:
 			y.sum().backward()
 			del y
 		torch.cuda.synchronize()
 		times["b"].append(1000 * t.time())
 		mems["b"].append((torch.cuda.memory_allocated() - start_mem) / 1024 / 1024)
-		peaks["b"].append((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
+		peaks["b"].append((torch.cuda.max_memory_allocated() - before_b) / 1024 / 1024)
 
 		# Weight update
 		torch.cuda.reset_peak_memory_stats()
+		before_w = torch.cuda.memory_allocated()
 		with Timer() as t:
 			_stage_bparams(stage)
 		torch.cuda.synchronize()
+
 		times["w"].append(1000 * t.time())
 		mems["w"].append((torch.cuda.memory_allocated() - start_mem) / 1024 / 1024)
-		peaks["w"].append((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
+		peaks["w"].append((torch.cuda.max_memory_allocated() - before_w) / 1024 / 1024)
 
 	avg_times = [float(sum(times[k]) / len(times[k])) for k in ops]
 	avg_mems = [float(sum(mems[k]) / len(mems[k])) for k in ops]
@@ -215,6 +219,7 @@ def _measure_stage_mfp_mbp(stage: torch.nn.Module, sample) -> tuple[float, float
 			layer.last_input = None
 	mbp_mb = (torch.cuda.memory_allocated() - start_mem) / 1024 / 1024
 
+	_stage_clear(stage)
 	return float(mfp_mb), float(mbp_mb)
 
 
@@ -235,7 +240,7 @@ def main():
 	args = parse_args()
 
 	# Build the model configuration using the shared helper
-	config = model_config_from_args(args, model_type="full")
+	config = model_config_from_args(args)
 	dtype = config.get("dtype")
 	hidden_dim = config["hidden_dim"]
 	seq_len = config["seq_len"]
@@ -249,7 +254,7 @@ def main():
 
 	# Instantiate full model once on CUDA
 	with torch.device("meta"):
-		model = FullTransformer(**{k: v for k, v in config.items() if k != "dtype"}).to(dtype)
+		model, dtype = build_model_from_args(args)
 	# Partition into stages (simple balanced split)
 	stages = _partition_full_transformer(model, args.nstages)
 	# Replace linears with LayerDW for each stage for W update simulation
@@ -280,15 +285,17 @@ def main():
 		stage = meta_to_device(stage)
 		sample = _get_stage_sample(stage, args.batch_size, dtype, hidden_dim, seq_len)
 
+		# Mfp/Mbp for backward remat options
+		mfp_mb, mbp_mb = _measure_stage_mfp_mbp(stage, sample)
+
 		# No recompute
 		times_nr, mems_nr, peaks_nr = _measure_stage_times(stage, sample, args.iterations)
+		print(f"Peaks without recompute: {peaks_nr}")
 
 		# SR on forward (attention only)
 		stage_sr = _apply_checkpointing(stage)
 		times_sr, mems_sr, peaks_sr = _measure_stage_times(stage_sr, sample, args.iterations)
-
-		# Mfp/Mbp for backward remat options
-		mfp_mb, mbp_mb = _measure_stage_mfp_mbp(stage, sample)
+		print(f"Peaks with recompute: {peaks_sr}")
 
 		# Parameter memory in MB for stage
 		mparams_mb = sum(p.numel() * p.element_size() for p in stage.parameters()) / 1024 / 1024
@@ -309,7 +316,6 @@ def main():
 			"backward_remat_options": [
 				{"name": "activations_bwd", "overhead": float(times_nr[0]), "mem_freed": float(mfp_mb)}
 			],
-			# Keep Mbp in case downstream consumers need it
 			"Mfp": float(mfp_mb),
 			"Mbp": float(mbp_mb),
 		}

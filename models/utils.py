@@ -15,9 +15,9 @@ Example
 >>> import argparse
 >>> from models.utils import add_transformer_args, build_model_from_args
 >>> parser = argparse.ArgumentParser()
->>> add_transformer_args(parser, model_type="full")
+>>> add_transformer_args(parser)
 >>> args = parser.parse_args()
->>> model, dtype = build_model_from_args(args, model_type="full")
+>>> model, dtype = build_model_from_args(args)
 """
 
 from __future__ import annotations
@@ -27,25 +27,19 @@ import logging
 import json
 
 from pathlib import Path
-from typing import Literal, Any, Dict
+from typing import Any, Dict
 
 import torch
 
 from models.simple import FullTransformer, ChainTransformer
+from models.qwen import Qwen
 
 
 __all__ = ["add_transformer_args", "build_model_from_args", "model_config_from_args"]
 
+_ARCHITECTURES = ["full", "chain", "qwen3"]
+
 logger = logging.getLogger(__name__)
-
-_ModelType = Literal["full", "chain"]
-
-# Preset configurations for FullTransformer (rough equivalents of Llama model sizes)
-_FULL_PRESETS = {
-	"8b": {"hidden_dim": 4096, "ffn_dim": 14336, "n_blocks": 32, "num_heads": 32},
-	"70b": {"hidden_dim": 8192, "ffn_dim": 28672, "n_blocks": 80, "num_heads": 64},
-	"405b": {"hidden_dim": 16384, "ffn_dim": 53248, "n_blocks": 126, "num_heads": 128},
-}
 
 
 def get_dtype(dtype):
@@ -117,25 +111,14 @@ def _load_config_file(path: str) -> Dict[str, Any]:
 		raise ValueError(f"Unsupported config file extension '{ext}'. Use .json, .yml or .yaml.")
 
 
-def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -> None:
-	"""Register the arguments that are shared by both transformer variants.
-
-	Passing *include_input_dim* adds the `--input-dim` flag that is only
-	meaningful for the *FullTransformer* architecture.
-	"""
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+	"""Register the arguments that are shared by both transformer variants."""
 
 	add = parser.add_argument
 
-	if include_input_dim:
-		add("--vocab-size", type=int, help="Vocabulary size (only relevant for FullTransformer)")
+	add("--architecture", type=str, help="Architecture of the model", choices=_ARCHITECTURES)
 
-	# Optional preset (only relevant for FullTransformer)
-	if include_input_dim:  # presets are only defined for the *full* architecture
-		add(
-			"--config",
-			choices=list(_FULL_PRESETS.keys()),
-			help="Preset model configuration (overridden by explicit flags)",
-		)
+	add("--vocab-size", type=int, help="Vocabulary size (only relevant for FullTransformer)")
 
 	# External configuration file
 	add(
@@ -170,6 +153,15 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 		type=int,
 		help="Number of attention heads",
 	)
+	add(
+		"--num-kv-heads",
+		"--n-kv-heads",
+		dest="num_kv_heads",
+		type=int,
+		help="Number of key/value heads",
+		default=None,
+		required=False,
+	)
 
 	# Dropout
 	add("--dropout", type=float, default=0.1, help="Dropout probability")
@@ -202,21 +194,15 @@ def _add_common_args(parser: argparse.ArgumentParser, include_input_dim: bool) -
 	)
 
 
-def add_transformer_args(parser: argparse.ArgumentParser, *, model_type: _ModelType) -> None:
-	"""Insert the appropriate CLI flags for *model_type* into *parser*.
+def add_transformer_args(parser: argparse.ArgumentParser) -> None:
+	"""Insert the appropriate CLI flags for a transformer model into *parser*.
 
 	Parameters
 	----------
 	parser: argparse.ArgumentParser
 	    The parser you are adding the options to.
-	model_type: {"full", "chain"}
-	    Which model architecture the script will instantiate.
 	"""
-
-	if model_type not in ("full", "chain"):
-		raise ValueError(f"Unknown model_type '{model_type}'. Expected 'full' or 'chain'.")
-
-	_add_common_args(parser, include_input_dim=(model_type == "full"))
+	_add_common_args(parser)
 
 
 # -----------------------------------------------------------------------------
@@ -224,7 +210,7 @@ def add_transformer_args(parser: argparse.ArgumentParser, *, model_type: _ModelT
 # -----------------------------------------------------------------------------
 
 
-def model_config_from_args(args: argparse.Namespace, *, model_type: _ModelType) -> Dict[str, Any]:
+def model_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 	"""Convert *args* (as returned by *argparse*) to a kwargs mapping.
 
 	This is mostly an internal helper that removes the `argparse` loader
@@ -234,9 +220,6 @@ def model_config_from_args(args: argparse.Namespace, *, model_type: _ModelType) 
 
 	# Start from preset if requested and available
 	cfg: Dict[str, Any] = {}
-
-	if model_type == "full" and getattr(args, "config", None):
-		cfg.update(_FULL_PRESETS[args.config])
 
 	# Load external config file if provided
 	if getattr(args, "config_file", None):
@@ -250,21 +233,26 @@ def model_config_from_args(args: argparse.Namespace, *, model_type: _ModelType) 
 	# Fill/override with CLI values
 	cfg.update(
 		{
+			"architecture": args.architecture
+			if args.architecture is not None
+			else cfg.get("architecture"),
 			"hidden_dim": args.hidden_dim if args.hidden_dim is not None else cfg.get("hidden_dim"),
 			"n_blocks": args.nblocks if args.nblocks is not None else cfg.get("n_blocks"),
 			"seq_len": args.seq_len if args.seq_len is not None else cfg.get("seq_len"),
 			"num_heads": args.num_heads if args.num_heads is not None else cfg.get("num_heads"),
 			"dropout": args.dropout if args.dropout is not None else cfg.get("dropout"),
 			"ffn_dim": args.ffn_dim if args.ffn_dim is not None else cfg.get("ffn_dim", None),
-			"sdp_backend": args.sdp_backend if args.sdp_backend is not None else cfg.get("sdp_backend"),
 			"dtype": args.dtype if args.dtype is not None else cfg.get("dtype"),
 		}
 	)
 
 	# Defaults are added here and not in the argparse section because otherwise
 	# if the config file specifies them, they will get overwritten.
-	if "sdp_backend" in cfg:
-		cfg["sdp_backend"] = get_sdpa(cfg["sdp_backend"] or "none")
+
+	backend = args.sdp_backend or cfg.get("sdp_backend", None)
+	if backend is not None:
+		cfg["sdp_backend"] = get_sdpa(backend)
+
 	if "dtype" in cfg:
 		cfg["dtype"] = get_dtype(cfg["dtype"] or "float32")
 
@@ -272,33 +260,37 @@ def model_config_from_args(args: argparse.Namespace, *, model_type: _ModelType) 
 		logger.warning(f"ffn_dim is not set, using 4 * hidden_dim = {cfg['hidden_dim'] * 4}")
 		cfg["ffn_dim"] = cfg["hidden_dim"] * 4
 
-	if model_type == "full" and args.vocab_size is not None:
+	if args.vocab_size is not None:
 		cfg["input_dim"] = args.vocab_size
 
-	if model_type == "chain":
-		cfg.pop("input_dim", None)
+	if args.num_kv_heads is not None:
+		cfg["num_kv_heads"] = args.num_kv_heads
 
 	return cfg
 
 
-def build_model_from_args(
-	args: argparse.Namespace, *, model_type: _ModelType
-) -> tuple[torch.nn.Module, torch.dtype]:
+def build_model_from_args(args: argparse.Namespace) -> tuple[torch.nn.Module, torch.dtype]:
 	"""Convenience utility that instantiates and returns the requested model as well as the dtype.
 
 	Example
 	-------
 	>>> parser = argparse.ArgumentParser()
-	>>> add_transformer_args(parser, model_type="chain")
+	>>> add_transformer_args(parser)
 	>>> args = parser.parse_args([])  # use defaults
-	>>> model, dtype = build_model_from_args(args, model_type="chain")
+	>>> model, dtype = build_model_from_args(args)
 	"""
 
-	cfg = model_config_from_args(args, model_type=model_type)
+	cfg = model_config_from_args(args)
 	dtype = cfg.pop("dtype")
+	arch = cfg.pop("architecture")
 
-	if model_type == "full":
-		return FullTransformer(**cfg).to(dtype), dtype
-	else:  # chain
-		# `input_dim` is absent from cfg in this branch by construction.
-		return ChainTransformer(**cfg).to(dtype), dtype
+	if arch not in _ARCHITECTURES:
+		raise ValueError(f"Unknown architecture: {arch}")
+
+	match arch:
+		case "full":
+			return FullTransformer(**cfg).to(dtype), dtype
+		case "chain":
+			return ChainTransformer(**cfg).to(dtype), dtype
+		case "qwen3":
+			return Qwen(**cfg).to(dtype), dtype

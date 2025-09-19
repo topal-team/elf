@@ -12,7 +12,7 @@ from elf import Pipeline, get_sources_targets_sequential
 from elf.zb_utils import LayerDW
 from elf.registry import SCHEDULERS, resolve
 from elf.scheduling.scheduling import Operation, OpOptions, OperationType, compute_types
-from models.simple import Attention, FastAttention, FullTransformer, TransformerBlock
+from models.simple import Attention, FastAttention
 
 
 def init_dist(backend="nccl"):
@@ -135,12 +135,12 @@ def get_handcrafted_imbalanced_partition(model, rank, placement, factors):
 	for i in range(num_ranks):
 		end_idx = start_idx + factors[i]
 
-		if isinstance(model, FullTransformer) and i == 0:
+		if hasattr(model, "embed") and i == 0:
 			parts[i] = torch.nn.Sequential(model.embed, *model.blocks[start_idx:end_idx])
 		else:
 			parts[i] = torch.nn.Sequential(*model.blocks[start_idx:end_idx])
 
-		if isinstance(model, FullTransformer) and i == num_ranks - 1:
+		if hasattr(model, "head") and i == num_ranks - 1:
 			parts[i].append(model.head)  # doesn't work for multi waves
 
 		start_idx = end_idx
@@ -260,7 +260,8 @@ def get_checkpointed_scheduler(scheduler, type):
 	if type == "full":
 
 		def checkpoint(name, module):
-			return isinstance(module, TransformerBlock)
+			return name == ""
+
 	elif type == "simple":
 
 		def checkpoint(name, module):

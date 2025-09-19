@@ -18,8 +18,6 @@ import traceback
 import torch
 import torch.distributed as dist
 
-sys.path.append(".")
-
 from models.utils import add_transformer_args, model_config_from_args
 
 
@@ -44,7 +42,7 @@ def parse_args():
 	)
 
 	# Add model hyper-parameter flags (provides --config-file, etc.)
-	add_transformer_args(parser, model_type="full")
+	add_transformer_args(parser)
 
 	return parser.parse_args()
 
@@ -63,7 +61,7 @@ def main():
 	# ------------------------------------------------------------------
 	# Build model configuration using shared helper
 	# ------------------------------------------------------------------
-	config = model_config_from_args(args, model_type="full")
+	config = model_config_from_args(args)
 	hidden_size = config["hidden_dim"]
 	seq_len = config["seq_len"]
 	dtype = config["dtype"]
