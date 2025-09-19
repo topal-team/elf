@@ -186,9 +186,6 @@ class Engine:
 		memories = OrderedDict()
 		peak_memories = OrderedDict()
 
-		if precise_memory:
-			torch.cuda.reset_peak_memory_stats()
-
 		for op in schedule:
 			block = self.id_to_block.get(op.block_id)
 			if block is None:

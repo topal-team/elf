@@ -65,8 +65,8 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	# It can be used for both forward and backward operations ;
 	# in the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations
 	REMAT_STRATEGY = auto()
-	RBF_STRATEGY = auto()  # Recompute Backward-Forward (activations, between B and W)
-	RBB_STRATEGY = auto()  # Recompute Backward-Backward (gradients, between B and W)
+	RECOMPUTE_ACTIVATIONS = auto()  # Recompute Backward-Forward (activations, between B and W)
+	RECOMPUTE_GRADIENTS = auto()  # Recompute Backward-Backward (gradients, between B and W)
 
 	ACTIVATION_OFFLOAD = auto()  # Offload activations to CPU
 

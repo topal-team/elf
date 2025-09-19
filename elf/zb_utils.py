@@ -220,3 +220,60 @@ class LayerDWTracer(torch.fx.Tracer):
 			return True
 		# Use default behavior for other modules
 		return super().is_leaf_module(m, *args, **kwargs)
+
+
+def _grad_fn_is_layer_dx(grad_fn):
+	"""
+	Check if the given grad_fn is a LinearDX-related node.
+	"""
+	# Hardcoded list of autograd function names
+	return any(substring in str(type(grad_fn)) for substring in ["LinearDX"])
+
+
+def _get_gradient_edges_needed_for_w(grad_fn):
+	"""
+	Get the set of gradient edges (corresponding to tensors) that we need to differentiate against in order to fill all "grad_output" fields of LayerDW modules.
+
+	:param grad_fn: The grad_fn to start the search from. (Usually the loss.grad_fn)
+	:type grad_fn: torch.autograd.Function
+	:return: The set of gradient edges (corresponding to tensors) that we need to differentiate against in order to fill all "grad_output" fields of LayerDW modules
+	:rtype: list[torch.autograd.graph.GradientEdge]
+	"""
+	seen = set()
+	accumulate_nodes = []
+
+	def dfs(grad_fn, has_linear_dx_predecessor=False):
+		seen.add(grad_fn)
+		current_is_linear_dx = _grad_fn_is_layer_dx(grad_fn)
+		if len(grad_fn.next_functions) == 0:
+			if has_linear_dx_predecessor:
+				accumulate_nodes.append(grad_fn)
+			return
+
+		for fn in grad_fn.next_functions:
+			if fn[0] is not None and fn[0] not in seen:
+				dfs(fn[0], current_is_linear_dx)
+
+	dfs(grad_fn)
+	return [torch.autograd.graph.get_gradient_edge(node.variable) for node in accumulate_nodes]
+
+
+def partial_dx_recomputation(outputs, grad_outputs=None, retain_graph=False):
+	"""
+	Recompute the minimal backward pass needed to compute gradients w.r.t. the parameters afterwards.
+	"""
+	if grad_outputs is None:
+		assert outputs.numel() == 1, "Implicit gradient outputs are only supported for scalar outputs"
+		grad_outputs = torch.ones_like(outputs)
+
+	gradient_edges = _get_gradient_edges_needed_for_w(outputs.grad_fn)
+
+	# allow_unused because grads wrt those nodes will be None, which PyTorch does not like
+	grads = torch.autograd.grad(
+		outputs,
+		inputs=gradient_edges,
+		grad_outputs=grad_outputs,
+		allow_unused=True,
+		retain_graph=retain_graph,
+	)
+	return grads

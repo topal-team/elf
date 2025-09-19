@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from ..scheduling import OpOptions
 from ..utils import Timer, TensorMetadata, _is_mpi
-from ..zb_utils import LayerDW
+from ..zb_utils import LayerDW, partial_dx_recomputation
 from .remat import RematManager
 
 import logging
@@ -200,7 +200,6 @@ class PipelineBlock:
 
 		Possible options:
 		- REMAT_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
-		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
 		"""
 		# Gather all variables needed for forward
 		inputs = []
@@ -214,11 +213,9 @@ class PipelineBlock:
 			inputs.append(x)
 
 		# Get strategies from options
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
 		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
 
 		# Register hooks and perform rematerialization
-		handles = self.remat_manager.register_backward_hooks(rbb_strategy, mb_id)
 		with self.remat_manager.apply_selective_remat(remat_strategy, mb_id):
 			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
 
@@ -228,10 +225,6 @@ class PipelineBlock:
 			for module in self.model.modules():
 				if isinstance(module, LayerDW):
 					module.move_last_computed("input", mb_id)
-
-		# Clean up hooks
-		for handle in handles:
-			handle.remove()
 
 		if any(not dst.metadata for var in self.output_variables for dst in var):
 			self._register_out_metadata(y)
@@ -304,9 +297,7 @@ class PipelineBlock:
 		Recompute the forward pass of the model
 
 		Possible options:
-		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
 		- SAVE: bool - Whether to save the activations of the forward pass. If set to False, this allows us to compute under no_grad and therefore save some memory.
-		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
 		"""
 		# Inputs should have been saved by a previous forward pass
 		inputs = []
@@ -317,35 +308,23 @@ class PipelineBlock:
 
 		# Get options and strategies
 		save = options.get(OpOptions.SAVE, False)
-		rbf_strategy = options.get(OpOptions.RBF_STRATEGY, lambda *_: False)
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-
-		# Prepare modules for recomputation
-		self.remat_manager.prepare_recompute_forward(rbf_strategy)
-
-		# Register hooks for the forward pass
-		handles = self.remat_manager.register_forward_hooks(rbb_strategy, mb_id)
 
 		# Execute forward pass with or without gradient tracking
 		if not save:
 			with torch.no_grad():
 				self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 		else:
-			self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
+			y = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 
 			for input_var, value in zip(self.input_variables, inputs):
 				input_var.set(input_var.saved, mb_id, value)
 
-		# Clean up hooks
-		for handle in handles:
-			handle.remove()
+			for output_var, value in zip(self.output_variables, y):
+				output_var[0].set(output_var[0].saved, mb_id, value)
 
 		for module in self.model.modules():
 			if isinstance(module, LayerDW) and getattr(module, "last_input", None) is not None:
 				module.move_last_computed("input", mb_id)
-
-		# Restore original forward functions
-		self.remat_manager.restore_forwards()
 
 	def recompute_backward_inputs(self, mb_id, **options):
 		"""
@@ -371,13 +350,16 @@ class PipelineBlock:
 		with Timer(name=f"recompute_backward_inputs({self.id}:{mb_id})") as timer:
 			for i, (output, grad) in enumerate(zip(outputs, grads)):
 				retain_graph = i != len(outputs) - 1  # save until the last backward
-				torch.autograd.backward(output, grad, inputs=inputs, retain_graph=retain_graph)
+
+				# Partial DX recomputation recomputes the minimal backward pass needed to compute W, instead of the full backward pass
+				# We can't use torch.grad with inputs=inputs, because if the inputs don't require grads (e.g., int tensors), then torch.grad will fail
+				partial_dx_recomputation(output, grad, retain_graph=retain_graph)
+				# torch.autograd.backward(output, grad, inputs=inputs, retain_graph=retain_graph)
 
 		self.compute_time.append(timer)
 
-		for name, module in self.model.named_modules():
-			# Some grads were not recomputed
-			if isinstance(module, LayerDW) and getattr(module, "last_grad_output", None) is not None:
+		for module in self.model.modules():
+			if isinstance(module, LayerDW):
 				module.move_last_computed("grad_output", mb_id)
 
 	def backward_params(self, mb_id, **options):
@@ -613,8 +595,8 @@ class PipelineBlock:
 		Perform the backward pass for the inputs of the model
 
 		Possible options:
-		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
-		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
+		- RECOMPUTE_ACTIVATIONS: bool - Whether to recompute the activations of the model before W
+		- RECOMPUTE_GRADIENTS: bool - Whether to recompute the gradients of the activations before W
 		"""
 		# We need inputs to get their gradients later on
 		# TODO: we don't actually need their data! find a way to get gradients without them (maybe GradientEdge?)
@@ -643,11 +625,8 @@ class PipelineBlock:
 			output_grads.append(grad_accumulator)
 
 		# Get strategies from options
-		rbf_strategy = options.get(OpOptions.RBF_STRATEGY, lambda *_: False)
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-
-		# Register hooks for backward
-		handles = self.remat_manager.register_backward_hooks(rbb_strategy, mb_id)
+		recompute_activations = options.get(OpOptions.RECOMPUTE_ACTIVATIONS, False)
+		recompute_gradients = options.get(OpOptions.RECOMPUTE_GRADIENTS, False)
 
 		input_grads = self._compute_backward_inputs(
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
@@ -656,16 +635,18 @@ class PipelineBlock:
 		if torch.cuda.is_available() and _is_mpi():
 			self.bwd_compute_events.append(torch.cuda.current_stream().record_event())
 
-		# Clean up hooks
-		for handle in handles:
-			handle.remove()
-
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
 				module.move_last_computed("grad_output", mb_id)
+				if recompute_gradients:
+					module.delete("grad_output", mb_id)
+
 				# If we used checkpointing, we need to move the input as well
 				if getattr(module, "last_input", None) is not None:
 					module.move_last_computed("input", mb_id)
+
+				if recompute_activations:
+					module.delete("input", mb_id)
 
 		# Register the gradients to send
 		for input_var, value in zip(self.input_variables, input_grads):
@@ -673,8 +654,10 @@ class PipelineBlock:
 
 		# We may need input to recompute F before W; we save them here and let W delete them
 		# This is not optimal, we could check here if any module needs recomputation to delete them right away
-		for input_var, value in zip(self.input_variables, inputs):
-			input_var.set(input_var.saved, mb_id, value)
+		if recompute_activations:
+			for input_var, value in zip(self.input_variables, inputs):
+				input_var.set(input_var.saved, mb_id, value)
 
-		# Process cleanup based on strategies
-		self.remat_manager.process_after_backward(rbf_strategy, rbb_strategy, mb_id)
+		if recompute_gradients:
+			for output_var, value in zip(self.output_variables, output_grads):
+				output_var[0].set(output_var[0].to_process, mb_id, value)
