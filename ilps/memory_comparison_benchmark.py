@@ -33,8 +33,7 @@ import torch.distributed as dist
 os.environ["ELF_MEMORY"] = "1"
 
 from elf import replace_linear_with_linear_dw, Pipeline, get_sources_targets_sequential
-from models.simple import FullTransformer
-from models.utils import add_transformer_args, model_config_from_args
+from models.utils import add_transformer_args, build_model_from_args
 from benchmarks.benchmark_utils import get_handcrafted_imbalanced_partition, balanced_partition
 from benchmarks.ilp_schedulers import RematScheduler
 
@@ -69,7 +68,7 @@ def setup_distributed() -> tuple[int, int]:
 
 
 def run_memory_benchmark(
-	model: FullTransformer,
+	model: torch.nn.Module,
 	parts: Any,
 	scheduler: str,
 	placement: List[int],
@@ -211,10 +210,8 @@ def main():
 		sys.exit(1)
 
 	# Create and initialize model
-	config = model_config_from_args(args)
-	dtype = config.pop("dtype")
 	with torch.device("meta"):
-		model = FullTransformer(**config).to(dtype)
+		model, dtype = build_model_from_args(args)
 		replace_linear_with_linear_dw(model, "meta")
 
 	if rank == 0:
@@ -231,7 +228,7 @@ def main():
 			print("Running actual benchmark with memory tracking...")
 
 		placement = solution.get("placement")
-		balance = balanced_partition(config["n_blocks"], placement)
+		balance = balanced_partition(len(model.blocks), placement)
 		scheduler = RematScheduler(solution)
 		parts = get_handcrafted_imbalanced_partition(model, rank, placement, balance)
 

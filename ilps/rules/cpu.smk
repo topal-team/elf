@@ -20,11 +20,10 @@ rule solve_method:
 		LOG_DIR + "/{config_name}.{method}.solve"
 	params:
 		ngpus=lambda wildcards: load_run_params(config, wildcards.config_name).get("ngpus", 1),
-		scheduler=lambda wildcards: load_run_params(config, wildcards.config_name).get("scheduler", ""),
 		memgpu=lambda wildcards: load_run_params(config, wildcards.config_name).get("memgpu", ""),
 		nmb=lambda wildcards: load_run_params(config, wildcards.config_name).get("nmb", None),
 	shell:
-		"python ../pipeline-ilps/runall.py --config {input} --output {output} --method {wildcards.method} --time-limit 600 --scheduler {params.scheduler} --mem {params.memgpu} --nmb {params.nmb} 1> {log}.out 2> {log}.err"
+		"python ../pipeline-ilps/runall.py --config {input} --output {output} --method {wildcards.method} --time-limit 600 --mem {params.memgpu} --nmb {params.nmb} 1> {log}.out 2> {log}.err"
 
 
 # Merge multiple method solutions into a single solutions file
@@ -48,6 +47,9 @@ rule merge_solutions:
 			with open(path, "r") as fh:
 				data = json.load(fh)
 				for k, v in data.get("solutions", {}).items():
+					if "error" in v:
+						print(f"Error in {path}: {v['error']}")
+						continue
 					merged[k] = v
 		with open(output[0], "w") as fh:
 			json.dump({"solutions": merged}, fh, indent=1)

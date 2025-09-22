@@ -6,6 +6,7 @@ import os
 
 from dataclasses import asdict, dataclass
 from typing import Any
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
@@ -480,6 +481,9 @@ class Pipeline:
 		world_size = dist.get_world_size()
 
 		dp_rank = rank // self.pp
+		timeout = os.getenv("ELF_TIMEOUT", None)
+		if timeout is not None:
+			timeout = timedelta(seconds=int(timeout))
 
 		self.pp_group = None
 		self.dp_groups = []
@@ -487,7 +491,7 @@ class Pipeline:
 			members = [r for r in range(world_size) if r // self.pp == pp]
 			if rank == members[0]:
 				logger.debug(f"Creating PP group with members {members}")
-			pp_group = dist.new_group(members)
+			pp_group = dist.new_group(members, timeout=timeout)
 			if pp == dp_rank:
 				self.pp_group = pp_group
 
@@ -496,7 +500,7 @@ class Pipeline:
 				members = [r for r in range(world_size) if r % self.pp == dp]
 				if rank == members[0]:
 					logger.info(f"Creating DP group with members {members}")
-				self.dp_groups.append(dist.new_group(members))
+				self.dp_groups.append(dist.new_group(members, timeout=timeout))
 
 	def _shared_partition(self, model, sample):
 		"""

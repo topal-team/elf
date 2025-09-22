@@ -26,18 +26,17 @@ Note: This script must be run in a distributed setting with multiple GPUs.
 import os
 import sys
 import json
-import datetime
 import argparse
 import logging
 import psutil
 
+from datetime import timedelta
 from typing import Dict, List, Optional, Any
 
 import torch
 import torch.distributed as dist
 
 from elf import replace_linear_with_linear_dw
-from models.simple import ChainTransformer, FullTransformer  # noqa: F401
 from models.utils import add_transformer_args, build_model_from_args
 from benchmarks.benchmark_utils import (
 	bench,
@@ -64,10 +63,10 @@ def setup_distributed() -> tuple[int, int]:
 	"""Initialize distributed training environment."""
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	torch.cuda.set_device(local_rank)
+	timeout = 300
+	os.environ["ELF_TIMEOUT"] = str(timeout)
 	dist.init_process_group(
-		backend="nccl",
-		device_id=torch.device(f"cuda:{local_rank}"),
-		timeout=datetime.timedelta(seconds=300),
+		backend="nccl", device_id=torch.device(f"cuda:{local_rank}"), timeout=timedelta(seconds=timeout)
 	)  # 5 minutes
 	return dist.get_rank(), dist.get_world_size()
 
@@ -83,7 +82,7 @@ def load_results(output_file: str, restart: bool) -> Dict:
 		return {}
 
 
-def log_model_info(model: ChainTransformer, rank: int) -> None:
+def log_model_info(model: torch.nn.Module, rank: int) -> None:
 	"""Log model information."""
 	if rank == 0:
 		print(f"\nModel has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
@@ -94,7 +93,7 @@ def log_model_info(model: ChainTransformer, rank: int) -> None:
 
 
 def run_benchmark(
-	model: ChainTransformer,
+	model: torch.nn.Module,
 	parts: Any,
 	scheduler: str,
 	placement: List[int],
@@ -109,7 +108,7 @@ def run_benchmark(
 
 
 def process_solution(
-	model: ChainTransformer,
+	model: torch.nn.Module,
 	solution: Optional[Dict],
 	solution_type: str,
 	rank: int,
@@ -199,7 +198,8 @@ def main():
 		print(f"Out of memory on rank {rank} for {args.solution_type}")
 		with open(args.output_file, "w") as f:
 			json.dump({"error": f"Out of memory (rank {rank})"}, f, indent=4)
-		sys.exit(1)
+
+		sys.exit(0)  # Clean exit so that snakemake knows it's ok
 
 	# Print full stacktrace for any exceptions
 	except Exception as e:

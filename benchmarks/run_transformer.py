@@ -143,7 +143,7 @@ def parse_args():
 	parser = argparse.ArgumentParser(description="Run distributed training with FP16")
 
 	# Model hyper-parameters (input-dim, hidden-dim, …)
-	add_transformer_args(parser, model_type="full")
+	add_transformer_args(parser)
 
 	# Script-specific parameters
 	parser.add_argument(
@@ -253,8 +253,8 @@ def main():
 
 	start_time = time.time()
 	with torch.device("meta"):
-		model, dtype = build_model_from_args(args, model_type="full")
-		# replace_linear_with_linear_dw(model, "meta")
+		model, dtype = build_model_from_args(args)
+		replace_linear_with_linear_dw(model, "meta")
 
 	if rank == 0:
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")

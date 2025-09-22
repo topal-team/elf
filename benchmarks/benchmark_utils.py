@@ -113,13 +113,22 @@ def meta_to_device(model, device="cuda"):
 
 
 def balanced_partition(n: int, placement: List[int]) -> List[int]:
-	"""Computes the number of blocks per GPU to balance the load."""
+	"""
+	Computes the number of blocks per GPU to balance the load.
+	Priority for additional load: middle gpus ([1:-2]) -> first gpu -> last gpu
+	"""
 	if n < len(placement):
 		print(f"n = {n} is less than the number of GPUs = {len(placement)}")
 
 	blocks_per_gpu = n // len(placement)
 	remainder = n % len(placement)
-	return [blocks_per_gpu + (1 if i < remainder else 0) for i in range(len(placement))]
+	b = [blocks_per_gpu for _ in range(len(placement))]
+	for i in range(2, len(placement) + 1):
+		if remainder == 0:
+			break
+		b[-i] += 1
+		remainder -= 1
+	return b
 
 
 def get_handcrafted_imbalanced_partition(model, rank, placement, factors):

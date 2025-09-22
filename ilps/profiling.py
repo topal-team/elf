@@ -20,7 +20,6 @@ Usage:
 import json
 import argparse
 import os
-
 import torch
 from torch.utils.checkpoint import checkpoint
 
@@ -125,7 +124,7 @@ def _get_stage_sample(
 		return torch.randn(batch_size, seq_len, hidden_dim, dtype=dtype, device="cuda")
 
 
-def _measure_stage_times(stage: torch.nn.Module, sample, n_iter: int):
+def _measure_stage_times(stage: torch.nn.Module, sample, target, n_iter: int, loss_fn):
 	ops = ["f", "b", "w"]
 	times = {k: [] for k in ops}
 	mems = {k: [] for k in ops}
@@ -133,7 +132,7 @@ def _measure_stage_times(stage: torch.nn.Module, sample, n_iter: int):
 
 	# Warmup
 	y = stage(sample)
-	y.sum().backward()
+	loss_fn(y, target).backward()
 	_stage_bparams(stage)
 	del y
 	torch.cuda.synchronize()
@@ -143,7 +142,9 @@ def _measure_stage_times(stage: torch.nn.Module, sample, n_iter: int):
 		torch.cuda.reset_peak_memory_stats()
 		start_mem = torch.cuda.memory_allocated()
 		with Timer() as t:
-			y = stage(sample)
+			x = sample.clone()
+			y = stage(x)
+			loss = loss_fn(y, target)
 		torch.cuda.synchronize()
 		times["f"].append(1000 * t.time())
 		mems["f"].append((torch.cuda.memory_allocated() - start_mem) / 1024 / 1024)
@@ -153,8 +154,8 @@ def _measure_stage_times(stage: torch.nn.Module, sample, n_iter: int):
 		torch.cuda.reset_peak_memory_stats()
 		before_b = torch.cuda.memory_allocated()
 		with Timer() as t:
-			y.sum().backward()
-			del y
+			loss.backward()
+			del x, y, loss
 		torch.cuda.synchronize()
 		times["b"].append(1000 * t.time())
 		mems["b"].append((torch.cuda.memory_allocated() - start_mem) / 1024 / 1024)
@@ -223,6 +224,17 @@ def _measure_stage_mfp_mbp(stage: torch.nn.Module, sample) -> tuple[float, float
 	return float(mfp_mb), float(mbp_mb)
 
 
+def _measure_peak_no_grad(stage: torch.nn.Module, sample):
+	"""Measure the peak memory of a stage without gradients"""
+	torch.cuda.reset_peak_memory_stats()
+	start_mem = torch.cuda.memory_allocated()
+	with torch.no_grad():
+		x = sample.clone()
+		y = stage(x) # noqa: F841
+	torch.cuda.synchronize()
+	return float((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
+
+
 def _apply_checkpointing(stage: torch.nn.Module):
 	"""Apply selective recomputation via checkpointing to attention layers in a stage"""
 	for _, module in stage.named_modules():
@@ -284,17 +296,26 @@ def main():
 			continue
 		stage = meta_to_device(stage)
 		sample = _get_stage_sample(stage, args.batch_size, dtype, hidden_dim, seq_len)
+		target = model.get_target(args.batch_size, dtype, "cuda") if idx == len(stages) - 1 else None
+
+		# Loss function for last stage, otherwise dummy loss function
+		loss_fn = model.loss_fn if idx == len(stages) - 1 else lambda x, y: x.sum()
 
 		# Mfp/Mbp for backward remat options
 		mfp_mb, mbp_mb = _measure_stage_mfp_mbp(stage, sample)
+		peak_no_grad = _measure_peak_no_grad(stage, sample)
 
 		# No recompute
-		times_nr, mems_nr, peaks_nr = _measure_stage_times(stage, sample, args.iterations)
+		times_nr, mems_nr, peaks_nr = _measure_stage_times(
+			stage, sample, target, args.iterations, loss_fn
+		)
 		print(f"Peaks without recompute: {peaks_nr}")
 
 		# SR on forward (attention only)
 		stage_sr = _apply_checkpointing(stage)
-		times_sr, mems_sr, peaks_sr = _measure_stage_times(stage_sr, sample, args.iterations)
+		times_sr, mems_sr, peaks_sr = _measure_stage_times(
+			stage_sr, sample, target, args.iterations, loss_fn
+		)
 		print(f"Peaks with recompute: {peaks_sr}")
 
 		# Parameter memory in MB for stage
@@ -309,6 +330,7 @@ def main():
 			"M": mems_nr,  # [Mf, Mb, Mw]
 			"Mpeak": peaks_nr,  # [PeakF, PeakB, PeakW]
 			"Mparams": float(mparams_mb),
+			"Mpeak_no_grad": float(peak_no_grad),
 			"Tcomm": 0.0,  # to be filled by profiling-comms.py
 			"forward_remat_options": [
 				{"name": "selective_fwd", "overhead": float(sr_overhead), "mem_freed": float(sr_mem_freed)}
@@ -342,6 +364,7 @@ def main():
 		merged = {"model": config}
 
 	merged["stages"] = staged_stats
+	merged["nparams"] = sum(p.numel() for p in model.parameters())
 
 	os.makedirs(os.path.dirname(output_path), exist_ok=True)
 	with open(output_path, "w") as f:

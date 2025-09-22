@@ -78,6 +78,12 @@ The signature of functions expected in the registry are detailed in `elf/registr
 placement = [0,1,2,3, 3,2,1,0]   # bidirectional pipeline for Hanayo / ZBV
 ```
 
+## Environment variables
+
+- ``ELF_TIMINGS``: Accurate time measurements in ``detailed_stats`` field of the ``Pipeline`` object after an iteration. May affect performance.
+- ``ELF_MEMORY``:  Accurate kept and peak memory measurements in ``detailed_stats`` field of the ``Pipeline`` object after an iteration. May affect performance.
+- ``ELF_TIMEOUT``: Number of seconds to wait for before shutting down process groups. (passed to NCCL watchdog)
+
 ## Docs
 
 The full documentation can be generated with Sphinx. Go to `docs/` and run `make html`.

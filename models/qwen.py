@@ -3,7 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 
-from flash_attn import flash_attn_func  # pyright: ignore[reportMissingImports]
+try:
+	from flash_attn import flash_attn_func  # pyright: ignore[reportMissingImports]
+except ImportError:
+	# If flash_attn is not installed, use SDPA from torch instead
+	def flash_attn_func(q, k, v, dropout_p):
+		q = q.transpose(1, 2)
+		k = k.transpose(1, 2)
+		v = v.transpose(1, 2)
+		out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, enable_gqa=True)
+		return out.transpose(1, 2)
 
 
 # Rotary embeddings from https://github.com/meta-llama/llama/blob/main/llama/model.py
@@ -16,12 +25,12 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 1000000.0):
 	The returned tensor contains complex values in complex64 data type.
 
 	Args:
-	    dim (int): Dimension of the frequency tensor.
-	    end (int): End index for precomputing frequencies.
-	    theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+		dim (int): Dimension of the frequency tensor.
+		end (int): End index for precomputing frequencies.
+		theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
 
 	Returns:
-	    torch.Tensor: Precomputed frequency tensor with complex exponentials.
+		torch.Tensor: Precomputed frequency tensor with complex exponentials.
 	"""
 	freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 	t = torch.arange(end, device=freqs.device)  # type: ignore
@@ -38,11 +47,11 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 	for the purpose of broadcasting the frequency tensor during element-wise operations.
 
 	Args:
-	    freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-	    x (torch.Tensor): Target tensor for broadcasting compatibility.
+		freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
+		x (torch.Tensor): Target tensor for broadcasting compatibility.
 
 	Returns:
-	    torch.Tensor: Reshaped frequency tensor.
+		torch.Tensor: Reshaped frequency tensor.
 	"""
 	ndim = x.ndim
 	assert 0 <= 1 < ndim
@@ -65,12 +74,12 @@ def apply_rotary_emb(
 	returned as real tensors.
 
 	Args:
-	    xq (torch.Tensor): Query tensor to apply rotary embeddings.
-	    xk (torch.Tensor): Key tensor to apply rotary embeddings.
-	    freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
+		xq (torch.Tensor): Query tensor to apply rotary embeddings.
+		xk (torch.Tensor): Key tensor to apply rotary embeddings.
+		freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
 
 	Returns:
-	    Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+		Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
 	"""
 	xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
 	xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
@@ -88,12 +97,13 @@ class QwenAttention(nn.Module):
 		self.num_heads = num_heads
 		self.num_kv_heads = num_kv_heads
 		self.head_dim = hidden_dim // num_heads
+		self.q_dim = self.num_heads * self.head_dim
 		self.kv_dim = self.num_kv_heads * self.head_dim
 		self.dropout = dropout
 
 		# Query projection
 		self.q_proj = nn.Linear(
-			hidden_dim, num_heads * self.head_dim, bias=False
+			hidden_dim, self.q_dim, bias=False
 		)  # Qwen2.5 has qkv bias, but not in Qwen3
 
 		# Key and Value projections (potentially fewer heads for GQA)
@@ -107,6 +117,8 @@ class QwenAttention(nn.Module):
 		self.knorm = nn.RMSNorm(self.kv_dim)
 
 		self.freqs_cis = freqs_cis
+		# use different buffer per block for auto partitioning, BUT this makes .to(dtype) cast this buffer to real, making the computation wrong
+		# self.register_buffer("freqs_cis", freqs_cis)
 
 	def forward(self, x):
 		xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
@@ -178,8 +190,17 @@ class Qwen(nn.Module):
 		self.n_blocks = n_blocks
 		self.seq_len = seq_len
 
-		with torch.device("cuda"):
+		# https://github.com/pytorch/pytorch/issues/131328
+		# Fixed in 2.9.0
+		device = (
+			torch.get_default_device()
+			if torch.__version__ >= "2.9.0"
+			else (torch.cuda.current_device() if torch.cuda.is_available() else "cpu")
+		)
+
+		with torch.device(device):
 			self.freqs_cis = precompute_freqs_cis(hidden_dim // num_heads, seq_len)
+
 		self.embed = nn.Embedding(input_dim, hidden_dim)
 		self.blocks = [
 			QwenBlock(hidden_dim, num_heads, num_kv_heads, dropout, ffn_dim, self.freqs_cis)

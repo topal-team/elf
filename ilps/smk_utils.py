@@ -80,10 +80,8 @@ def list_methods(config: Dict[str, Any], config_name: str) -> list[str]:
 	"StageRematF", "Uni-F-Remat").
 	"""
 	params = load_run_params(config, config_name)
-	methods = params.get("methods") or []
-	if not isinstance(methods, list):
-		return []
-	return [str(m) for m in methods]
+	methods = params.get("methods") or {}
+	return [str(m) + "-" + str(scheduler) for scheduler in methods for m in methods[scheduler]]
 
 
 # Put near the top of the file

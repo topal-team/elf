@@ -85,7 +85,13 @@ rule bench_method:
 	log:
 		LOG_DIR + "/{config_name}.{method}.bench"
 	shell:
-		"sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap \"{params.prefix} srun torchrun {params.torchrun_flags} -- ../benchmarks/ilps_guided_benchmark.py --restart --solution-file {input.sol} --config-file {input.sol} --output-file {output} --solution-type {wildcards.method}\""
+		"""
+		if grep -q 'error' {input.sol}; then
+			echo "{{ $(grep 'error' {input.sol}) }}" > {output}
+		else
+			sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap "{params.prefix} srun torchrun {params.torchrun_flags} -- ../benchmarks/ilps_guided_benchmark.py --restart --solution-file {input.sol} --config-file {input.sol} --output-file {output} --solution-type {wildcards.method}"
+		fi
+		"""
 
 # Memory comparison benchmark with ELF_MEMORY=1
 rule memory_comparison:
