@@ -230,7 +230,7 @@ def _measure_peak_no_grad(stage: torch.nn.Module, sample):
 	start_mem = torch.cuda.memory_allocated()
 	with torch.no_grad():
 		x = sample.clone()
-		y = stage(x) # noqa: F841
+		y = stage(x)  # noqa: F841
 	torch.cuda.synchronize()
 	return float((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
 
