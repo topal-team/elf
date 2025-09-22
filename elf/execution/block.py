@@ -405,7 +405,8 @@ class PipelineBlock:
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
 				logger.debug(f"{self} - Sending outputs to rank {rank}")
 				work = dist.isend(outputs, rank, group=self.pp_group)
-				self.send_ops.append(work)
+				if _is_mpi():
+					self.send_ops.append(work)
 
 	def send_backward(self, mb_id, **options):
 		"""
@@ -430,7 +431,8 @@ class PipelineBlock:
 			rank = self.placement[dst]
 			logger.debug(f"{self} - Sending gradients to rank {rank}")
 			work = dist.isend(grads, rank, group=self.pp_group)
-			self.send_ops.append(work)
+			if _is_mpi():
+				self.send_ops.append(work)
 
 	def recv_forward(self, mb_id, mb_size, **options):
 		"""
