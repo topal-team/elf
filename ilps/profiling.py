@@ -27,7 +27,7 @@ from models.simple import Attention
 from models.utils import add_transformer_args, model_config_from_args, build_model_from_args
 from elf.zb_utils import LayerDW, replace_linear_with_linear_dw
 from elf.utils import Timer
-from benchmarks.benchmark_utils import meta_to_device
+from benchmarks.benchmark_utils import meta_to_device, balanced_partition
 
 # -----------------------------------------------------------------------------
 # CLI parsing
@@ -76,25 +76,20 @@ def _partition_full_transformer(model, nstages: int):
 	The first stage wraps the embedding + a slice of blocks, the last stage wraps
 	the remaining blocks + output head, intermediate stages contain only blocks.
 	"""
-	assert len(model.blocks) >= nstages, "nstages must be <= number of blocks"
-	num_blocks = len(model.blocks)
-	base = num_blocks // nstages
-	rem = num_blocks % nstages
-
-	parts = []
+	placement = list(range(nstages))
+	factors = balanced_partition(len(model.blocks), placement)
+	partition = []
 	start = 0
 	for i in range(nstages):
-		count = base + (1 if i < rem else 0)
-		end = start + count
 		modules = []
 		if i == 0:
 			modules.append(model.embed)
-		modules.extend(model.blocks[start:end])
+		modules.extend(model.blocks[start:start + factors[i]])
 		if i == nstages - 1:
 			modules.append(model.head)
-		parts.append(torch.nn.Sequential(*modules))
-		start = end
-	return parts
+		partition.append(torch.nn.Sequential(*modules))
+		start += factors[i]
+	return partition
 
 
 def _stage_bparams(stage: torch.nn.Module):
