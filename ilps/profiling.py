@@ -84,7 +84,7 @@ def _partition_full_transformer(model, nstages: int):
 		modules = []
 		if i == 0:
 			modules.append(model.embed)
-		modules.extend(model.blocks[start:start + factors[i]])
+		modules.extend(model.blocks[start : start + factors[i]])
 		if i == nstages - 1:
 			modules.append(model.head)
 		partition.append(torch.nn.Sequential(*modules))

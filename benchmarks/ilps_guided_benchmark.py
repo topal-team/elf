@@ -97,11 +97,12 @@ def run_benchmark(
 	parts: Any,
 	scheduler: str,
 	placement: List[int],
+	nmb: int,
 	dtype: torch.dtype,
 	rank: int = 0,
 ) -> tuple[float, List[float]]:
 	"""Run benchmark and return iteration time and peak memory usage."""
-	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, dtype)
+	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, dtype, nmb)
 	if rank == 0:
 		print(f"\t{iter_time:.2f}s / iter, Peak memory: {[f'{m:.2f}' for m in all_peak_mems]} GB")
 	return iter_time, all_peak_mems
@@ -111,6 +112,7 @@ def process_solution(
 	model: torch.nn.Module,
 	solution: Optional[Dict],
 	solution_type: str,
+	nmb: int,
 	rank: int,
 	dtype: torch.dtype,
 ) -> tuple[Optional[float], Optional[List[float]]]:
@@ -130,7 +132,7 @@ def process_solution(
 	scheduler = RematScheduler(solution)
 
 	parts = get_handcrafted_imbalanced_partition(model, rank, placement, balance)
-	return run_benchmark(model, parts, scheduler, placement, dtype, rank=rank)
+	return run_benchmark(model, parts, scheduler, placement, nmb, dtype, rank=rank)
 
 
 def main():
@@ -182,8 +184,9 @@ def main():
 		)
 
 	solution = solutions.get(args.solution_type)
+	nmb = solutions.get("nmb", None)
 	try:
-		iter_time, peak_mems = process_solution(model, solution, args.solution_type, rank, dtype)
+		iter_time, peak_mems = process_solution(model, solution, args.solution_type, nmb, rank, dtype)
 
 		if rank == 0 and iter_time is not None:
 			results = load_results(args.output_file, args.restart)

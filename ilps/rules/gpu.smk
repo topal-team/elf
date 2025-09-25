@@ -18,37 +18,20 @@ rule profile:
 	input:
 		lambda wildcards: runfile_path(config, wildcards.config_name)
 	output:
-		config["RESULTS_DIR"] + "/profiling/{config_name}.json"
+		config["RESULTS_DIR"] + "/profiled/{config_name}.json"
 	resources:
-		ngpus=1
+		ngpus=2
 	params:
 		gpu_flag=lambda wildcards, resources: build_gpu_flag(resources.ngpus, config),
 		jobname=lambda wildcards: f"elf-{wildcards.config_name}-profile",
 		time=lambda wildcards: config.get("SLURM", {}).get("time", "00:15:00"),
 		sbatch_common=SBATCH_COMMON,
 		prefix=SBATCH_PREFIX,
-		nstages=lambda wildcards: load_run_params(config, wildcards.config_name).get("ngpus", 4)
+		nstages=lambda wildcards: load_run_params(config, wildcards.config_name).get("ngpus", 4),
 	log:
 		LOG_DIR + "/{config_name}.profile"
 	shell:
-		"sbatch --wait {params.sbatch_common} {params.gpu_flag} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap \"{params.prefix}python profiling.py --config-file {input} --nstages {params.nstages} --output {output} -i 30\""
-
-
-rule profiling_comms:
-	input:
-		config["RESULTS_DIR"] + "/profiling/{config_name}.json"
-	output:
-		config["RESULTS_DIR"] + "/profiled/{config_name}.json"
-	params:
-		gpu_flag=lambda wildcards: build_gpu_flag(4, config),
-		jobname=lambda wildcards: f"elf-{wildcards.config_name}-comms",
-		time=lambda wildcards: config.get("SLURM", {}).get("time", "00:03:00"),
-		sbatch_common=SBATCH_COMMON,
-		prefix=SBATCH_PREFIX
-	log:
-		LOG_DIR + "/{config_name}.comms"
-	shell:
-		"sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap \"{params.prefix}torchrun --standalone --nproc-per-node=2 profiling-comms.py --config-file {input} --output {output}\""
+		"sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap \"{params.prefix}python profiling.py --config-file {input} --nstages {params.nstages} --output {output} -i 30 && torchrun --standalone --nproc-per-node=2 profiling-comms.py --config-file {output} --output {output}\""
 
 # Per-method benchmarks in parallel
 rule bench_method:

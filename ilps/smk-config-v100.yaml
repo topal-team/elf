@@ -11,4 +11,4 @@ SLURM:
   gpus_flag: "--gpus={ngpus}"
   # Optional: commands to prepare the environment on the node
   setup: "export OMP_NUM_THREADS=4"
-  venv_activate: "source ~/work/venv/bin/activate"
+  venv_activate: "source ~/elf-dev/venv/bin/activate"

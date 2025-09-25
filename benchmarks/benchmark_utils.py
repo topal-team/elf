@@ -37,14 +37,14 @@ def init_dist(backend="nccl"):
 	return local_rank, dist.get_rank(), dist.get_world_size()
 
 
-def bench(model, parts, scheduler, placement, dtype=torch.float32):
+def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
 	n_iterations = 30
 
 	microbatch_size = 1
-	n_micro_batches = world_size * 2
+	n_micro_batches = nmb or world_size * 2
 	batch_size = microbatch_size * n_micro_batches
 
 	loss_fn = model.loss_fn

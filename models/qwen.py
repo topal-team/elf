@@ -6,12 +6,15 @@ from typing import Tuple
 try:
 	from flash_attn import flash_attn_func  # pyright: ignore[reportMissingImports]
 except ImportError:
+	from torch.nn.attention import SDPBackend, sdpa_kernel
+
 	# If flash_attn is not installed, use SDPA from torch instead
 	def flash_attn_func(q, k, v, dropout_p):
 		q = q.transpose(1, 2)
 		k = k.transpose(1, 2)
 		v = v.transpose(1, 2)
-		out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, enable_gqa=True)
+		with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+			out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, enable_gqa=True)
 		return out.transpose(1, 2)
 
 
