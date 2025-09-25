@@ -4,6 +4,7 @@ import copy
 
 from typing import List
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -37,11 +38,11 @@ def init_dist(backend="nccl"):
 	return local_rank, dist.get_rank(), dist.get_world_size()
 
 
-def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None):
+def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntrials=1):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
-	n_iterations = 30
+	n_iterations = 15
 
 	microbatch_size = 1
 	n_micro_batches = nmb or world_size * 2
@@ -72,35 +73,40 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None):
 			split_size=microbatch_size,
 		)
 
-	torch.cuda.synchronize()
-	dist.barrier()
+	times = []
+
 	torch.cuda.reset_peak_memory_stats()
+	for _ in range(ntrials):
+		torch.cuda.synchronize()
+		dist.barrier()
 
-	start_time = time.time()
+		start_time = time.time()
 
-	# Time n iterations
-	for i in range(n_iterations):
-		pipe.zero_grad()
-		_ = pipe(
-			model.get_sample(batch_size, dtype, device="cuda"),
-			model.get_target(batch_size, dtype, device="cuda"),
-			loss_fn,
-			split_size=microbatch_size,
-		)
+		# Time n iterations
+		for i in range(n_iterations):
+			pipe.zero_grad()
+			_ = pipe(
+				model.get_sample(batch_size, dtype, device="cuda"),
+				model.get_target(batch_size, dtype, device="cuda"),
+				loss_fn,
+				split_size=microbatch_size,
+			)
 
-	torch.cuda.synchronize()
-	dist.barrier()
+		torch.cuda.synchronize()
+		dist.barrier()
+
+		iter_time = (time.time() - start_time) / n_iterations
+
+		times.append(iter_time)
+
 	peak_mem = torch.cuda.max_memory_allocated() / (2**30)
-
-	iter_time = (time.time() - start_time) / n_iterations
-
 	all_peak_mems = (
 		[torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
 	)
 	dist.gather(torch.tensor(peak_mem, device=local_rank), all_peak_mems, dst=0)
 
 	pipe.clear()
-	return iter_time, all_peak_mems
+	return np.median(times).item(), all_peak_mems, times
 
 
 def meta_to_device(model, device="cuda"):

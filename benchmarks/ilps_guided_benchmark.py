@@ -100,12 +100,13 @@ def run_benchmark(
 	nmb: int,
 	dtype: torch.dtype,
 	rank: int = 0,
-) -> tuple[float, List[float]]:
+	ntrials: int = 1,
+) -> tuple[float, List[float], List[float]]:
 	"""Run benchmark and return iteration time and peak memory usage."""
-	iter_time, all_peak_mems = bench(model, parts, scheduler, placement, dtype, nmb)
+	iter_time, all_peak_mems, times = bench(model, parts, scheduler, placement, dtype, nmb, ntrials)
 	if rank == 0:
 		print(f"\t{iter_time:.2f}s / iter, Peak memory: {[f'{m:.2f}' for m in all_peak_mems]} GB")
-	return iter_time, all_peak_mems
+	return iter_time, all_peak_mems, times
 
 
 def process_solution(
@@ -115,7 +116,8 @@ def process_solution(
 	nmb: int,
 	rank: int,
 	dtype: torch.dtype,
-) -> tuple[Optional[float], Optional[List[float]]]:
+	ntrials: int,
+) -> tuple[Optional[float], Optional[List[float]], Optional[List[float]]]:
 	"""Process a single solution type and return benchmark results."""
 
 	placement = solution.get("placement")
@@ -132,7 +134,7 @@ def process_solution(
 	scheduler = RematScheduler(solution)
 
 	parts = get_handcrafted_imbalanced_partition(model, rank, placement, balance)
-	return run_benchmark(model, parts, scheduler, placement, nmb, dtype, rank=rank)
+	return run_benchmark(model, parts, scheduler, placement, nmb, dtype, rank=rank, ntrials=ntrials)
 
 
 def main():
@@ -166,7 +168,8 @@ def main():
 
 	# Load solutions and results
 	with open(args.solution_file, "r") as f:
-		solutions = json.load(f).get("solutions", {})
+		config = json.load(f)
+		solutions = config.get("solutions", {})
 
 	# Create and initialize model
 	with torch.device("meta"):
@@ -184,14 +187,21 @@ def main():
 		)
 
 	solution = solutions.get(args.solution_type)
-	nmb = solutions.get("nmb", None)
+	nmb = config.get("nmb", None)
+	ntrials = config.get("ntrials", 1)
 	try:
-		iter_time, peak_mems = process_solution(model, solution, args.solution_type, nmb, rank, dtype)
+		iter_time, peak_mems, all_times = process_solution(
+			model, solution, args.solution_type, nmb, rank, dtype, ntrials
+		)
 
 		if rank == 0 and iter_time is not None:
 			results = load_results(args.output_file, args.restart)
 
-			results[args.solution_type] = {"time": iter_time, "peak_mems": [float(m) for m in peak_mems]}
+			results[args.solution_type] = {
+				"time": iter_time,
+				"peak_mems": [float(m) for m in peak_mems],
+				"all_times": all_times,
+			}
 
 			# Save results atomically using a temporary file
 			with open(args.output_file, "w") as f:
