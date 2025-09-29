@@ -1,5 +1,5 @@
 RESULTS_DIR: "../results/ilps"
-RUNS_DIR: "runs"
+RUNS_DIR: "runs/mlsys"
 LOG_DIR: "../logs"
 
 SLURM:

@@ -654,8 +654,7 @@ class PipelineBlock:
 		for input_var, value in zip(self.input_variables, input_grads):
 			input_var.set(input_var.to_send, mb_id, value)
 
-		# We may need input to recompute F before W; we save them here and let W delete them
-		# This is not optimal, we could check here if any module needs recomputation to delete them right away
+		# We may need input to recompute F before W; we save them here and let RF delete them
 		if recompute_activations:
 			for input_var, value in zip(self.input_variables, inputs):
 				input_var.set(input_var.saved, mb_id, value)

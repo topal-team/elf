@@ -137,7 +137,7 @@ def _measure_stage_times(stage: torch.nn.Module, sample, target, n_iter: int, lo
 		torch.cuda.reset_peak_memory_stats()
 		start_mem = torch.cuda.memory_allocated()
 		with Timer() as t:
-			x = sample.clone()
+			x = sample.clone().detach().requires_grad_(torch.is_floating_point(sample))
 			y = stage(x)
 			loss = loss_fn(y, target)
 		torch.cuda.synchronize()
@@ -150,6 +150,7 @@ def _measure_stage_times(stage: torch.nn.Module, sample, target, n_iter: int, lo
 		before_b = torch.cuda.memory_allocated()
 		with Timer() as t:
 			loss.backward()
+			grads = x.grad.data if x.requires_grad else None
 			del x, y, loss
 		torch.cuda.synchronize()
 		times["b"].append(1000 * t.time())
@@ -160,6 +161,7 @@ def _measure_stage_times(stage: torch.nn.Module, sample, target, n_iter: int, lo
 		torch.cuda.reset_peak_memory_stats()
 		before_w = torch.cuda.memory_allocated()
 		with Timer() as t:
+			del grads
 			_stage_bparams(stage)
 		torch.cuda.synchronize()
 
@@ -224,10 +226,16 @@ def _measure_peak_no_grad(stage: torch.nn.Module, sample):
 	torch.cuda.reset_peak_memory_stats()
 	start_mem = torch.cuda.memory_allocated()
 	with torch.no_grad():
-		x = sample.clone()
+		x = sample.clone().detach().requires_grad_(torch.is_floating_point(sample))
 		y = stage(x)  # noqa: F841
 	torch.cuda.synchronize()
 	return float((torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024)
+
+
+def _measure_stage_input_output_mem(stage: torch.nn.Module, sample):
+	"""Measure the input and output memory of a stage"""
+	y = stage(sample)
+	return sample.nbytes / (1024 * 1024), y.nbytes / (1024 * 1024)
 
 
 def _apply_checkpointing(stage: torch.nn.Module):
@@ -299,6 +307,7 @@ def main():
 		# Mfp/Mbp for backward remat options
 		mfp_mb, mbp_mb = _measure_stage_mfp_mbp(stage, sample)
 		peak_no_grad = _measure_peak_no_grad(stage, sample)
+		input_mem, output_mem = _measure_stage_input_output_mem(stage, sample)
 
 		# No recompute
 		times_nr, mems_nr, peaks_nr = _measure_stage_times(
@@ -331,10 +340,16 @@ def main():
 				{"name": "selective_fwd", "overhead": float(sr_overhead), "mem_freed": float(sr_mem_freed)}
 			],
 			"backward_remat_options": [
-				{"name": "activations_bwd", "overhead": float(times_nr[0]), "mem_freed": float(mfp_mb)}
+				{
+					"name": "activations_bwd",
+					"overhead": float(times_nr[0]),
+					"mem_freed": float(mfp_mb) - float(input_mem),
+				}  # need to keep inputs for recompute
 			],
 			"Mfp": float(mfp_mb),
 			"Mbp": float(mbp_mb),
+			"Minput": float(input_mem),
+			"Moutput": float(output_mem),
 		}
 		staged_stats.append(stage_cfg)
 		sig_to_stats[sig] = stage_cfg
