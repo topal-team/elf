@@ -69,11 +69,19 @@ rule bench_method:
 		LOG_DIR + "/{config_name}.{method}.bench"
 	shell:
 		"""
+		# Always produce an output file so downstream merge can proceed, even on failure
 		if grep -q 'error' {input.sol}; then
-			echo "{{ $(grep 'error' {input.sol}) }}" > {output}
+			# If solution contains an error, record it directly as the benchmark output
+			echo '{{"error": "solution_error"}}' > {output}
 		else
+			# Run the benchmark via Slurm; on failure, write an error JSON to the output
 			sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap "{params.prefix} srun torchrun {params.torchrun_flags} -- ../benchmarks/ilps_guided_benchmark.py --restart --solution-file {input.sol} --config-file {input.sol} --output-file {output} --solution-type {wildcards.method}"
+			status=$?
+			if [ $status -ne 0 ] || [ ! -s {output} ]; then
+				echo '{{"error": "benchmark_failed", "exit_code": '"$status"'}}' > {output}
+			fi
 		fi
+		exit 0
 		"""
 
 # Memory comparison benchmark with ELF_MEMORY=1
@@ -105,4 +113,12 @@ rule memory_comparison:
 	log:
 		LOG_DIR + "/{config_name}.{method}.memcomp"
 	shell:
-		"sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap \"{params.prefix} srun torchrun {params.torchrun_flags} -- memory_comparison_benchmark.py --solution-file {input.sol} --config-file {input.prof} --output-file {output} --solution-type {wildcards.method}\""
+		"""
+		# Run memory comparison; on failure, emit an error JSON so downstream steps can continue
+		sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap "{params.prefix} srun torchrun {params.torchrun_flags} -- memory_comparison_benchmark.py --solution-file {input.sol} --config-file {input.prof} --output-file {output} --solution-type {wildcards.method}"
+		status=$?
+		if [ $status -ne 0 ] || [ ! -s {output} ]; then
+			echo '{{"error": "memcomp_failed", "exit_code": '"$status"'}}' > {output}
+		fi
+		exit 0
+		"""

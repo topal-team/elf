@@ -212,7 +212,7 @@ def main():
 		with open(args.output_file, "w") as f:
 			json.dump({"error": f"Out of memory (rank {rank})"}, f, indent=4)
 
-		sys.exit(0)  # Clean exit so that snakemake knows it's ok
+		sys.exit(1)
 
 	# Print full stacktrace for any exceptions
 	except Exception as e:

@@ -8,6 +8,7 @@ results/
 images/*.sif
 local/* 
 ilps/runs/*
+ilps/.snakemake
 
 # Slurm outputs
 core.*

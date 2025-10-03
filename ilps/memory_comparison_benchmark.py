@@ -40,6 +40,7 @@ from benchmarks.ilp_schedulers import RematScheduler
 # Import memory simulation classes
 from params import get_params_from_config  # pyright: ignore[reportMissingImports]
 from simulate_memory import StageRematMemSimulator  # pyright: ignore[reportMissingImports]
+from utils import schedule  # pyright: ignore[reportMissingImports]
 
 logging.basicConfig(level=logging.INFO)
 
@@ -156,10 +157,18 @@ def bench_with_detailed_memory(model, parts, scheduler, placement, dtype):
 		return None, None, None
 
 
-def extract_ilp_memory_evolution(solution: Dict, config: str or os.PathLike) -> Dict[str, Any]:
+def parse_scheduler(solution_type: str):
+	"""Parse the scheduler from the solution."""
+	return solution_type.split("-")[-1]
+
+
+def extract_ilp_memory_evolution(
+	solution: Dict, config: str or os.PathLike, solution_type: str
+) -> Dict[str, Any]:
 	"""Extract memory evolution from ILP solution using the simulator."""
 	# Create params from profiling data
 	params = get_params_from_config(config)
+	params["sched"] = schedule(params["p"], params["m"], parse_scheduler(solution_type))
 
 	# Get the appropriate simulator
 	simulator = StageRematMemSimulator(params, solution)
@@ -221,7 +230,7 @@ def main():
 		# Extract ILP memory estimates
 		if rank == 0:
 			print("Extracting ILP memory estimates...")
-		ilp_memory_data = extract_ilp_memory_evolution(solution, args.config_file)
+		ilp_memory_data = extract_ilp_memory_evolution(solution, args.config_file, args.solution_type)
 
 		# Run actual benchmark with memory tracking
 		if rank == 0:
