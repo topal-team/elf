@@ -14,6 +14,9 @@ class LinearDX(torch.autograd.Function):
 		# but if we don't have input tensors that require grad, autograd will not automatically mark the output as needing grad.
 		ctx.linear = linear
 		linear.last_input = input.detach()
+		# if this is the input of the model, it won't have a grad_fn
+		# we mark it here to prevent remat logic from deleting it since it won't be recomputed by torch.utils.checkpoint
+		setattr(linear.last_input, "is_model_input", input.grad_fn is None)
 		ctx.save_for_backward(
 			input.detach()
 		)  # used in dL/dw, we mark it as saved here to force torch.utils.checkpoint to recompute it
