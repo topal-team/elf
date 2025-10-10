@@ -18,7 +18,7 @@ class RematScheduler:
 
 		def new_base_scheduler(placement, nmb, signatures):
 			schedule = []
-			for block_id, optype, mb_id in order:
+			for optype, block_id, mb_id in order:
 				match optype:
 					case "f":
 						_add_forward_pass(

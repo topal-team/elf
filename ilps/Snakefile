@@ -3,23 +3,16 @@ configfile: "smk-config-h100.yaml"
 include: "rules/cpu.smk"
 include: "rules/gpu.smk"
 
-from smk_utils import get_config_name, list_methods
+from smk_utils import list_methods
 from snakemake.io import glob_wildcards
 
-CFGS = glob_wildcards(f"{config['RUNS_DIR']}/" + "{config_name}.json").config_name
-
-CONFIG_NAME = get_config_name(config)
-if CONFIG_NAME:
-	methods = list_methods(config, CONFIG_NAME)
-	FINAL_TARGET = f"{config['RESULTS_DIR']}/benchmarks/{CONFIG_NAME}.json"
-	rule all:
-		input:
-			expand(config["RESULTS_DIR"] + "/solutions/{config_name}.json", config_name=CONFIG_NAME, method=methods),
-			expand(config["RESULTS_DIR"] + "/benchmarks/{config_name}.json", config_name=CONFIG_NAME, method=methods),
-			FINAL_TARGET
-
-		wildcard_constraints:
-			config_name=r"[a-zA-Z0-9_-]+"
+wildcard_constraints:
+	model=r"[a-zA-Z0-9_-]+",
+	sequence_length=r"\d+",
+	ngpus=r"\d+",
+	nstages=r"\d+",
+	gpu_type=r"[a-zA-Z0-9]+",
+	method=r"[a-zA-Z0-9_-]+"
 
 rule clean:
 	params:
@@ -27,8 +20,3 @@ rule clean:
 		results_dir=config["RESULTS_DIR"]
 	shell:
 		"rm -rfI {params.results_dir}/*/* {params.log_dir}/*"
-
-rule run_all:
-	input:
-		expand(config["RESULTS_DIR"] + "/solutions/{config_name}.json", config_name=CFGS),
-		expand(config["RESULTS_DIR"] + "/benchmarks/{config_name}.json", config_name=CFGS)
