@@ -83,8 +83,7 @@ def list_methods(config: Dict[str, Any], wildcards_or_name: Wildcards | str) -> 
 	"""Return list of methods to run for a given run config.
 
 	The run file can contain a key "methods" listing method keys that will be
-	used as solution_type keys in solutions and benchmarks (e.g., "StageRemat",
-	"StageRematF", "Uni-F-Remat").
+	used as solution_type keys in solutions and benchmarks (e.g., "F-StageRemat-zbh1-1W", "Uni-F-Remat-zbv-2W").
 	"""
 	params = load_run_params(config, wildcards_or_name)
 	methods = params.get("methods") or {}

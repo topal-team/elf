@@ -79,11 +79,7 @@ rule bench_method:
 			echo '{{"error": "solution_error"}}' > {output}
 		else
 			# Run the benchmark via Slurm; on failure, write an error JSON to the output
-			sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap "{params.prefix} srun torchrun {params.torchrun_flags} -- ../benchmarks/ilps_guided_benchmark.py --restart --solution-file {input} --config-file {input} --output-file {output} --solution-type {wildcards.method}"
-			status=$?
-			if [ $status -ne 0 ] || [ ! -s {output} ]; then
-				echo '{{"error": "benchmark_failed", "exit_code": '"$status"'}}' > {output}
-			fi
+			sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap "{params.prefix} srun torchrun {params.torchrun_flags} -- ../benchmarks/ilps_guided_benchmark.py --restart --solution-file {input} --config-file {input} --output-file {output} --solution-type {wildcards.method}" || echo '{{"error": "benchmark_failed", "exit_code": '"$?"'}}' > {output}
 		fi
 		exit 0
 		"""
@@ -92,7 +88,8 @@ rule bench_method:
 rule memory_comparison:
 	input:
 		sol=config["RESULTS_DIR"] + "/solutions/{model}-s{sequence_length}-{ngpus}{gpu_type}/{method}.json",
-		prof=config["RESULTS_DIR"] + "/profiled/{model}-s{sequence_length}-{gpu_type}.json"
+		prof=lambda wildcards: config["RESULTS_DIR"] + "/profiled/{model}-s{sequence_length}-{gpu_type}-" + str(nstages_from_wildcards(wildcards)) + "stages.json",
+		runfile=config["RUNS_DIR"] + "/{model}-s{sequence_length}-{ngpus}{gpu_type}.json"
 	output:
 		config["RESULTS_DIR"] + "/memory_comparison/{model}-s{sequence_length}-{ngpus}{gpu_type}/{method}.json"
 	resources:
@@ -119,7 +116,7 @@ rule memory_comparison:
 	shell:
 		"""
 		# Run memory comparison; on failure, emit an error JSON so downstream steps can continue
-		sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap "{params.prefix} srun torchrun {params.torchrun_flags} -- memory_comparison_benchmark.py --solution-file {input.sol} --config-file {input.prof} --output-file {output} --solution-type {wildcards.method}"
+		sbatch --wait {params.sbatch_common} {params.gpu_flag} --exclusive --nodes {params.nnodes} --job-name={params.jobname} --time {params.time} --output {log}.out --error {log}.err --wrap "{params.prefix} srun torchrun {params.torchrun_flags} -- memory_comparison_benchmark.py --solution-file {input.sol} --config-file {input.runfile} --output-file {output} --solution-type {wildcards.method} --profiled-file {input.prof}"
 		status=$?
 		if [ $status -ne 0 ] || [ ! -s {output} ]; then
 			echo '{{"error": "memcomp_failed", "exit_code": '"$status"'}}' > {output}

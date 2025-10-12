@@ -45,7 +45,7 @@ rule solve_method:
 		nmb=lambda wildcards: load_run_params(config, wildcards).get("nmb"),
 	shell:
 		# Important: use processors+nmb from the original config, not from the profiled one, because we might use profiling of 8 GPUs for wave schedule on 4 GPUs
-		"python ../pipeline-ilps/runall.py --config {input.runfile} --profiling {input.profiled} --output {output} --method {wildcards.method} --processors {params.ngpus} --time-limit 32 --mem {params.memgpu} --nmb {params.nmb} 1> {log}.out 2> {log}.err"
+		"python ../pipeline-ilps/runall.py --config {input.runfile} --profiling {input.profiled} --output {output} --method {wildcards.method} --processors {params.ngpus} --time-limit 600 --mem {params.memgpu} --nmb {params.nmb} 1> {log}.out 2> {log}.err"
 
 
 # Merge multiple method solutions into a single solutions file
@@ -82,7 +82,7 @@ rule merge_solutions:
 
 
 
-# ruleorder: merge_benchmarks > merge_benchmarks_partial
+ruleorder: merge_benchmarks > merge_benchmarks_partial
 
 # Merge method-level benchmark outputs to the main benchmark file
 rule merge_benchmarks:
@@ -106,6 +106,26 @@ rule merge_benchmarks:
 		import json
 		merged = {}
 		for path in input:
+			with open(path, "r") as fh:
+				data = json.load(fh)
+				if "error" in data:
+					print(f"Error in {path}: {data['error']}")
+					continue
+				merged.update(data)
+		with open(output[0], "w") as fh:
+			json.dump(merged, fh, indent=1)
+
+
+rule merge_benchmarks_partial:
+	input:
+		lambda wildcards: existing_benchmark_files(config, wildcards)
+	output:
+		config["RESULTS_DIR"] + "/benchmarks/{model}-s{sequence_length}-{ngpus}{gpu_type}.json"
+	run:
+		import json
+		merged = {}
+		for path in input:
+			# print(f"Merging {path}")
 			with open(path, "r") as fh:
 				data = json.load(fh)
 				if "error" in data:

@@ -40,7 +40,6 @@ from benchmarks.ilp_schedulers import RematScheduler
 # Import memory simulation classes
 from params import get_params_from_config  # pyright: ignore[reportMissingImports]
 from simulate_memory import StageRematMemSimulator  # pyright: ignore[reportMissingImports]
-from utils import schedule  # pyright: ignore[reportMissingImports]
 
 logging.basicConfig(level=logging.INFO)
 
@@ -159,16 +158,25 @@ def bench_with_detailed_memory(model, parts, scheduler, placement, dtype):
 
 def parse_scheduler(solution_type: str):
 	"""Parse the scheduler from the solution."""
-	return solution_type.split("-")[-1]
+	return solution_type.split("-")[-2]  # method-scheduler-nwaves
 
 
 def extract_ilp_memory_evolution(
-	solution: Dict, config: str or os.PathLike, solution_type: str
+	solution: Dict, config: str or os.PathLike, solution_type: str, profiled_file: str or os.PathLike
 ) -> Dict[str, Any]:
 	"""Extract memory evolution from ILP solution using the simulator."""
 	# Create params from profiling data
-	params = get_params_from_config(config)
-	params["sched"] = schedule(params["p"], params["m"], parse_scheduler(solution_type))
+	with open(profiled_file, "r") as f:
+		profiled_data = json.load(f)
+	with open(config, "r") as f:
+		config_data = json.load(f)
+
+	profiled_data["scheduler"] = parse_scheduler(solution_type)
+	profiled_data["placement"] = solution["placement"]  # placement was generated when solving
+	profiled_data["ngpus"] = config_data["ngpus"]
+	profiled_data["nmb"] = config_data["nmb"]
+	profiled_data["memgpu"] = config_data["memgpu"]
+	params = get_params_from_config(profiled_data)
 
 	# Get the appropriate simulator
 	simulator = StageRematMemSimulator(params, solution)
@@ -197,6 +205,7 @@ def main():
 	parser.add_argument(
 		"--output-file", type=str, required=True, help="Path to write comparison results"
 	)
+	parser.add_argument("--profiled-file", type=str, required=True, help="Path to the profiled data")
 	parser.add_argument("--solution-type", type=str, required=True, help="Solution type to analyze")
 	add_transformer_args(parser)
 	args = parser.parse_args()
@@ -230,7 +239,9 @@ def main():
 		# Extract ILP memory estimates
 		if rank == 0:
 			print("Extracting ILP memory estimates...")
-		ilp_memory_data = extract_ilp_memory_evolution(solution, args.config_file, args.solution_type)
+		ilp_memory_data = extract_ilp_memory_evolution(
+			solution, args.config_file, args.solution_type, args.profiled_file
+		)
 
 		# Run actual benchmark with memory tracking
 		if rank == 0:
