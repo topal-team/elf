@@ -4,12 +4,12 @@ ELF is a lightweight research-oriented framework built on top of **PyTorch** tha
 
 ## Highlights
 
-• **One-line pipeline parallelism** – wrap any `torch.nn.Module` inside `elf.Pipeline` and train it across any number of GPUs.
-• **Automatic model partitioning** – integrates different model splitting algorithms, and respects manual splits when you prefer full control.
-• **Static schedule zoo** – GPipe, 1F1B, Hanayo, Zero-Bubble family, full-remat and inference-only variants.
-• **Data + pipeline parallelism** – mix pipeline stages (`pp`) with data-parallel replicas (`dp`) in the same job.
-• **Fine-grained rematerialisation control** – pick a built-in schedule or inject your own policy to trade memory for extra compute.
-• **Plugin registries** – add new schedulers, partitioners or tracers without touching the core code.
+- **One-line pipeline parallelism** – wrap any `torch.nn.Module` inside `elf.Pipeline` and train it across any number of GPUs.
+- **Automatic model partitioning** – integrates different model splitting algorithms, and respects manual splits when you prefer full control.
+- **Static schedule zoo** – GPipe, 1F1B, Hanayo, Zero-Bubble family, full-remat and inference-only variants.
+- **Data + pipeline parallelism** – mix pipeline stages (`pp`) with data-parallel replicas (`dp`) in the same job.
+- **Fine-grained rematerialisation control** – pick a built-in schedule or inject your own policy to trade memory for extra compute.
+- **Plugin registries** – add new schedulers, partitioners or tracers without touching the core code.
 
 ## Quick start
 
@@ -41,10 +41,10 @@ Some examples can be found under `examples/` for more details and use cases.
 
 `Pipeline` is a thin wrapper around your `nn.Module`.  The most useful kwargs are:
 
-• **placement** – list of CUDA ranks (or `"auto"`) describing where each stage runs.
-• **partitioner** – registry key or callable used to cut the graph (set to `False` if you already partitioned the model yourself).
-• **scheduler** – registry key or callable that returns a static list of operations for every micro-batch.
-• **dp** – integer giving the data-parallel replication factor.
+- **placement** – list of CUDA ranks (or `"auto"`) describing where each stage runs.
+- **partitioner** – registry key or callable used to cut the graph (set to `False` if you already partitioned the model yourself).
+- **scheduler** – registry key or callable that returns a static list of operations for every micro-batch.
+- **dp** – integer giving the data-parallel replication factor.
 
 The full argument list is defined in [the documentation](#docs).
 
@@ -90,13 +90,13 @@ The full documentation can be generated with Sphinx. Go to `docs/` and run `make
 
 ## Testing & benchmarks
 
-• Run all tests: `./tests/test.sh` (a few require ≥2 GPUs).
-• Performance scripts live in `benchmarks/`.
-• ILP-based experiments are located in `ilps`.
+- Run all tests: `./tests/test.sh` (a few require ≥2 GPUs).
+- Performance scripts live in `benchmarks/`.
+- ILP-based experiments are located in `ilps`.
 
 ## Environment setup on clusters
 
 CUDA/NCCL versions and SLURM setups for some HPC clusters are documented in the `docs/` folder:
 
-• [Jean-Zay](docs/jean-zay.md)
-• [Helios](docs/helios.md)
+- [Jean-Zay](docs/jean-zay.md)
+- [Helios](docs/helios.md)
