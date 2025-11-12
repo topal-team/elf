@@ -1,6 +1,7 @@
 import os
 import time
 import copy
+import logging
 
 from typing import List
 
@@ -14,6 +15,8 @@ from elf.zb_utils import LayerDW
 from elf.registry import SCHEDULERS, resolve
 from elf.scheduling.scheduling import Operation, OpOptions, OperationType, compute_types
 from models.simple import Attention, FastAttention
+
+logger = logging.getLogger("benchmark_utils")
 
 
 def init_dist(backend="nccl"):
@@ -36,6 +39,14 @@ def init_dist(backend="nccl"):
 	dist.init_process_group(backend=backend, device_id=torch.device(f"cuda:{local_rank}"))
 
 	return local_rank, dist.get_rank(), dist.get_world_size()
+
+
+def mem_state():
+	allocated = torch.cuda.memory_allocated()
+	reserved = torch.cuda.memory_reserved()
+	free, total = torch.cuda.mem_get_info()
+	inactive = torch.cuda.memory_stats()["inactive_split_bytes.all.current"]
+	return f"Allocated: {allocated / (2**30):.2f}GB, Reserved: {reserved / (2**30):.2f}GB, Free: {free / (2**30):.2f} / {total / (2**30):.2f} GB, Inactive: {inactive / (2**30):.2f}GB"
 
 
 def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntrials=1):
@@ -76,7 +87,10 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntr
 	times = []
 
 	torch.cuda.reset_peak_memory_stats()
-	for _ in range(ntrials):
+	for n in range(ntrials):
+		logger.info(
+			f"Trial {n}: rank {rank} has {torch.cuda.memory_allocated() / (2**30):.2f}GB in use"
+		)
 		torch.cuda.synchronize()
 		dist.barrier()
 
@@ -91,6 +105,7 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntr
 				loss_fn,
 				split_size=microbatch_size,
 			)
+			logger.debug(f"Rank {rank} - Iteration {i}: {mem_state()}")
 
 		torch.cuda.synchronize()
 		dist.barrier()
