@@ -160,7 +160,7 @@ _GLOBAL_PINNED_POOL: Optional[PinnedHostTensorPool] = (
 
 
 class OffloadToCPU:
-	"""Context-manager that off-loads activation tensors to CPU during the forward pass.
+	"""Context-manager that offloads activation tensors to CPU during the forward pass.
 
 	It relies on ``torch.autograd.graph.saved_tensors_hooks``. When the forward pass
 	stores an activation needed for the backward pass, the save hook is called. We
