@@ -12,8 +12,7 @@ custom schedulers, and fine-grained control over pipeline execution.
 Manual Model Partitioning
 --------------------------
 
-While ELF supports automatic partitioning, you can manually partition your model
-when you need fine-grained control over the distribution.
+While ELF supports automatic partitioning, you can manually partition your model if you want to have control, or if your model can't be traced.
 
 Basic Manual Partitioning
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -21,8 +20,9 @@ Basic Manual Partitioning
 When using manual partitioning, you need to:
 
 1. Split your model into parts yourself
-2. Define sources and targets for communication
-3. Set ``partitioner=False`` in the Pipeline
+2. Materialize each part to the correct device
+3. Define sources and targets for communication
+4. Set ``partitioner=False`` in the Pipeline
 
 .. code-block:: python
 
@@ -68,7 +68,7 @@ When using manual partitioning, you need to:
 
 * Set ``partitioner=False`` to skip automatic partitioning
 * Pass ``None`` as the sample argument
-* You must define ``sources`` and ``targets`` yourself
+* You must define ``sources`` and ``targets`` yourself (see below)
 
 
 Sources and Targets for Communication
@@ -136,7 +136,7 @@ For models with skip connections (e.g., ResNets, U-Nets), manually define the gr
 
 * Keys in sources/targets are the actual variable names used in your forward pass
 * Variable names must match between stages (output name of one stage = input name of next)
-* Special values: ``None`` means external input/output
+* ``None`` means external input/output
 
 
 Data Distribution and Results
@@ -160,8 +160,7 @@ When calling the pipeline, all ranks need to provide the full batch of inputs an
 Result Location
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The pipeline results are returned only on the last rank, and there's an important
-memory optimization to be aware of:
+The pipeline results are returned only on the last rank.
 
 .. code-block:: python
 
@@ -189,8 +188,8 @@ memory optimization to be aware of:
 
 .. important::
     The output ``y`` is **automatically offloaded to CPU** on the last rank
-    for memory efficiency. This prevents GPU memory from being consumed by result tensors
-    that are typically only used for logging or further CPU-side processing.
+    for memory savings. This prevents GPU memory from being consumed by result tensors
+    that are typically only used for logging or further CPU-side processing (e.g. for validation).
 
     If you need the results on GPU (e.g., for additional GPU computations), you must
     explicitly move them back with ``.cuda()``.
@@ -360,7 +359,6 @@ You can wrap existing schedulers to add custom behavior:
 
 .. code-block:: python
 
-    from elf.registry import SCHEDULERS
     from elf.scheduling import OpOptions, OperationType
 
     def checkpointed_1f1b(placement, nmb, signatures):
@@ -393,7 +391,8 @@ See :class:`elf.scheduling.scheduling.OpOptions` for an up-to-date and complete 
 Zero Bubble Schedules
 ---------------------
 
-Zero Bubble (ZB) schedules require special linear layers that support delayed weight gradient computation.
+Zero Bubble (ZB) schedules require special layers that support delayed weight gradient computation.
+Only layers that have a ``LayerDW`` equivalent implemented can perform delayed weight gradient computation.
 
 Enabling ZB Schedules
 ~~~~~~~~~~~~~~~~~~~~~
@@ -472,7 +471,8 @@ and materialize only the parts needed per rank.
 
 * Model structure exists on all ranks without using memory
 * Only partition assigned to each rank is materialized
-* Essential for models that don't fit in memory when fully materialized
+
+For automatic partitioning, this cannot work because we perform an actual forward pass to profile the model.
 
 
 Loading Schedules from Files
@@ -494,7 +494,25 @@ For advanced optimization, you can compute schedules offline and load them:
 
     pipe = Pipeline(model, sample, scheduler=scheduler)
 
-The schedule file should contain a list of operations in JSON format.
+The schedule file should be a JSON object with a key `"order"`, whose value is a list of operations.
+Each operation should be represented as a tuple:
+  (block_id, op_type, mb_id)
+where:
+  - block_id: integer, the block index
+  - op_type: string, either "f" (forward), "b" (backward), or "w" (weight gradient computation)
+  - mb_id: integer, the microbatch index
+
+Example `optimal_schedule.json`:
+{
+    "order": [
+        [0, "f", 0],
+        [0, "b", 0],
+        [0, "w", 0],
+        [1, "f", 0],
+        [1, "b", 0],
+        [1, "w", 0]
+    ]
+}
 
 
 Pipeline Execution Behavior
@@ -517,8 +535,6 @@ each pipeline iteration. This is by design for performance.
     torch.cuda.synchronize()
     dist.barrier()  # If you need cross-device sync
 
-**Multiple Iterations:**
-
 When running multiple iterations, DON'T synchronize between them:
 
 .. code-block:: python
@@ -529,13 +545,8 @@ When running multiple iterations, DON'T synchronize between them:
         optimizer.step()
 
     # Only synchronize at the end if needed
-    torch.cuda.synchronize()
-
-**Why?** The lack of synchronization allows:
-
-* GPU operations from different iterations to overlap
-* Asynchronous CPU-GPU communication
-* Better GPU utilization
+    torch.cuda.synchronize() # GPU-CPU
+    dist.barrier() # Between GPUs
 
 Only synchronize when you specifically need it (timing, debugging, etc.).
 
