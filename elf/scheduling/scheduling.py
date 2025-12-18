@@ -57,22 +57,32 @@ compute_types = {
 
 class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a string
 	"""
-	Options that can be passed to operations to modify their behaviour
+	Options that can be passed to operations to modify their behaviour.
+
+	Attributes
+	----------
+	REMAT_STRATEGY : str
+		Remat strategy is a function that indicates if we recompute a module or not.
+		Signature: ``(name: str, module: nn.Module) -> bool``
+		It can be used for both forward and backward operations.
+		In the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations.
+	RECOMPUTE_ACTIVATIONS : str
+		Recompute Backward-Forward (activations, between B and W).
+	RECOMPUTE_GRADIENTS : str
+		Recompute Backward-Backward (gradients, between B and W).
+	ACTIVATION_OFFLOAD : str
+		Offload activations to CPU.
+	SAVE : str
+		For recompute forward, it's a boolean to save the computation graph for a second backward or not.
+	OFFLOAD_DW : str
+		Offload weight gradients computation.
 	"""
 
-	# Remat strategy is a function that indicates if we recompute a module or not
-	# (name: str, module: nn.Module) -> bool
-	# It can be used for both forward and backward operations ;
-	# in the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations
 	REMAT_STRATEGY = auto()
-	RECOMPUTE_ACTIVATIONS = auto()  # Recompute Backward-Forward (activations, between B and W)
-	RECOMPUTE_GRADIENTS = auto()  # Recompute Backward-Backward (gradients, between B and W)
-
-	ACTIVATION_OFFLOAD = auto()  # Offload activations to CPU
-
-	# for recompute forward, it's a boolean to save the computation graph for a second backward or not
+	RECOMPUTE_ACTIVATIONS = auto()
+	RECOMPUTE_GRADIENTS = auto()
+	ACTIVATION_OFFLOAD = auto()
 	SAVE = auto()
-
 	OFFLOAD_DW = auto()
 
 
@@ -151,6 +161,16 @@ def get_peer_rank(op, placement):
 
 
 def schedule_to_str(schedule, print_comms=False):
+	"""
+	Convert a schedule to a string representation.
+
+	:param schedule: Schedule to convert
+	:type schedule: List[Operation]
+	:param print_comms: Whether to include communications
+	:type print_comms: bool
+	:return: String representation of the schedule
+	:rtype: str
+	"""
 	reprs = {
 		OperationType.RECV_FORWARD: "rf",
 		OperationType.FORWARD: "f",
@@ -210,6 +230,12 @@ def schedule_to_str(schedule, print_comms=False):
 
 
 def check_schedule_validity(schedule):
+	"""
+	Perform basic sanity checks on a generated schedule.
+
+	.. warning::
+		Some of these checks may not pass for your custom, specific schedule. If this is the case, please report it to the developers.
+	"""
 	n_ranks = len(set(op.rank for op in schedule))
 	n_mb = len(set(op.mb_id for op in schedule if op.mb_id is not None))
 

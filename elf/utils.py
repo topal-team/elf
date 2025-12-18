@@ -34,6 +34,9 @@ def _is_mpi():
 
 
 def pretty_print_params(n):
+	"""
+	Format a number of parameters into a human-readable string.
+	"""
 	if n > 1e9:
 		return f"{n / 1e9:.1f}B"
 	elif n > 1e6:
@@ -42,21 +45,24 @@ def pretty_print_params(n):
 		return f"{int(n)}"
 
 
-def pretty_print_step(rank, times):
-	total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / (
-		2**30
-	)
-	memory = torch.cuda.max_memory_allocated() / (2**30)
-	info = f"Rank {rank} -\n"
-	for k, v in times.items():
-		info += f"\t{k} : {v:.2f}s\n"
-	info += f"\tPeak memory : {memory:.2f}GB ({100 * memory / total_memory:.2f}%)"
-	print(info)
-
-
 class Placement(List[int]):
 	"""
-	Wrapper around a list of integers that represents the placement of the pipeline blocks.
+	Device placement pattern for pipeline stages.
+
+	A placement is a list where each element specifies which device (rank) hosts
+	that pipeline stage. Different schedulers require different placement patterns:
+
+	- Linear: [0, 1, 2, 3] - each stage on a different device
+	- Interleaved: [0, 1, 2, 3, 0, 1, 2, 3] - multiple stages per device
+	- V-schedule: [0, 1, 2, 3, 3, 2, 1, 0] - bidirectional pattern
+
+	Example:
+		>>> # Manual placement
+		>>> placement = Placement([0, 1, 2, 3])
+		>>>
+		>>> # Automatic placement for scheduler
+		>>> placement = Placement.default("zbh2", pp=4)  # [0, 1, 2, 3]
+		>>> placement = Placement.default("zbv", pp=4)    # [0, 1, 2, 3, 3, 2, 1, 0]
 	"""
 
 	def __init__(self, placement: List[int]):
@@ -67,12 +73,49 @@ class Placement(List[int]):
 
 	def get_ids(self, rank: int) -> List[int]:
 		"""
-		Get the ids of the pipeline blocks that are on the given rank.
+		Get the stage IDs assigned to a specific rank.
+
+		Args:
+			rank: Device rank to query
+
+		Returns:
+			List of stage indices on the specified rank
+
+		Example:
+			>>> placement = Placement([0, 1, 1, 2])
+			>>> placement.get_ids(1)  # Stages on rank 1
+			[1, 2]
 		"""
 		return [i for i in range(len(self)) if self[i] == rank]
 
 	@staticmethod
 	def default(scheduler, pp):
+		"""
+		Get the default placement pattern for a scheduler.
+
+		Different pipeline schedulers have different placement requirements:
+
+		- 1f1b, gpipe, zbh1, zbh2: Linear placement [0, 1, 2, ...]
+		- megatron: Interleaved placement [0, 1, 2, ..., 0, 1, 2, ...]
+		- hanayo, zbv: V-schedule [0, 1, 2, ..., 2, 1, 0]
+
+		Args:
+			scheduler: Scheduler name (str) or scheduler function
+			pp: Number of pipeline parallel devices
+
+		Returns:
+			Placement object with the appropriate pattern
+
+		Example:
+			>>> # For standard schedulers
+			>>> placement = Placement.default("1f1b", pp=4)  # [0, 1, 2, 3]
+			>>>
+			>>> # For interleaved schedules
+			>>> placement = Placement.default("megatron", pp=4)  # [0, 1, 2, 3, 0, 1, 2, 3]
+			>>>
+			>>> # For V-schedules
+			>>> placement = Placement.default("zbv", pp=4)  # [0, 1, 2, 3, 3, 2, 1, 0]
+		"""
 		if callable(scheduler):
 			logger.warning(
 				"Placement.default() expects a scheduler name, not the scheduler object itself. Using the default placement."
@@ -233,6 +276,9 @@ class TimerCPU:
 		self.end = time.perf_counter()
 
 	def time(self):
+		"""
+		Get the time elapsed in seconds.
+		"""
 		return self.end - self.start
 
 
@@ -254,14 +300,17 @@ class TimerGPU:
 		self.end_event.record()
 
 	def time(self):
+		"""
+		Get the time elapsed in seconds.
+		"""
 		self.end_event.synchronize()
 		return self.start_event.elapsed_time(self.end_event) / 1000
 
 
 def send_models(models, dst, group=None):
 	"""
-	Sends a list of models using p2p comms
-	This method sends the model structure (nn.Module object, parameters metadata, etc) via pickled CPU comm, and the actual tensors via GPU comm.
+	Send a list of models using p2p comms
+	Send the model structure (nn.Module object, parameters metadata, etc) via pickled CPU comm, and the actual tensors via GPU comm.
 
 	:param models: list of models to send
 	:type models: list[nn.Module]
@@ -359,7 +408,7 @@ def send_models(models, dst, group=None):
 
 def recv_models(models, src, group=None):
 	"""
-	Receives a list of models using p2p comms
+	Receive a list of models using p2p comms. See :func:`send_models` for more details.
 
 	:param models: list object with correct size, that will be populated with the received models
 	:type models: list[Any]
@@ -415,7 +464,10 @@ def recv_models(models, src, group=None):
 
 def broadcast_models(models, src, group=None):
 	"""
-	Broadcasts a list of models using p2p comms
+	Broadcast a list of models using p2p comms.
+
+	.. warning::
+		Efficient broadcasting the same way as :func:`send_models` and :func:`recv_models` is not supported yet. This function may take a lot of time if sending GPU models.
 	"""
 	dist.broadcast_object_list(models, src, group)
 	for m in models:

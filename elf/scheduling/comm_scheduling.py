@@ -454,6 +454,7 @@ def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[in
 def reorder_communications(schedule: List[Operation], strategy: str = "smart") -> List[Operation]:
 	"""
 	Reorder communications in the schedule to break all dependency cycles.
+	This function also performs some optimizations on the order of communications.
 
 	:param schedule: List of operations to reorder
 	:type schedule: List[Operation]

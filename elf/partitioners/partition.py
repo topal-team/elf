@@ -14,6 +14,14 @@ logger = logging.getLogger("partition")
 
 
 def _check_for_partitioner(partitioner):
+	"""
+	Check if the partitioner is installed.
+
+	:param partitioner: the partitioner to check
+	:type partitioner: PartitionerFn
+	:return: the partitioner if it is installed, otherwise the naive partitioner
+	:rtype: PartitionerFn
+	"""
 	if partitioner == PARTITIONERS["metis"]:
 		if not shutil.which("gpmetis"):
 			logger.warning("metis is not installed, falling back to naive")

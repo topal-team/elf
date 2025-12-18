@@ -196,7 +196,25 @@ class LinearDW(nn.Linear, LayerDW):
 
 def replace_linear_with_linear_dw(model, device):
 	"""
-	Replace all nn.Linear modules in the model with LinearDW, inplace.
+	Replace all nn.Linear modules in the model with LinearDW for Zero Bubble schedules.
+
+	:param model: model containing nn.Linear layers
+	:type model: nn.Module
+	:param device: Device for the LinearDW modules ("cuda", "cpu", or "meta")
+	:type device: str
+
+	Example:
+		>>> with torch.device("meta"):
+		...     model = TransformerModel()
+		...     replace_linear_with_linear_dw(model, "meta")
+		>>> pipe = Pipeline(model, sample, scheduler="zbh2")
+
+	Note:
+		- Only needed for ZB schedulers: zbh1, zbh2, zbv
+		- Operation is performed in-place
+
+	See Also:
+		LinearDW: The replacement linear layer implementation
 	"""
 	for name, module in model.named_modules():
 		if isinstance(module, nn.Linear) and not isinstance(module, LayerDW):

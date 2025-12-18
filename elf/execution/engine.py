@@ -158,8 +158,10 @@ class Engine:
 		:rtype: List[Tensor], List[Tensor], Dict[float], Dict[Dict[Operation, float]]
 		"""
 
-		split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]
-		microbatches = iter(zip(*split_batches))
+		if batch is not None:
+			split_batches = [tensor.split(mb_sizes, dim=0) for tensor in batch]
+			microbatches = iter(zip(*split_batches))
+
 		if target is not None:
 			microtargets = target.split(mb_sizes, dim=0)
 

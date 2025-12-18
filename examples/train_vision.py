@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 import timm
 
 from elf import Pipeline
-from elf.utils import pretty_print_params, pretty_print_step
+from elf.utils import pretty_print_params
 from configmypy import YamlConfig, ArgparseConfig
 
 import logging
@@ -116,7 +116,6 @@ if __name__ == "__main__":
 				running_loss += loss.item()
 
 			if step == 10:
-				pretty_print_step(rank, pipe.stats)
 				torch.cuda.reset_peak_memory_stats()
 				if rank == pipe.placement[-1]:
 					running_loss /= step

@@ -1,7 +1,7 @@
 .. pipeline documentation master file
 
 ELF: Efficient deep Learning Framework
-=====================================
+======================================
 
 .. image:: _static/logo.webp
    :alt: Pipeline Logo
@@ -41,6 +41,15 @@ Quick Start
    output, loss = pipe(inputs, targets, loss_fn)
 
 
+User Guide
+----------
+
+.. toctree::
+   :maxdepth: 2
+
+   advanced_usage
+
+
 API Reference
 -------------
 
@@ -52,17 +61,12 @@ Pipeline Object
    :undoc-members:
    :show-inheritance:
 
-   .. automethod:: __init__
-
 .. autosummary::
    :toctree: generated
    :template: custom-module-template.rst
    :recursive:
 
    elf
-   elf.execution
-   elf.scheduling
-   elf.partitioners
 
 Indices and tables
 ==================

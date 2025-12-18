@@ -29,6 +29,25 @@ logger = logging.getLogger("pipeline")
 
 @dataclass
 class PipelineConfig:
+	"""
+	Configuration for Pipeline initialization.
+
+	:param tracer: Tracer to use for model graph extraction. When using default, tries all available tracers one after the other. (default: "default")
+	:type tracer: Tracer or str
+	:param partitioner: Partitioning strategy or False to skip partitioning (default: "constrained")
+	:type partitioner: Partitioner or str
+	:param scheduler: Static scheduling algorithm (default: "1f1b")
+	:type scheduler: Scheduler or str
+	:param placement: Device placement strategy or list of ranks (default: "auto")
+	:type placement: Placement or str
+	:param pp: Number of pipeline parallel processes. If None, computed as world_size // dp
+	:type pp: int or None
+	:param dp: Number of data parallel processes (default: 1)
+	:type dp: int
+	:param worker: Rank that profiles and partitions the model (default: 0)
+	:type worker: int
+	"""
+
 	tracer: Tracer | str = "default"
 	partitioner: Partitioner | str = "constrained"
 	scheduler: Scheduler | str = "1f1b"
@@ -38,12 +57,17 @@ class PipelineConfig:
 	worker: int = 0
 
 	def to_kwargs(self) -> dict[str, Any]:
+		"""Convert config to kwargs dict, excluding None values."""
 		return {k: v for k, v in asdict(self).items() if v is not None}
 
 
 class Pipeline:
 	"""
-	Model wrapper for pipelining that manages the pipeline setup and API
+	Main API for pipeline parallelism with automatic model partitioning and scheduling.
+
+	Wraps a model and handles tracing, partitioning across devices, distributed communication
+	setup, and execution of pipeline schedules. Supports various scheduling algorithms (1F1B,
+	GPipe, ZBH, etc.) and partitioning strategies. Can be combined with data parallelism.
 	"""
 
 	def __init__(
@@ -63,11 +87,29 @@ class Pipeline:
 		config: PipelineConfig | None = None,
 	):
 		"""
+		Initialize a Pipeline with model parallelism configuration.
+
+		**Usage with PipelineConfig (recommended):**
+
+		.. code-block:: python
+
+			config = PipelineConfig(scheduler="zbh2", dp=2, pp=4)
+			pipeline = Pipeline(model, sample, config=config)
+
+		**Legacy usage (individual parameters):**
+
+		.. code-block:: python
+
+			pipeline = Pipeline(model, sample, scheduler="1f1b", dp=2)
+
+		When both `config` and individual parameters are provided, config takes precedence but
+		individual parameters serve as defaults for any unspecified config fields.
+
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
 		:type model: nn.Module
 		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model.
 		:type sample: torch.Tensor or List[torch.Tensor]
-		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement.``
+		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement.
 		:type placement: List[int] or str
 		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
 		:type partitioner: boolean or str
@@ -77,10 +119,12 @@ class Pipeline:
 		:type dp: Optional[int]
 		:param worker: rank of the process that will profile the model and partition it
 		:type worker: int
-		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :pyfunc:`partitioners.utils.get_sources_targets_sequential` for an example.
+		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :func:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type sources: List[Dict[str, int]]
-		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :pyfunc:`partitioners.utils.get_sources_targets_sequential` for an example.
+		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :func:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type targets: List[Dict[str, List[int]]]
+		:param config: PipelineConfig object for centralized configuration. When provided, it takes precedence over individual parameters for any fields it specifies.
+		:type config: PipelineConfig or None
 		"""
 		if not dist.is_initialized():
 			logger.warning(
@@ -141,14 +185,14 @@ class Pipeline:
 		self.schedule = []
 		self.last_nmb = 0
 
-	def __call__(self, batch, target, loss_fn, split_size=0, profile=False):
+	def step(self, batch, target, loss_fn, split_size=0, profile=False):
 		"""
-		Execute the schedule on a batch of data
+		Execute a training step on a batch of data using the pipeline schedule.
 
 		:param batch: input data
 		:type batch: torch.Tensor or List[torch.Tensor]
-		:param target: targets
-		:type target: torch.Tensor
+		:param target: targets. Can be None for inference.
+		:type target: torch.Tensor or None
 		:param loss_fn: loss function to be used. We recommend using torch's built-in loss functions, but you can pass any function that matches the signature. Be careful, the loss is computed on each micro-batch, then averaged over the batch dimension. Depending on the loss function, this may not be equivalent to computing the loss on the full batch.
 		:type loss_fn: Function (Tensor,Tensor) -> Tensor
 		:param split_size: either one size for equal micro batches (last one may be smaller if the batch size is not divisible by the split size), or a list of possibly different micro batch sizes. In that case the sum of the sizes must be equal to the batch size. Default value is (batch_size // number of gpus)
@@ -158,17 +202,14 @@ class Pipeline:
 
 		:return: result of the forward pass and loss value if the last block of the pipeline is managed by this process
 		:rtype: (List[Tensor], Tensor) or (None, None)
+
 		.. warning::
 			The result is automatically offloaded to CPU. Since merging it back would cause a sync point, it is currently returned as a list of tensors, one for each micro-batch. Avoid merging it back to a single tensor between iterations if you want to avoid performance issues.
 		"""
-		# We expect a list of arguments, not a single tensor
-		if isinstance(batch, torch.Tensor):
-			batch = [batch]
-
-		# Move to GPU
-		batch = tuple(item.cuda() if isinstance(item, torch.Tensor) else item for item in batch)
-		if target is not None:  # target can be None for inference
-			target = target.cuda()  # We don't support multiple targets yet
+		if batch is not None:
+			# We expect a list of arguments, not a single tensor
+			if isinstance(batch, torch.Tensor):
+				batch = [batch]
 
 		mb_sizes = self._get_mb_sizes(split_size, batch)
 		n_micro_batches = len(mb_sizes)
@@ -226,11 +267,14 @@ class Pipeline:
 		else:
 			return None, None
 
+	def __call__(self, *args, **kwargs):
+		return self.step(*args, **kwargs)
+
 	def parameters(self):
 		"""
-		Returns an iterator over the parameters of all blocks in the pipeline.
+		Return an iterator over all parameters in this process's pipeline blocks.
 
-		:return: An iterator yielding parameters for all blocks.
+		:return: Parameter iterator
 		:rtype: Iterator[torch.nn.Parameter]
 		"""
 		for block in self.blocks:
@@ -239,9 +283,9 @@ class Pipeline:
 
 	def named_parameters(self):
 		"""
-		Returns an iterator over the named parameters of all blocks in the pipeline.
+		Return an iterator over named parameters in this process's pipeline blocks.
 
-		:return: An iterator yielding tuples of (name, parameter) for all parameters in the pipeline.
+		:return: Iterator over (name, parameter) tuples
 		:rtype: Iterator[Tuple[str, torch.nn.Parameter]]
 		"""
 		for block in self.blocks:
@@ -250,9 +294,9 @@ class Pipeline:
 
 	def zero_grad(self, set_to_none=True):
 		"""
-		Sets the gradients of all parameters in the pipeline to zero.
+		Zero out gradients of all parameters in this process's pipeline blocks.
 
-		:param set_to_none: If True, set the gradients to None instead of zero. This can provide memory savings.
+		:param set_to_none: If True, sets gradients to None instead of zero (default: True)
 		:type set_to_none: bool
 		"""
 		for block in self.blocks:
@@ -260,7 +304,7 @@ class Pipeline:
 
 	def clear(self):
 		"""
-		Clear the pipeline's internal state and destroy process groups.
+		Synchronize, then destroy all DP and PP process groups.
 		"""
 		torch.cuda.synchronize()
 		dist.barrier()
@@ -278,8 +322,12 @@ class Pipeline:
 
 	def checkpoint(self, epoch="init", dir_path="./"):
 		"""
-		Save the model's state dictionaries to disk.
-		One file will be created per rank
+		Save model state to disk. Creates one file per rank named ``dp{dp}_pp{pp}.pt``.
+
+		:param epoch: Epoch identifier, creates subdirectory ``{dir_path}/{epoch}/`` (default: "init")
+		:type epoch: str
+		:param dir_path: Base directory for checkpoints (default: "./")
+		:type dir_path: str
 		"""
 		rank = dist.get_rank()
 		dp = rank // self.pp
@@ -298,15 +346,15 @@ class Pipeline:
 
 	def save(self, path, worker=0):
 		"""
-		Save the model's state dictionary to a file.
+		Gather parameters from all PP ranks and save to a single file.
 
 		.. warning::
-			This method should not be called when the pipeline was initialized with `partitioner=False`.
+			Should not be used with `partitioner=False`.
 
-		:param path: The file path where the model state will be saved.
+		:param path: File path for saved model state
 		:type path: str
-		:param worker: The rank of the worker that will save the file. Defaults to 0.
-		:type worker: int, optional
+		:param worker: Rank that gathers and writes the file (default: 0)
+		:type worker: int
 		"""
 		rank = dist.get_rank()
 		pp_group = self.blocks[0].pp_group
@@ -334,7 +382,12 @@ class Pipeline:
 
 	def gather_parameters(self, dst=0):
 		"""
-		Collects the parameters from all ranks and returns a dictionary of tensors.
+		Gather parameters from all PP ranks to destination rank.
+
+		:param dst: Rank that receives all parameters (default: 0)
+		:type dst: int
+		:return: State dict on dst rank, empty dict on others
+		:rtype: dict[str, torch.Tensor]
 		"""
 		rank = dist.get_rank()
 		pp_group = self.blocks[0].pp_group
@@ -358,15 +411,23 @@ class Pipeline:
 
 		return state_dict
 
+	def is_first(self):
+		"""Check if this process owns the first pipeline stage."""
+		return dist.get_rank() == self.placement[0]
+
+	def is_last(self):
+		"""Check if this process owns the last pipeline stage."""
+		return dist.get_rank() == self.placement[-1]
+
 	def _get_mb_sizes(self, split_size, batch):
 		"""
-		Determine the sizes of micro-batches based on the given split_size and batch.
+		Compute micro-batch sizes. If split_size is 0, defaults to batch_size // pp.
 
-		:param split_size: Either an int for equal-sized micro-batches or a list of ints for custom sizes.
+		:param split_size: Size per micro-batch (int) or list of sizes (must sum to batch_size)
 		:type split_size: int or List[int]
-		:param batch: The input batch to be split.
+		:param batch: Input batch
 		:type batch: List[torch.Tensor]
-		:return: A list of micro-batch sizes.
+		:return: List of micro-batch sizes
 		:rtype: List[int]
 		"""
 		# Split size can be an int or list of ints ; make it always a list
@@ -390,14 +451,10 @@ class Pipeline:
 
 	def _generate_schedule(self, n_micro_batches):
 		"""
-		Generate a schedule for one execution.
-		Also reorders communications to avoid deadlocks and improve performance.
-		The resulting schedule only contains operations for the current process.
+		Generate and optimize the execution schedule, then filter for current process.
 
 		:param n_micro_batches: Number of micro-batches
 		:type n_micro_batches: int
-		:return: Generated schedule
-		:rtype: List[Operation]
 		"""
 		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
 		check_schedule_validity(schedule)
@@ -416,7 +473,18 @@ class Pipeline:
 
 	def _partition_model(self, model, sample, sources, targets):
 		"""
-		Either partitions the model, or makes sure it's already partitioned
+		Partition the model or validate pre-partitioned model.
+
+		:param model: Model to partition or list of pre-partitioned modules
+		:type model: nn.Module or List[nn.Module]
+		:param sample: Sample input for tracing (required if partitioner is set)
+		:type sample: torch.Tensor or List[torch.Tensor] or None
+		:param sources: Source block IDs for pre-partitioned models
+		:type sources: List[Dict[str, int]] or None
+		:param targets: Target block IDs for pre-partitioned models
+		:type targets: List[Dict[str, List[int]]] or None
+		:return: Model parts and signatures
+		:rtype: Tuple[List[nn.Module], List[Signature]]
 		"""
 		if not self.partitioner:
 			# Model is already the right part, just make sure it's a list
@@ -445,14 +513,13 @@ class Pipeline:
 
 	def _create_pipeline(self, parts, signatures):
 		"""
-		Transforms a list of layers placed on different devices to a working pipeline
+		Create pipeline blocks for this process from partitioned model parts.
 
-		:param parts: List of model parts coming from a partitioned model
+		:param parts: Model parts from partitioned model
 		:type parts: List[nn.Module]
-		:param signatures: List of signatures for each block
+		:param signatures: Dataflow signatures for each block
 		:type signatures: List[Signature]
-
-		:return: list of blocks handled by this process with everything set up for the pipeline to work
+		:return: Pipeline blocks for this process
 		:rtype: List[PipelineBlock]
 		"""
 		rank = dist.get_rank()
@@ -475,7 +542,7 @@ class Pipeline:
 
 	def _init_process_groups(self):
 		"""
-		Initialize process groups for data parallelism (DP) and pipeline parallelism (PP).
+		Initialize process groups for DP and PP. Timeout configurable via ELF_TIMEOUT env var.
 		"""
 		rank = dist.get_rank()
 		world_size = dist.get_world_size()
@@ -504,15 +571,14 @@ class Pipeline:
 
 	def _shared_partition(self, model, sample):
 		"""
-		Partitions a model according to a placement & mode, then shares it to every process to be consistent
+		Partition model on worker rank and distribute to all processes.
 
-		:param model: model to partition
+		:param model: Model to partition
 		:type model: nn.Module
-		:param sample: example of input data that will be processed by the model
-		:type sample: Tensor
-
-		:return: blocks (modules) for this process
-		:rtype: List[nn.Module]
+		:param sample: Sample input for tracing
+		:type sample: torch.Tensor or List[torch.Tensor]
+		:return: Model parts for this process and signatures
+		:rtype: Tuple[List[nn.Module], List[Signature]]
 		"""
 		rank = dist.get_rank()
 

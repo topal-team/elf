@@ -1,5 +1,5 @@
 """
-Rematerialization manager.
+Rematerialization manager
 """
 
 from contextlib import contextmanager
@@ -29,8 +29,10 @@ class RematManager:
 
 		:param remat_strategy: Strategy function that takes a module name and module, and returns a boolean indicating if the module should be recomputed.
 		:type remat_strategy: Callable[[str, nn.Module], bool]
+
 		.. warning::
 		    The strategy should return true only for the root modules that are recomputed. For example, if you have a Transformer block that contains some Linear, and you want to recompute it, the strategy should return True for the Transformer block, but False for the Linear.
+
 		:param mb_id: Micro-batch ID
 		:type mb_id: int
 		:return: Context manager

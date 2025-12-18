@@ -1,3 +1,7 @@
+"""
+Activation offloading manager
+"""
+
 from weakref import ref
 from typing import Any, Dict, Iterable, Optional, Tuple
 

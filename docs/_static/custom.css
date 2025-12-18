@@ -1,4 +1,1061 @@
+/* ============================================================================
+   Modern Documentation Styling
+   ============================================================================ */
+
+/* CSS Variables for consistent theming - Light Mode (default) */
+:root {
+    --primary-color: #0066cc;
+    --primary-dark: #0052a3;
+    --primary-light: #3385d6;
+    --accent-color: #00c896;
+    --text-primary: #1a1a1a;
+    --text-secondary: #666;
+    --bg-primary: #ffffff;
+    --bg-secondary: #f8f9fb;
+    --bg-tertiary: #f0f2f5;
+    --border-color: #e4e7eb;
+    --code-bg: #f6f8fa;
+    --code-color: #e83e8c;
+    --code-border: #ececf1;
+    --type-color: #6366f1;
+    --type-bg: #e0e7ff;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+    --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.08);
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --sidebar-bg: #ffffff;
+    --sidebar-text: #1a1a1a;
+    --sidebar-header-from: #0f172a;
+    --sidebar-header-to: #1e293b;
+    --sidebar-current-bg: #e8f4fd;
+    --admonition-note-bg: #e8f4fd;
+    --admonition-note-border: #0066cc;
+    --admonition-warning-bg: #fff4e6;
+    --admonition-warning-border: #ff8c00;
+    --admonition-tip-bg: #e6f9f5;
+    --admonition-tip-border: #00c896;
+    --admonition-important-bg: #fef3f3;
+    --admonition-important-border: #dc2626;
+    --sig-bg-from: #f8f9fb;
+    --sig-bg-to: #f0f2f5;
+    --sig-bg-hover-from: #f0f2f5;
+    --sig-bg-hover-to: #e8eaef;
+    --btn-bg: #f0f2f5;
+    --btn-text: #1a1a1a;
+    --btn-hover-bg: #e4e7eb;
+}
+
+/* Dark Mode - Applied via .dark-mode class */
+.dark-mode {
+    --primary-color: #4a9eff;
+    --primary-dark: #6bb0ff;
+    --primary-light: #2d7fd9;
+    --accent-color: #00d9a1;
+    --text-primary: #e8e8e8;
+    --text-secondary: #a0a0a0;
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #0f0f0f;
+    --bg-tertiary: #262626;
+    --border-color: #333333;
+    --code-bg: #262626;
+    --code-color: #ff79c6;
+    --code-border: #404040;
+    --type-color: #a5b4fc;
+    --type-bg: #1e1b4b;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.5);
+    --sidebar-bg: #1a1a1a;
+    --sidebar-text: #e8e8e8;
+    --sidebar-header-from: #0a0a0a;
+    --sidebar-header-to: #1a1a1a;
+    --sidebar-current-bg: #1e3a5f;
+    --admonition-note-bg: #1a2a3a;
+    --admonition-note-border: #4a9eff;
+    --admonition-warning-bg: #332a1a;
+    --admonition-warning-border: #ffa500;
+    --admonition-tip-bg: #1a2e28;
+    --admonition-tip-border: #00d9a1;
+    --admonition-important-bg: #331a1a;
+    --admonition-important-border: #ff4444;
+    --sig-bg-from: #262626;
+    --sig-bg-to: #2a2a2a;
+    --sig-bg-hover-from: #2a2a2a;
+    --sig-bg-hover-to: #303030;
+    --btn-bg: #262626;
+    --btn-text: #e8e8e8;
+    --btn-hover-bg: #333333;
+}
+
+/* Dark mode syntax highlighting */
+.dark-mode .highlight {
+    background: var(--code-bg);
+    border-color: var(--border-color);
+}
+
+.dark-mode .highlight .hll { background-color: #404040; }
+.dark-mode .highlight .c { color: #8b949e; }
+.dark-mode .highlight .k { color: #ff7b72; }
+.dark-mode .highlight .o { color: #ff7b72; }
+.dark-mode .highlight .n { color: #e8e8e8; }
+.dark-mode .highlight .s, .dark-mode .highlight .s1, .dark-mode .highlight .s2 { color: #a5d6ff; }
+.dark-mode .highlight .mi, .dark-mode .highlight .mf { color: #79c0ff; }
+.dark-mode .highlight .nb { color: #ffa657; }
+.dark-mode .highlight .nc { color: #ffa657; }
+.dark-mode .highlight .nf { color: #d2a8ff; }
+
+/* ============================================================================
+   Base Layout & Typography
+   ============================================================================ */
+
+body {
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
 .wy-nav-content {
-    max-width: 100% !important;
-    max-height: 100% !important;
+    max-width: 1280px !important;
+    padding: 2.5em 3em;
+    background: var(--bg-primary);
+}
+
+.wy-nav-content-wrap {
+    background: var(--bg-secondary);
+}
+
+/* ============================================================================
+   Headings
+   ============================================================================ */
+
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-top: 2em !important;
+    margin-bottom: 0.75em !important;
+    color: var(--text-primary);
+}
+
+h1 {
+    font-size: 2.5em !important;
+    font-weight: 700 !important;
+    border-bottom: none !important;
+    padding-bottom: 0.2em;
+    margin-bottom: 1em !important;
+}
+
+h2 {
+    font-size: 1.875em !important;
+    border-bottom: 2px solid var(--border-color) !important;
+    padding-bottom: 0.4em;
+    margin-top: 2.5em !important;
+}
+
+h3 {
+    font-size: 1.5em !important;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.25em !important;
+    color: var(--text-secondary);
+}
+
+.rubric {
+    font-size: 1.5em !important;
+    font-weight: 600 !important;
+    color: var(--primary-color) !important;
+    margin-top: 2.5em !important;
+    margin-bottom: 1.25em !important;
+    padding-bottom: 0.4em;
+    border-bottom: 2px solid var(--border-color);
+    letter-spacing: -0.02em;
+}
+
+/* ============================================================================
+   Code & Syntax Highlighting
+   ============================================================================ */
+
+code.docutils.literal {
+    background: var(--code-bg);
+    padding: 0.2em 0.5em;
+    border-radius: var(--radius-sm);
+    font-size: 0.9em;
+    color: var(--code-color);
+    border: 1px solid var(--code-border);
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+}
+
+.highlight {
+    background: var(--code-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 1.25em;
+    margin: 1.5em 0;
+    box-shadow: var(--shadow-sm);
+}
+
+pre {
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+    font-size: 0.9em;
+    line-height: 1.5;
+}
+
+/* ============================================================================
+   Type Hints & Annotations
+   ============================================================================ */
+
+/* Style type annotations */
+.sig-param, .sig-return-typehint {
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+}
+
+/* Type hints that are plain text (not links) */
+em.property, em.sig-param {
+    font-style: normal;
+    color: var(--text-secondary);
+    font-size: 0.9em;
+}
+
+/* Return type annotations */
+.sig-return-typehint {
+    color: var(--text-secondary);
+    font-size: 0.9em;
+}
+
+/* Type annotations in field lists (Parameters, Returns, etc.) */
+.field-list .field-body p > em,
+.field-list .field-body em.property {
+    font-style: normal;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: var(--radius-sm);
+    font-size: 0.875em;
+    color: var(--type-color);
+    border: 1px solid var(--type-bg);
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+    white-space: nowrap;
+}
+
+/* Type annotations that are links should look clickable */
+.field-list .field-body a em,
+.sig-return-typehint a {
+    color: var(--primary-color);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--primary-color);
+}
+
+.field-list .field-body a em:hover {
+    color: var(--primary-dark);
+    border-bottom-style: solid;
+}
+
+/* Brackets and punctuation in types */
+.sig .pre {
+    color: var(--text-secondary);
+}
+
+/* Optional/Union styling */
+.sig .n, .sig .o {
+    color: var(--text-secondary);
+}
+
+/* Improve classifier (type hint after parameter name) */
+.classifier {
+    font-style: normal;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: var(--radius-sm);
+    font-size: 0.875em;
+    color: var(--type-color);
+    border: 1px solid var(--type-bg);
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+    margin-left: 0.5em;
+}
+
+.classifier::before {
+    content: ": ";
+    color: var(--text-secondary);
+}
+
+/* Parameter default values */
+.sig-param .default_value {
+    color: #059669;
+    font-weight: 500;
+}
+
+.sig-param .default_value::before {
+    content: " = ";
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+/* Type annotations in signatures */
+dt.sig .sig-paren {
+    color: var(--text-secondary);
+}
+
+/* Python keywords in type hints */
+.sig .k {
+    color: #9333ea;
+    font-weight: 600;
+}
+
+/* Built-in types */
+.sig .nb, .sig .bp {
+    color: #6366f1;
+}
+
+/* Make type brackets less prominent but visible */
+.sig-return .p,
+.sig-param .p {
+    color: #94a3b8;
+}
+
+/* ============================================================================
+   API Documentation Blocks (Functions, Classes, Methods)
+   ============================================================================ */
+
+dl.class, dl.function, dl.method, dl.attribute, dl.exception {
+    margin-bottom: 2.5em;
+    padding: 0;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+
+dt.sig {
+    background: linear-gradient(135deg, var(--sig-bg-from) 0%, var(--sig-bg-to) 100%) !important;
+    padding: 1em 1.25em !important;
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace !important;
+    font-size: 0.95em !important;
+    border-radius: 0 !important;
+    border: none !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    color: var(--text-primary) !important;
+    font-weight: 500 !important;
+}
+
+dt.sig:hover {
+    background: linear-gradient(135deg, var(--sig-bg-hover-from) 0%, var(--sig-bg-hover-to) 100%) !important;
+}
+
+dd {
+    margin-left: 0 !important;
+    padding: 1.25em 1.5em !important;
+    margin-bottom: 0 !important;
+    line-height: 1.7;
+}
+
+/* Signature elements */
+.sig-prename, .sig-name {
+    line-height: 1.5;
+}
+
+.sig-name {
+    font-weight: 600;
+    color: var(--primary-color);
+}
+
+.sig-param {
+    color: var(--text-secondary);
+}
+
+/* ============================================================================
+   Parameter Lists & Field Lists
+   ============================================================================ */
+
+dl.field-list {
+    margin: 1.5em 0;
+    border-radius: var(--radius-md);
+}
+
+dl.field-list dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.4em;
+    padding-left: 0;
+}
+
+.field-list .field-name {
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+    font-weight: 600;
+    color: var(--primary-color);
+}
+
+.field-list .field {
+    margin-bottom: 1em;
+    padding-bottom: 1em;
+    border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.field-list .field:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+/* ============================================================================
+   Links
+   ============================================================================ */
+
+a {
+    color: var(--primary-color);
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+
+a:hover {
+    color: var(--primary-dark);
+}
+
+a.reference.internal {
+    color: var(--primary-color);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.2s ease;
+}
+
+a.reference.internal:hover {
+    color: var(--primary-dark);
+    border-bottom-color: var(--primary-color);
+}
+
+.viewcode-link {
+    float: right;
+    font-size: 0.875em;
+    color: var(--text-secondary);
+    font-weight: 500;
+    padding: 0.25em 0.75em;
+    border-radius: var(--radius-sm);
+    transition: all 0.2s ease;
+}
+
+.viewcode-link:hover {
+    background: var(--bg-tertiary);
+    color: var(--primary-color);
+}
+
+/* ============================================================================
+   Sidebar Navigation
+   ============================================================================ */
+
+.wy-side-nav-search {
+    background: linear-gradient(180deg, var(--sidebar-header-from) 0%, var(--sidebar-header-to) 100%);
+    border-bottom: 3px solid var(--accent-color);
+    padding: 1.5em;
+}
+
+.wy-side-nav-search input[type=text] {
+    border-radius: var(--radius-md);
+    border: none;
+    box-shadow: var(--shadow-sm);
+    background: rgba(255, 255, 255, 0.95);
+    padding: 0.6em 1em;
+}
+
+.wy-side-nav-search input[type=text]:focus {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
+
+.wy-nav-side {
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+}
+
+.wy-menu-vertical {
+    background: var(--sidebar-bg);
+}
+
+.wy-menu-vertical a {
+    color: var(--text-primary);
+    padding: 0.65em 1.2em;
+    transition: all 0.2s ease;
+    border-left: 3px solid transparent;
+    font-size: 0.95em;
+    line-height: 1.5;
+}
+
+.wy-menu-vertical a:hover {
+    background: var(--bg-secondary);
+    color: var(--primary-color);
+    border-left-color: var(--accent-color);
+}
+
+.wy-menu-vertical li.current > a {
+    background: var(--sidebar-current-bg);
+    border-left: 3px solid var(--primary-color);
+    color: var(--primary-color);
+    font-weight: 600;
+}
+
+.wy-menu-vertical li.toctree-l2.current > a {
+    background: var(--bg-tertiary);
+}
+
+.wy-menu-vertical li.toctree-l1 {
+    margin-bottom: 0.25em;
+}
+
+.wy-menu-vertical li.toctree-l2 > a {
+    padding-left: 2.2em;
+    font-size: 0.9em;
+}
+
+.wy-menu-vertical li.toctree-l3 > a {
+    padding-left: 3.2em;
+    font-size: 0.875em;
+    color: var(--text-secondary);
+}
+
+/* Modern expand/collapse icons */
+.wy-menu-vertical li.toctree-l1.current > a button.toctree-expand,
+.wy-menu-vertical li.on a button.toctree-expand {
+    color: var(--primary-color);
+    font-weight: 700;
+}
+
+.toctree-expand {
+    color: var(--text-secondary);
+    font-size: 1em;
+    line-height: 1.2;
+    display: inline-block;
+    transition: transform 0.2s ease, color 0.2s ease;
+    font-weight: 600;
+}
+
+.toctree-expand:hover {
+    color: var(--primary-color);
+}
+
+.wy-menu-vertical li.current > a button.toctree-expand::before {
+    content: "−";
+}
+
+.wy-menu-vertical li a button.toctree-expand::before {
+    content: "+";
+}
+
+/* Better spacing for nested items */
+.wy-menu-vertical ul {
+    padding-left: 0;
+}
+
+.wy-menu-vertical li ul {
+    padding-top: 0.25em;
+    padding-bottom: 0.25em;
+}
+
+/* Caption styling */
+.wy-menu-vertical p.caption {
+    color: var(--text-secondary);
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 1.5em 1.2em 0.5em;
+    padding-bottom: 0.5em;
+    border-bottom: 1px solid var(--border-color);
+}
+
+/* ============================================================================
+   Admonitions (Notes, Warnings, etc.)
+   ============================================================================ */
+
+.admonition {
+    margin: 2em 0;
+    padding: 1.25em 1.5em;
+    border-left: 4px solid;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+.admonition-title {
+    font-weight: 600;
+    margin-bottom: 0.5em;
+}
+
+.admonition.note {
+    background: var(--admonition-note-bg);
+    border-color: var(--admonition-note-border);
+}
+
+.admonition.warning {
+    background: var(--admonition-warning-bg);
+    border-color: var(--admonition-warning-border);
+}
+
+.admonition.tip {
+    background: var(--admonition-tip-bg);
+    border-color: var(--admonition-tip-border);
+}
+
+.admonition.important {
+    background: var(--admonition-important-bg);
+    border-color: var(--admonition-important-border);
+}
+
+.admonition.seealso {
+    background: var(--admonition-tip-bg);
+    border-color: var(--admonition-tip-border);
+}
+
+/* Example notes and other admonition types */
+.admonition.example,
+.admonition.hint {
+    background: var(--admonition-tip-bg);
+    border-color: var(--admonition-tip-border);
+}
+
+/* ============================================================================
+   Tables
+   ============================================================================ */
+
+table.docutils {
+    border: none;
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+}
+
+table.docutils th {
+    background: var(--bg-tertiary);
+    font-weight: 600;
+    color: var(--text-primary);
+    padding: 0.75em 1em;
+    border: none;
+}
+
+table.docutils td {
+    padding: 0.75em 1em;
+    border-bottom: 1px solid var(--border-color);
+}
+
+table.docutils tr:last-child td {
+    border-bottom: none;
+}
+
+/* ============================================================================
+   TOC & Content Structure
+   ============================================================================ */
+
+.toctree-wrapper ul {
+    margin-bottom: 1.5em;
+}
+
+.section {
+    margin-bottom: 2.5em;
+}
+
+/* ============================================================================
+   Mobile Responsiveness
+   ============================================================================ */
+
+@media screen and (max-width: 768px) {
+    .wy-nav-content {
+        padding: 1.5em 1.25em;
+    }
+
+    h1 {
+        font-size: 2em !important;
+    }
+
+    h2 {
+        font-size: 1.5em !important;
+    }
+}
+
+/* ============================================================================
+   Smooth Scrolling & Transitions
+   ============================================================================ */
+
+html {
+    scroll-behavior: smooth;
+}
+
+* {
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+/* ============================================================================
+   Dark Mode Toggle Button
+   ============================================================================ */
+
+#theme-toggle {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 9999;
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    border: 2px solid var(--border-color);
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    cursor: pointer;
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--shadow-lg);
+    transition: all 0.3s ease;
+}
+
+#theme-toggle:hover {
+    background: var(--btn-hover-bg);
+    transform: scale(1.1);
+}
+
+#theme-toggle:active {
+    transform: scale(0.95);
+}
+
+/* ============================================================================
+   Dark Mode - Additional RTD Theme Overrides
+   ============================================================================ */
+
+.dark-mode {
+    background: var(--bg-secondary);
+}
+
+.dark-mode body {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.dark-mode footer {
+    background: var(--bg-secondary) !important;
+    color: var(--text-secondary);
+}
+
+/* Search input in dark mode */
+.dark-mode .wy-side-nav-search {
+    background: linear-gradient(180deg, var(--sidebar-header-from) 0%, var(--sidebar-header-to) 100%) !important;
+}
+
+.dark-mode .wy-side-nav-search input[type=text] {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+.dark-mode .wy-side-nav-search input[type=text]::placeholder {
+    color: var(--text-secondary);
+}
+
+/* Logo/Project name in sidebar */
+.dark-mode .wy-side-nav-search > a,
+.dark-mode .wy-side-nav-search .wy-dropdown > a {
+    color: #ffffff !important;
+}
+
+/* LEFT SIDEBAR - Force dark backgrounds */
+.dark-mode .wy-nav-side {
+    background: var(--sidebar-bg) !important;
+}
+
+.dark-mode .wy-side-scroll {
+    background: var(--sidebar-bg) !important;
+}
+
+.dark-mode .wy-menu-vertical {
+    background: var(--sidebar-bg) !important;
+}
+
+.dark-mode .wy-menu-vertical ul {
+    background: var(--sidebar-bg) !important;
+}
+
+.dark-mode .wy-menu-vertical li {
+    background: var(--sidebar-bg) !important;
+}
+
+.dark-mode .wy-menu-vertical li ul {
+    background: var(--sidebar-bg) !important;
+}
+
+/* Fix menu item colors */
+.dark-mode .wy-menu-vertical a {
+    color: var(--sidebar-text) !important;
+    background: transparent !important;
+}
+
+.dark-mode .wy-menu-vertical li.current > a {
+    background: var(--sidebar-current-bg) !important;
+    color: var(--primary-color) !important;
+}
+
+.dark-mode .wy-menu-vertical li.current a {
+    border-right-color: var(--border-color) !important;
+}
+
+.dark-mode .wy-menu-vertical li a:hover {
+    color: var(--primary-color) !important;
+    background: var(--bg-secondary) !important;
+}
+
+.dark-mode .wy-menu-vertical li.toctree-l2.current > a {
+    background: var(--bg-tertiary) !important;
+}
+
+.dark-mode .wy-menu-vertical li.toctree-l2.current li.toctree-l3 > a {
+    background: transparent !important;
+}
+
+/* Section headers in sidebar */
+.dark-mode .wy-menu-vertical p.caption {
+    color: var(--text-secondary) !important;
+}
+
+/* Fix toctree expand buttons */
+.dark-mode .toctree-expand {
+    color: var(--text-secondary) !important;
+}
+
+.dark-mode .toctree-expand:hover {
+    color: var(--primary-color) !important;
+}
+
+/* MAIN CONTENT AREA */
+.dark-mode .wy-nav-content-wrap {
+    background: var(--bg-secondary) !important;
+}
+
+.dark-mode .wy-nav-content {
+    background: var(--bg-primary) !important;
+}
+
+.dark-mode .rst-content {
+    color: var(--text-primary);
+}
+
+/* Breadcrumbs */
+.dark-mode .wy-breadcrumbs {
+    background: transparent !important;
+}
+
+.dark-mode .wy-breadcrumbs li a {
+    color: var(--primary-color) !important;
+}
+
+.dark-mode .wy-breadcrumbs li {
+    color: var(--text-secondary) !important;
+}
+
+.dark-mode .wy-breadcrumbs-aside a {
+    color: var(--primary-color) !important;
+}
+
+/* TABLES - Fix white backgrounds */
+.dark-mode table.docutils {
+    background: var(--bg-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+.dark-mode table.docutils thead {
+    background: var(--bg-tertiary) !important;
+}
+
+.dark-mode table.docutils thead th {
+    background: var(--bg-tertiary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+.dark-mode table.docutils tbody tr {
+    background: var(--bg-primary) !important;
+}
+
+.dark-mode table.docutils tbody tr:nth-child(even) {
+    background: var(--bg-secondary) !important;
+}
+
+.dark-mode table.docutils td {
+    background: transparent !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+.dark-mode table.docutils th {
+    background: var(--bg-tertiary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+/* Autosummary tables (like in Submodules) */
+.dark-mode table.longtable {
+    background: var(--bg-primary) !important;
+}
+
+.dark-mode table.longtable tbody tr {
+    background: var(--bg-primary) !important;
+}
+
+.dark-mode table.longtable tbody tr:hover {
+    background: var(--bg-tertiary) !important;
+}
+
+.dark-mode .rst-content table.docutils:not(.field-list) tr:hover td,
+.dark-mode .rst-content table.docutils:not(.field-list) tr:hover th {
+    background: var(--bg-tertiary) !important;
+}
+
+/* Version selector if present */
+.dark-mode .rst-versions {
+    background: var(--bg-tertiary) !important;
+    color: var(--text-primary) !important;
+    border-top: 1px solid var(--border-color) !important;
+}
+
+.dark-mode .rst-versions a {
+    color: var(--primary-color) !important;
+}
+
+/* Navigation buttons (next/previous) */
+.dark-mode .btn {
+    background: var(--btn-bg) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+.dark-mode .btn:hover {
+    background: var(--btn-hover-bg) !important;
+    color: var(--text-primary) !important;
+}
+
+.dark-mode .btn-neutral {
+    background: var(--btn-bg) !important;
+    color: var(--text-primary) !important;
+}
+
+.dark-mode .btn-neutral:hover {
+    background: var(--btn-hover-bg) !important;
+}
+
+.dark-mode .btn-neutral:visited {
+    color: var(--text-primary) !important;
+}
+
+/* Role links in docs */
+.dark-mode .rst-content a.reference.external,
+.dark-mode .rst-content a.reference.internal {
+    color: var(--primary-color) !important;
+}
+
+.dark-mode .rst-content a:visited {
+    color: var(--primary-dark) !important;
+}
+
+/* Submodules section */
+.dark-mode .rubric {
+    color: var(--primary-color) !important;
+}
+
+/* Function/class signature backgrounds */
+.dark-mode dl.class,
+.dark-mode dl.function,
+.dark-mode dl.method,
+.dark-mode dl.attribute,
+.dark-mode dl.exception {
+    background: var(--bg-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+.dark-mode dt.sig {
+    background: linear-gradient(135deg, var(--sig-bg-from) 0%, var(--sig-bg-to) 100%) !important;
+    border-color: var(--border-color) !important;
+}
+
+.dark-mode dt.sig:hover {
+    background: linear-gradient(135deg, var(--sig-bg-hover-from) 0%, var(--sig-bg-hover-to) 100%) !important;
+}
+
+/* Paragraph and text */
+.dark-mode p {
+    color: var(--text-primary);
+}
+
+.dark-mode li {
+    color: var(--text-primary);
+}
+
+/* All admonition types in dark mode */
+.dark-mode .admonition {
+    background: var(--admonition-note-bg) !important;
+    border-color: var(--admonition-note-border) !important;
+    color: var(--text-primary) !important;
+}
+
+.dark-mode .admonition.note {
+    background: var(--admonition-note-bg) !important;
+    border-color: var(--admonition-note-border) !important;
+}
+
+.dark-mode .admonition.warning {
+    background: var(--admonition-warning-bg) !important;
+    border-color: var(--admonition-warning-border) !important;
+}
+
+.dark-mode .admonition.tip,
+.dark-mode .admonition.seealso,
+.dark-mode .admonition.example,
+.dark-mode .admonition.hint {
+    background: var(--admonition-tip-bg) !important;
+    border-color: var(--admonition-tip-border) !important;
+}
+
+.dark-mode .admonition.important,
+.dark-mode .admonition.danger,
+.dark-mode .admonition.error {
+    background: var(--admonition-important-bg) !important;
+    border-color: var(--admonition-important-border) !important;
+}
+
+.dark-mode .admonition-title {
+    color: var(--text-primary) !important;
+}
+
+.dark-mode .admonition p,
+.dark-mode .admonition li,
+.dark-mode .admonition code {
+    color: var(--text-primary) !important;
+}
+
+/* Scrollbars for webkit browsers */
+.dark-mode ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+.dark-mode ::-webkit-scrollbar-track {
+    background: var(--bg-secondary);
+}
+
+.dark-mode ::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 6px;
+}
+
+.dark-mode ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-secondary);
+}
+
+/* ============================================================================
+   Print Styles
+   ============================================================================ */
+
+@media print {
+    .wy-nav-side,
+    .wy-nav-content-wrap {
+        box-shadow: none;
+    }
 }
