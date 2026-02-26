@@ -2,10 +2,12 @@
 Handmade partition methods
 """
 
-import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-def split_graph(graph, times, memories, n=3):
+def split_graph(graph, times, memories, n):
 	"""
 	Naively splits a graph into roughly equal blocks in terms of time.
 	This algorithm does not take into account the memory used or transferred.
@@ -24,7 +26,7 @@ def split_graph(graph, times, memories, n=3):
 	:rtype: List[List[fx.Node]]
 	"""
 	nodes = list(graph.graph.nodes)
-	total_time = sum(np.median(times.get(node.name, 0)) for node in nodes)
+	total_time = sum(times.get(node.name, 0) for node in nodes)
 	target_time = total_time / n
 
 	parts = []
@@ -32,8 +34,8 @@ def split_graph(graph, times, memories, n=3):
 	current_time = 0
 
 	for node in nodes:
-		node_time = np.median(times.get(node.name, 0))
-		if current_time > target_time * (len(parts) + 1) and len(parts) < n:
+		node_time = times.get(node.name, 0)
+		if current_time > target_time * (len(parts) + 1) and len(parts) < n - 1:
 			parts.append(current_part)
 			current_part = []
 		current_part.append(node)
@@ -43,11 +45,25 @@ def split_graph(graph, times, memories, n=3):
 	return parts
 
 
-def split_graph_constrained(graph, times, memories, n=3):
+def _evaluate_partition_balance(parts, times):
+	"""
+	Evaluates the balance of a partition.
+	"""
+	if any(len(part) == 0 for part in parts):
+		return float("inf")
+	loads = [sum(times.get(node.name, 0) for node in part) for part in parts]
+	avg_load = sum(loads) / len(loads)
+	balance = max(loads) / avg_load
+	return balance
+
+
+def split_graph_constrained(graph, times, memories, n):
 	"""
 	Naively splits a graph into roughly equal blocks in terms of time.
 	This algorithm does not take into account the memory used or transferred.
 	Unlike split_graph, it is guaranteed that every block has 1 tensor as input and 1 tensor as output.
+	This algorithm tries different numbers of cuts (1-5), finds the best partition for each,
+	and returns the one with the best balance score (with a small penalty for more cuts).
 
 	:param graph: symbolic trace of the module to partition (see torch.fx)
 	:type graph: fx.GraphModule
@@ -56,14 +72,48 @@ def split_graph_constrained(graph, times, memories, n=3):
 	:param memories: unused ; it is only there for consistency with the other partitioning functions
 	:type memories: Dict[str, float]
 	:param n: number of partitions to create
-	:type n: Optional[int]
+	:type n: int
 
 	:return: ``n`` lists of nodes corresponding to each part
 	:rtype: List[List[fx.Node]]
 	"""
+	best_parts = None
+	best_penalized_score = float("inf")
+	cut_penalty = 0.1
+	max_cuts = 10
+
+	for max_cuts in range(1, max_cuts + 1):
+		imbalance_ratio = 0
+		parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts)
+		score = _evaluate_partition_balance(parts, times)
+
+		while imbalance_ratio < 1:
+			imbalance_ratio += 0.01
+			new_parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts)
+			new_score = _evaluate_partition_balance(new_parts, times)
+			if new_score > score:
+				break
+
+			parts = new_parts
+			score = new_score
+
+		penalized_score = score + (max_cuts - 1) * cut_penalty
+		if penalized_score < best_penalized_score:
+			logger.debug(f"New best score: {penalized_score} with {max_cuts} cuts")
+			best_penalized_score = penalized_score
+			best_parts = parts
+
+	return best_parts
+
+
+def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts):
+	"""
+	Creates one partition of the graph, with a given imbalance ratio and maximum number of cuts.
+	"""
 	nodes = list(graph.graph.nodes)
-	total_time = sum(np.median(times.get(node.name, 0)) for node in nodes)
+	total_time = sum(times.get(node.name, 0) for node in nodes)
 	target_time = total_time / n
+	imbalance_margin = imbalance_ratio * target_time
 
 	parts = [[] for _ in range(n)]
 	needed_inputs = []
@@ -71,19 +121,21 @@ def split_graph_constrained(graph, times, memories, n=3):
 	current_part = n - 1
 	current_time = 0
 	for node in reversed(nodes):
-		if current_time > target_time and len(needed_inputs) <= 1:
+		# Go to the next part if we are over the balance, or close to it, and we have at most max_cuts inputs
+		if (
+			current_part > 0
+			and (current_time >= target_time or target_time - current_time < imbalance_margin)
+			and len(needed_inputs) <= max_cuts
+		):
 			current_part -= 1
 			current_time = 0
 			needed_inputs = []
 		parts[current_part].insert(0, node)
-		current_time += np.median(times.get(node.name, 0))
+		current_time += times.get(node.name, 0)
 		for dep in node.all_input_nodes:
 			if dep.name not in needed_inputs and dep not in parts[current_part]:
 				needed_inputs.append(dep.name)
 		if node.name in needed_inputs:
 			needed_inputs.remove(node.name)
-
-	# Fill the pipeline with identity functions to match number of parts
-	# while current_part >= 0:
 
 	return parts

@@ -1,9 +1,17 @@
+"""
+Extraction of computation graphs from models.
+"""
+
 import torch
 import torch.nn as nn
 
+from torch.export import Dim
+
 import logging
 
+from elf.registry import TRACERS
 from elf.zb_utils import LayerDWTracer
+
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +23,11 @@ def symbolic_trace_with_layerdw(model: torch.nn.Module) -> torch.fx.GraphModule:
 	return torch.fx.GraphModule(model, graph)
 
 
-def extract_graph_fx(model):
+def extract_graph_fx(model, *args):
 	return symbolic_trace_with_layerdw(model)
 
 
-def extract_graph_export(model, sample, use_dynamic_batch_size=False):
+def extract_graph_export(model, sample, run_decompositions=True, use_dynamic_batch_size=False):
 	"""
 	Extract graph using torch.export.
 
@@ -33,14 +41,19 @@ def extract_graph_export(model, sample, use_dynamic_batch_size=False):
 	:rtype: torch.export.ExportedProgram
 	"""
 	if use_dynamic_batch_size:
-		dim = torch.export.Dim("batch")
-		dynamic_shapes = ({0: dim},)
-		exported = torch.export.export(model, args=(sample,), dynamic_shapes=dynamic_shapes)
+		# dim = torch.export.Dim("batch")
+		dynamic_shapes = ({0: Dim.DYNAMIC},)
+		exported = torch.export.export(
+			model, args=(sample,), dynamic_shapes=dynamic_shapes, strict=False
+		)
+		if run_decompositions:
+			exported = exported.run_decompositions()
 		module = exported.module()
 		return module
 	else:
-		exported = torch.export.export(model, args=(sample,))
-		return exported.module()
+		exported = torch.export.export(model, args=(sample,), strict=False)
+		module = exported.module()
+		return module
 
 
 def extract_graph_fx_safe(model, sample):
@@ -68,7 +81,7 @@ def extract_graph_fx_safe(model, sample):
 		traceable = len(new_leaves) == 0
 		leaves.extend(new_leaves)
 
-	graph = tracer.trace(model, concrete_args={"dummy_run": False, "return_latent": False})
+	graph = tracer.trace(model)
 	return torch.fx.GraphModule(model, graph)
 
 
@@ -108,13 +121,19 @@ def try_extract_graph(model, sample):
 	:rtype: torch.fx.GraphModule or torch.export.ExportedProgram
 	:raises Exception: If all extraction modes fail
 	"""
-	modes = ["fx", "fx_safe", "export"]
+	modes = TRACERS.available()
+	modes.remove("default")
+	# Prioritize fx and fx_safe modes over export (hardcoded :/)
+	priority_modes = ["fx", "fx_safe"]
+	other_modes = [mode for mode in modes if mode not in priority_modes]
+	modes = priority_modes + other_modes
 	for mode in modes:
 		try:
 			return extract_graph(model, sample, mode)
 		except Exception as e:
 			logger.debug(str(e))
 			logger.info(f"Failed to extract graph with mode {mode}. Trying next mode.")
+
 	raise Exception("Failed to extract graph")
 
 

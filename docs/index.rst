@@ -1,7 +1,7 @@
 .. pipeline documentation master file
 
-Pipeline: Efficient Parallelism for Training
-=====================================
+ELF: Efficient deep Learning Framework
+======================================
 
 .. image:: _static/logo.webp
    :alt: Pipeline Logo
@@ -9,7 +9,7 @@ Pipeline: Efficient Parallelism for Training
    :width: 100px
    :class: rounded-corners
 
-Welcome to the documentation for Pipeline, a library for efficient parallelism in deep learning.
+Welcome to the documentation for ELF, a library for efficient parallelism in deep learning.
 
 .. raw:: html
 
@@ -23,7 +23,8 @@ Features
 --------
 
 - Automatic model partitioning
-- Support for various scheduling algorithms
+- Support for various state-of-the-art scheduling algorithms
+- Arbitrary skip connections
 - Easy integration with existing PyTorch models
 - Profiling with Nsight Systems
 
@@ -40,26 +41,32 @@ Quick Start
    output, loss = pipe(inputs, targets, loss_fn)
 
 
+User Guide
+----------
+
+.. toctree::
+   :maxdepth: 2
+
+   advanced_usage
+
+
 API Reference
 -------------
 
 Pipeline Object
 ~~~~~~~~~~~~~~~
 
-.. autoclass:: pipeline.Pipeline
+.. autoclass:: elf.Pipeline
    :members:
    :undoc-members:
    :show-inheritance:
-
-   .. automethod:: __init__
 
 .. autosummary::
    :toctree: generated
    :template: custom-module-template.rst
    :recursive:
 
-   pipeline
-   pipeline.partitioners
+   elf
 
 Indices and tables
 ==================

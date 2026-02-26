@@ -5,7 +5,6 @@ Manipulate dependency graphs corresponding to schedules
 from enum import Enum, StrEnum, auto
 
 import logging
-import torch.distributed as dist
 
 logger = logging.getLogger("scheduling")
 
@@ -13,7 +12,7 @@ logger = logging.getLogger("scheduling")
 class OperationType(Enum):
 	"""
 	Different type of operations that can be performed.
-	They can be both computation (forward, backward, ..) or communications (p2p send/recv, ..)
+	They can be both computation (forward, backward, ..) or communications (p2p send/recv, offloading, ..)
 	"""
 
 	RECV_FORWARD = 0
@@ -29,6 +28,8 @@ class OperationType(Enum):
 	RECOMPUTE_FORWARD = 10
 	RECOMPUTE_BACKWARD_INPUTS = 11
 
+	PREFETCH_ACTIVATIONS = 12
+
 	def __repr__(self) -> str:
 		return self.name.lower()
 
@@ -36,23 +37,52 @@ class OperationType(Enum):
 		return self.name.lower()
 
 
+comm_types = {
+	OperationType.RECV_FORWARD,
+	OperationType.RECV_BACKWARD,
+	OperationType.SEND_FORWARD,
+	OperationType.SEND_BACKWARD,
+}
+
+
+# Note: if you want to include "Loss Forward" and "Loss Backward" in the compute types, check the smart toposorting algorithm; those 2 specially need to be skipped
+compute_types = {
+	OperationType.FORWARD,
+	OperationType.BACKWARD_INPUTS,
+	OperationType.BACKWARD_PARAMS,
+	OperationType.RECOMPUTE_FORWARD,
+	OperationType.RECOMPUTE_BACKWARD_INPUTS,
+}
+
+
 class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a string
 	"""
-	Options that can be passed to operations to modify their behaviour
+	Options that can be passed to operations to modify their behaviour.
+
+	Attributes
+	----------
+	REMAT_STRATEGY : str
+		Remat strategy is a function that indicates if we recompute a module or not.
+		Signature: ``(name: str, module: nn.Module) -> bool``
+		It can be used for both forward and backward operations.
+		In the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations.
+	RECOMPUTE_ACTIVATIONS : str
+		Recompute Backward-Forward (activations, between B and W).
+	RECOMPUTE_GRADIENTS : str
+		Recompute Backward-Backward (gradients, between B and W).
+	ACTIVATION_OFFLOAD : str
+		Offload activations to CPU.
+	SAVE : str
+		For recompute forward, it's a boolean to save the computation graph for a second backward or not.
+	OFFLOAD_DW : str
+		Offload weight gradients computation.
 	"""
 
-	# Remat strategy is a function that indicates if we recompute a module or not
-	# (name: str, module: nn.Module) -> bool
-	# It can be used for both forward and backward operations ;
-	# in the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations
 	REMAT_STRATEGY = auto()
-	RBF_STRATEGY = auto()
-	RBB_STRATEGY = auto()
-
-	# for forward, it's a boolean to save the activations or not
+	RECOMPUTE_ACTIVATIONS = auto()
+	RECOMPUTE_GRADIENTS = auto()
+	ACTIVATION_OFFLOAD = auto()
 	SAVE = auto()
-
-	BATCHED_COMM = auto()
 	OFFLOAD_DW = auto()
 
 
@@ -97,16 +127,12 @@ class Operation:
 		return hash((self.block_id, self.mb_id, self.rank, self.op))
 
 
-def complementary(op_type):
-	"""
-	The complementary is the opposite communication, that has the same peer.
-	"""
-	return {
-		OperationType.RECV_FORWARD: (OperationType.SEND_BACKWARD, OperationType.SEND_FORWARD),
-		OperationType.RECV_BACKWARD: (OperationType.SEND_FORWARD, OperationType.SEND_BACKWARD),
-		OperationType.SEND_FORWARD: (OperationType.RECV_BACKWARD, OperationType.RECV_FORWARD),
-		OperationType.SEND_BACKWARD: (OperationType.RECV_FORWARD, OperationType.RECV_BACKWARD),
-	}[op_type]
+matching_ops = {
+	OperationType.RECV_FORWARD: OperationType.SEND_FORWARD,
+	OperationType.RECV_BACKWARD: OperationType.SEND_BACKWARD,
+	OperationType.SEND_FORWARD: OperationType.RECV_FORWARD,
+	OperationType.SEND_BACKWARD: OperationType.RECV_BACKWARD,
+}
 
 
 def matching(op_type):
@@ -114,83 +140,7 @@ def matching(op_type):
 	The matching operation is the opposite communication, in the same direction.
 	For instance, a recv(forward) is matched with a send(forward), and a send(backward) with a recv(backward).
 	"""
-	return {
-		OperationType.RECV_FORWARD: OperationType.SEND_FORWARD,
-		OperationType.RECV_BACKWARD: OperationType.SEND_BACKWARD,
-		OperationType.SEND_FORWARD: OperationType.RECV_FORWARD,
-		OperationType.SEND_BACKWARD: OperationType.RECV_BACKWARD,
-	}[op_type]
-
-
-comm_types = {
-	OperationType.RECV_FORWARD,
-	OperationType.RECV_BACKWARD,
-	OperationType.SEND_FORWARD,
-	OperationType.SEND_BACKWARD,
-}
-
-
-def resolve_one_pair(ops1, ops2):
-	"""
-	Find the blocking pattern between a pair of ranks
-	"""
-	if len(ops1) == 0 or len(ops2) == 0:
-		return
-	rank1 = ops1[0].rank
-	rank2 = ops2[0].rank
-	# assert rank1 > rank2, f"rank1 should be greater than rank2, got {rank1} and {rank2}"
-
-	def find_matching_op(op):
-		"""
-		Find the corresponding recv or send on the other rank
-		"""
-		for other in ops2:
-			if op.mb_id == other.mb_id and op.op == matching(other.op) and get_peer(other) == op.block_id:
-				return other
-		return None
-
-	assert len(ops1) == len(ops2), (
-		f"ops1 and ops2 should have the same length, got {len(ops1)} and {len(ops2)}"
-	)
-
-	# Find consecutive complementary operations in ops1
-	for i in range(len(ops1) - 1):
-		op1 = ops1[i]
-		op2 = ops1[i + 1]
-		if op1.op not in comm_types or op2.op not in comm_types:
-			continue
-
-		# If it's already batched, there is no issue here ; we can skip
-		if (
-			op1.options.get(OpOptions.BATCHED_COMM, None) is not None
-			or op2.options.get(OpOptions.BATCHED_COMM, None) is not None
-		):
-			continue
-
-		# Check if operations are complementary
-		if op2.op in complementary(op1.op):
-			op3 = find_matching_op(op2)
-			op4 = find_matching_op(op1)
-
-			if ops2.index(op3) > ops2.index(op4):
-				# Not blocking ! That's the regular (send/recv) (recv/send) pattern
-				continue
-
-			# If op1 and op2 are not batched, op3 and op4 should not be batched either
-			assert (
-				op3.options.get(OpOptions.BATCHED_COMM, None) is None
-				and op4.options.get(OpOptions.BATCHED_COMM, None) is None
-			), "Operations should not be batched already"
-
-			id_ = (rank1, rank2, i + 1)  # Unique id for pair + batch
-			if not dist.is_initialized() or dist.get_rank() == 0:
-				logger.debug(
-					f"Marked operations for batched communication: {op1}, {op2}, {op3}, {op4} with id {id_}"
-				)
-			op1.options[OpOptions.BATCHED_COMM] = id_
-			op2.options[OpOptions.BATCHED_COMM] = id_
-			op3.options[OpOptions.BATCHED_COMM] = id_
-			op4.options[OpOptions.BATCHED_COMM] = id_
+	return matching_ops[op_type]
 
 
 def get_peer(op):
@@ -210,29 +160,17 @@ def get_peer_rank(op, placement):
 	return placement[peer]
 
 
-def mark_batched_comms(schedule, placement):
-	"""
-	Finds all operations that need to be batched and marks them for execution
-	"""
-
-	ranks = []
-	# Unique, reverse order
-	for p in reversed(placement):
-		if p not in ranks:
-			ranks.append(p)
-
-	visited = set()
-	for i in ranks:
-		for j in ranks:
-			if i == j or j in visited:
-				continue
-			ops1 = [op for op in schedule if op.rank == i and get_peer_rank(op, placement) == j]
-			ops2 = [op for op in schedule if op.rank == j and get_peer_rank(op, placement) == i]
-			resolve_one_pair(ops1, ops2)
-		visited.add(i)
-
-
 def schedule_to_str(schedule, print_comms=False):
+	"""
+	Convert a schedule to a string representation.
+
+	:param schedule: Schedule to convert
+	:type schedule: List[Operation]
+	:param print_comms: Whether to include communications
+	:type print_comms: bool
+	:return: String representation of the schedule
+	:rtype: str
+	"""
 	reprs = {
 		OperationType.RECV_FORWARD: "rf",
 		OperationType.FORWARD: "f",
@@ -244,6 +182,7 @@ def schedule_to_str(schedule, print_comms=False):
 		OperationType.RECOMPUTE_FORWARD: "R",
 		OperationType.RECOMPUTE_BACKWARD_INPUTS: "R*",
 		OperationType.ALL_REDUCE_PARAM_GRADS: "(AR)",
+		OperationType.PREFETCH_ACTIVATIONS: "P",
 	}
 
 	def shorten(op):
@@ -279,7 +218,11 @@ def schedule_to_str(schedule, print_comms=False):
 		ops_str = " ".join(
 			filter(
 				lambda s: s != "",
-				[f"{shorten(op)}{op.mb_id if op.mb_id is not None else ''}" for op in rank_ops],
+				[
+					f"{shorten(op)}{op.block_id}-{op.mb_id if op.mb_id is not None else ''}"
+					+ (f"({get_peer(op)})" if op.op in comm_types else "")
+					for op in rank_ops
+				],
 			)
 		)
 		lines.append(f"Rank {rank}: {ops_str}")
@@ -287,7 +230,13 @@ def schedule_to_str(schedule, print_comms=False):
 
 
 def check_schedule_validity(schedule):
-	n_ranks = len(set(op.rank for op in schedule))
+	"""
+	Perform basic sanity checks on a generated schedule.
+
+	.. warning::
+		Some of these checks may not pass for your custom, specific schedule. If this is the case, please report it to the developers.
+	"""
+	ranks = set(op.rank for op in schedule)
 	n_mb = len(set(op.mb_id for op in schedule if op.mb_id is not None))
 
 	def find(nodes, cond):
@@ -296,7 +245,7 @@ def check_schedule_validity(schedule):
 				return i, node
 		return -1, None
 
-	for rank in range(n_ranks):
+	for rank in ranks:
 		rank_ops = [op for op in schedule if op.rank == rank]
 		rank_mb_ids = set(op.mb_id for op in rank_ops if op.mb_id is not None)
 		assert len(rank_mb_ids) == n_mb, (
@@ -316,6 +265,6 @@ def check_schedule_validity(schedule):
 			assert k != -1 or j == -1, (
 				f"[Rank {rank}] Backward params should be present for microbatch {mb_id} since backward inputs is present"
 			)
-			assert j < k, (
+			assert j <= k, (
 				f"[Rank {rank}] Backward params should be after backward inputs for microbatch {mb_id}"
 			)

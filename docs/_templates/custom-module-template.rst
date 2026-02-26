@@ -1,60 +1,60 @@
 {{ fullname | escape | underline}}
 
 .. automodule:: {{ fullname }}
-  
+
    {% block attributes %}
    {% if attributes %}
    .. rubric:: Module Attributes
 
-   .. autosummary::
-      :toctree:
    {% for item in attributes %}
-      {{ item }}
+   .. autoattribute:: {{ item }}
+      :annotation:
+
    {%- endfor %}
    {% endif %}
    {% endblock %}
    
-   {% block classes %}
-   {% if classes %}
-   .. rubric:: {{ _('Classes') }}
-
-   .. autosummary::
-      :toctree:
-      :template: custom-class-template.rst
-   {% for item in classes %}
-      {{ item }}
-   {%- endfor %}
-   {% endif %}
-   {% endblock %}
-
    {% block functions %}
    {% if functions %}
-   .. rubric:: {{ _('Functions') }}
+   .. rubric:: Functions
 
-   .. autosummary::
-      :toctree:
    {% for item in functions %}
-      {{ item }}
+   .. autofunction:: {{ item }}
+
    {%- endfor %}
    {% endif %}
    {% endblock %}
 
+   {% block classes %}
+   {% if classes %}
+   .. rubric:: Classes
+
+   {% for item in classes %}
+   .. autoclass:: {{ item }}
+      :members:
+      :show-inheritance:
+      :member-order: bysource
+
+   {%- endfor %}
+   {% endif %}
+   {% endblock %}
 
    {% block exceptions %}
    {% if exceptions %}
-   .. rubric:: {{ _('Exceptions') }}
+   .. rubric:: Exceptions
 
-   .. autosummary::
-      :toctree:
    {% for item in exceptions %}
-      {{ item }}
+   .. autoexception:: {{ item }}
+      :members:
+      :show-inheritance:
+
    {%- endfor %}
    {% endif %}
    {% endblock %}
 
 {% block modules %}
 {% if modules %}
-.. rubric:: Modules
+.. rubric:: Submodules
 
 .. autosummary::
    :toctree:

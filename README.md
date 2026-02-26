@@ -1,70 +1,102 @@
-## ELF - Efficient Deep Learning Framework
+# ELF – Efficient Deep Learning Framework
 
-ELF is a deep learning framework that aims to allow distributed training of large models using state-of-the-art algorithms. It is build on top of PyTorch.
+ELF is a lightweight research-oriented framework built on top of **PyTorch** that makes training very large neural networks on multi-GPU setups effortless. It automates everything that usually hurts when scaling a model beyond the memory of a single GPU: graph extraction, partitioning, device placement, scheduling, communication, and memory optimisation – all exposed through a single high-level API.
 
-### Use the framework
+## Highlights
 
-The object ``Pipeline`` from ``pipeline`` provides a simple API to automatically take care of everything.
-```py
-from elf import Pipeline
-model = ... # create your model
-sample = torch.randn(..., device = 'cuda')
-pipe = Pipeline(model, sample)
-y, loss = pipe(inputs, targets, loss_fn)
-pipe.clear()
+- **One-line pipeline parallelism** – wrap any `torch.nn.Module` inside `elf.Pipeline` and train it across any number of GPUs.
+- **Automatic model partitioning** – integrates different model splitting algorithms, and respects manual splits when you prefer full control.
+- **Static schedule zoo** – GPipe, 1F1B, Hanayo, Zero-Bubble family, full-remat and inference-only variants.
+- **Data + pipeline parallelism** – mix pipeline stages (`pp`) with data-parallel replicas (`dp`) in the same job.
+- **Fine-grained rematerialisation control** – pick a built-in schedule or inject your own policy to trade memory for extra compute.
+- **Plugin registries** – add new schedulers, partitioners or tracers without touching the core code.
+
+## Quick start
+
+```python
+import torch
+from elf import Pipeline            # main entry point
+
+torch.distributed.init_process_group("nccl")
+
+model   = MyBigModel()
+sample  = torch.randn(input_shape, device='cuda')   # only needed for profiling
+inputs  = ...
+targets = ...
+
+pipe = Pipeline(model, sample)               # pass placement / partitioner / scheduler as needed
+
+loss_fn = torch.nn.CrossEntropyLoss()
+y, loss = pipe(inputs, targets, loss_fn)   # forward + backward (+ DP gradient sync)
+
+# usual optimizer step
+optimizer.step()
+pipe.zero_grad()
 ```
 
-A full example can be found in ``examples/basic.py``.
+Call `pipe.clear()` once you are done to gracefully destroy the underlying process-groups.\
+Some examples can be found under `examples/` for more details and use cases.
 
-Note that ``sample`` is only necessary if you use automatic partitioning, as it is used for profiling. Also, it is not used on processes other than the first one of the pipeline.\
-There are several arguments to modify its behaviour :
-- ``placement`` specifies the gpu used for each pipeline stage.
-- ``partitioner`` can be set to ``False`` to disable automatic partition. This is useful in case you already partitioned your model yourself. Each part should be placed on the right device. Otherwise, you can choose between partitioners described below.
-- ``schedule`` modifies the schedule algorithm to use. Currently supported:
-  - ``"afab"``: [GPipe](https://arxiv.org/pdf/1811.06965v5)
-  - ``"1f1b"``: [1F1B](https://arxiv.org/pdf/1806.03377)
-  - ``"hanayo"``: [Hanayo](https://arxiv.org/pdf/2308.15762)
-  - ``"zbh1"``: [ZBH1](https://arxiv.org/pdf/2401.10241)
-  - ``"zbh2"``: [ZBH2](https://arxiv.org/pdf/2401.10241)
-  - ``"full_remat"``: Full Remat : GPipe with rematerialization of every micro-batch / 1f1b on the last rank
-- ``dp`` is the data parallelism degree. One pipeline will be replicated ``dp`` times.
+## The Pipeline API
 
-### Write your own schedule
+`Pipeline` is a thin wrapper around your `nn.Module`.  The most useful kwargs are:
 
-You can define your own schedule if you want to perform tests or use an unimplemented one. In order to do that, you simply have to write a function that takes as argument a ``placement``, a number of micro batches ``n_micro_batches``, and the signature of each block, to return the right sequence of operations (see the ``Operation`` class in ``scheduling.py``). Then, register it in the ``Pipeline`` class in ``pipeline.py`` (``_get_scheduler``).
+- **placement** – list of CUDA ranks (or `"auto"`) describing where each stage runs.
+- **partitioner** – registry key or callable used to cut the graph (set to `False` if you already partitioned the model yourself).
+- **scheduler** – registry key or callable that returns a static list of operations for every micro-batch.
+- **dp** – integer giving the data-parallel replication factor.
 
-### Change the pipeline behaviour
+The full argument list is defined in [the documentation](#docs).
 
-The options can be anything that modifies the behaviour of an operation (forward, send, recv, ..). The corresponding function in ``block.py`` needs to be modified to take it into account. See remat for an example.
 
-Each supported option is in the enumeration ``OpOptions`` in ``scheduling.py``.
+## Registries: plug & play algorithms
 
-### Model partitioning
+ELF exposes three global registries in `elf.registry`:
 
-Different partition scheme are available. All of them rely on ``torch.fx.symbolic_trace`` or ``torch.export`` (whichever works, default is fx). If your model cannot be traced properly you will have to partition it yourself.
-The different partition modes are:
-- ``naive``: Naive graph partition that tries to balance computation times for each part
-- ``constrained``: Same as default, but with a hard constraint on each part to have exactly 1 input tensor and 1 output tensor
-- ``metis``: Call [METIS](http://glaros.dtc.umn.edu/gkhome/metis/metis/overview) to optimize the partition. Needs ``gpmetis`` to be installed.
-- ``dagP``: Call [dagP](https://github.com/GT-TDAlab/dagP/) to partition. Needs ``rMLGP`` installed. 
+```python
+from elf.registry import SCHEDULERS, PARTITIONERS, TRACERS
+```
 
-### Data parallelism
+Register a new component by key:
 
-You can run multiple pipelines at once with different data by specifying the argument ``dp`` of the ``Pipeline`` object. Each pipeline will be replicated ``dp`` times. Note that the user needs to handle the data loading and distribute it among the pipelines, for instance with ``torch.utils.data.distributed.DistributedSampler``.
+```python
+def my_partitioner(graph, times, memories, n_parts):
+    ...
 
-## Running tests and benchmarks
+PARTITIONERS.register("my_algo", my_partitioner, description="Algo from paper ...")
+```
 
-Environment setup on some clusters is described in `docs`.
+Then simply reference it when building a pipeline: `Pipeline(..., partitioner="my_algo")`.
+
+The signature of functions expected in the registry are detailed in `elf/registry.py`
+
+## Process topologies
+
+`Placement.default(scheduler, pp)` gives a good default mapping, but you can pass any explicit list, enabling exotic layouts such as:
+
+```python
+placement = [0,1,2,3, 3,2,1,0]   # bidirectional pipeline for Hanayo / ZBV
+```
+
+## Environment variables
+
+- ``ELF_TIMINGS``: Accurate time measurements in ``detailed_stats`` field of the ``Pipeline`` object after an iteration. May affect performance.
+- ``ELF_MEMORY``:  Accurate kept and peak memory measurements in ``detailed_stats`` field of the ``Pipeline`` object after an iteration. May affect performance.
+- ``ELF_TIMEOUT``: Number of seconds to wait for before shutting down process groups. (passed to NCCL watchdog)
+
+## Docs
+
+The full documentation can be generated with Sphinx. Go to `docs/` and run `make html`.
+
+## Testing & benchmarks
+
+- Run all tests: `./tests/test.sh` (a few require ≥2 GPUs).
+- Performance scripts live in `benchmarks/`.
+- ILP-based experiments are located in `ilps`.
+
+## Environment setup on clusters
+
+CUDA/NCCL versions and SLURM setups for some HPC clusters are documented in the `docs/` folder:
+
+- [Jean-Zay](docs/jean-zay.md)
 - [Helios](docs/helios.md)
-
-### Tests
-
-Run all tests:
-```bash
-./tests/test.sh
-```
-Some of them require at least 2 GPUs.
-
-### Benchmarks
-
-Some benchmarks are available in ``benchmarks/``. They are used to measure and compare the performance of the pipeline.

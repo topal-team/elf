@@ -1,11 +1,12 @@
 """
-Utils for operation profiling
+Profiling of models based on torch.fx.
 """
 
 import copy
 import torch
 import numpy as np
 from elf.utils import Timer
+from elf.zb_utils import LayerDW
 
 DONT_CUT_HERE = 2 << 24
 
@@ -64,7 +65,12 @@ class Profiler(torch.fx.Interpreter):
 
 		# Special case: modules are not in args/kwargs but in target.
 		if node.op == "call_module":
-			self.to_device(self.fetch_attr(node.target), device)
+			module = self.fetch_attr(node.target)
+			self.to_device(module, device)
+
+			# LayerDWs need to be reset
+			if isinstance(module, LayerDW):
+				module.last_input = None
 
 	def run_node(self, node):
 		# Move all inputs to the specified device
@@ -93,7 +99,6 @@ class Profiler(torch.fx.Interpreter):
 def get_memory(x):
 	"""
 	Estimates memory used by ``x`` if it is a tensor
-	If ``x`` is an iterable or dictionary, recursively count memory for every tensor contained in it
 
 	:param x: object to estimate
 	:type x: Any

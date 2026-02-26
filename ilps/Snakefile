@@ -1,0 +1,22 @@
+configfile: "smk-config-h100.yaml"
+
+include: "rules/cpu.smk"
+include: "rules/gpu.smk"
+
+from smk_utils import list_methods
+from snakemake.io import glob_wildcards
+
+wildcard_constraints:
+	model=r"[a-zA-Z0-9_-]+",
+	sequence_length=r"\d+",
+	ngpus=r"\d+",
+	nstages=r"\d+",
+	gpu_type=r"[a-zA-Z0-9]+",
+	method=r"[a-zA-Z0-9_-]+"
+
+rule clean:
+	params:
+		log_dir=config["LOG_DIR"],
+		results_dir=config["RESULTS_DIR"]
+	shell:
+		"rm -rfI {params.results_dir}/*/* {params.log_dir}/*"

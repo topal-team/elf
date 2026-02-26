@@ -5,9 +5,9 @@ Individual stage computation and communication management
 import torch
 import torch.distributed as dist
 
-from .scheduling import OpOptions
-from .utils import Timer, TensorMetadata
-from .zb_utils import LayerDW
+from ..scheduling import OpOptions
+from ..utils import Timer, TensorMetadata, _is_mpi
+from ..zb_utils import LayerDW, partial_dx_recomputation
 from .remat import RematManager
 
 import logging
@@ -137,7 +137,9 @@ class PipelineBlock:
 	Each block is one layer or group of contiguous layers placed on one device
 	"""
 
-	def __init__(self, model, id_, placement, signature, pp_group, dp_group):
+	def __init__(
+		self, model, id_, placement, signature, pp_group, dp_group, recv_pgs=None, send_pgs=None
+	):
 		"""
 		:param model: layer / group of layers that will perform the computation
 		:type model: nn.Module
@@ -147,6 +149,10 @@ class PipelineBlock:
 		:type placement: List[int]
 		:param signature: signature of the block
 		:type signature: Signature
+		:param recv_pgs: Process groups for receiving data, keyed by source rank
+		:type recv_pgs: Dict[int, ProcessGroup] or None
+		:param send_pgs: Process groups for sending data, keyed by destination rank
+		:type send_pgs: Dict[int, ProcessGroup] or None
 		"""
 		super(PipelineBlock, self).__init__()
 		# Block infos
@@ -176,13 +182,30 @@ class PipelineBlock:
 			for name, dsts in zip(signature.outputs, signature.targets)
 		]
 
+		# Process groups for point-to-point communications
+		# By default, torch distributed uses 1 cuda stream per pair of ranks
+		# Bidirectional communications are therefore sequentialized on that stream, even if they are independent
+		# We use separate groups for the forward pass to avoid this, and keep the default (pipeline) group for the backward pass
+		self.recv_pgs = recv_pgs
+		self.send_pgs = send_pgs
+
 		self.compute_time = []  # used to measure idle time
 
-		# Strategy manager to handle RBF and RBB strategies
+		# Take care of rematerialization
 		self.remat_manager = RematManager(self)
 
+		self.send_ops = []  # need to be stored for MPI backend, see _wait_for_send_ops
+
+		# NCCL automatically synchronizes send stream with compute stream
+		# With MPI however, we need to manually make sure that computations are finished before sending. These events are used for that.
+		# note: we could optimize that a bit by:
+		# 1 - having a different stream for fwd and bwd (to avoid waiting for stuff we don't depend on)
+		# 2 - finding a way to insert events just after the computation that leads to the sendable tensor, instead of waiting for the whole computation to be finished (not sure if possible)
+		self.fwd_compute_events = []
+		self.bwd_compute_events = []
+
 	def __str__(self) -> str:
-		return f"[Layer {self.id} : GPU {self.rank}]"
+		return f"Rank {self.rank} - Layer {self.id}"
 
 	def forward(self, mb_id, **options):
 		"""
@@ -190,34 +213,31 @@ class PipelineBlock:
 
 		Possible options:
 		- REMAT_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
-		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
 		"""
 		# Gather all variables needed for forward
 		inputs = []
 		for input_var in self.input_variables:
+			logger.debug(f"{self} - Waiting for {input_var}")
 			x = input_var.wait_and_pop(mb_id)
 
-			if x.is_floating_point():
+			if x.is_floating_point() or x.is_complex():  # int tensors can't require grads
 				x.requires_grad_(True)
 
 			inputs.append(x)
 
 		# Get strategies from options
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
 		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
 
 		# Register hooks and perform rematerialization
-		handles = self.remat_manager.register_backward_hooks(rbb_strategy, mb_id)
 		with self.remat_manager.apply_selective_remat(remat_strategy, mb_id):
 			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
+
+			if torch.cuda.is_available() and _is_mpi():
+				self.fwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 			for module in self.model.modules():
 				if isinstance(module, LayerDW):
 					module.move_last_computed("input", mb_id)
-
-		# Clean up hooks
-		for handle in handles:
-			handle.remove()
 
 		if any(not dst.metadata for var in self.output_variables for dst in var):
 			self._register_out_metadata(y)
@@ -290,48 +310,32 @@ class PipelineBlock:
 		Recompute the forward pass of the model
 
 		Possible options:
-		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
 		- SAVE: bool - Whether to save the activations of the forward pass. If set to False, this allows us to compute under no_grad and therefore save some memory.
-		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
 		"""
 		# Inputs should have been saved by a previous forward pass
 		inputs = []
 		for input_var in self.input_variables:
-			# Keep it for backward
 			value = input_var.get(input_var.saved, mb_id)
 			inputs.append(value)
 
-		# Get options and strategies
 		save = options.get(OpOptions.SAVE, False)
-		rbf_strategy = options.get(OpOptions.RBF_STRATEGY, lambda *_: False)
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-
-		# Prepare modules for recomputation
-		self.remat_manager.prepare_recompute_forward(rbf_strategy)
-
-		# Register hooks for the forward pass
-		handles = self.remat_manager.register_forward_hooks(rbb_strategy, mb_id)
 
 		# Execute forward pass with or without gradient tracking
 		if not save:
 			with torch.no_grad():
 				self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 		else:
-			self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
+			y = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
 
 			for input_var, value in zip(self.input_variables, inputs):
 				input_var.set(input_var.saved, mb_id, value)
 
-		# Clean up hooks
-		for handle in handles:
-			handle.remove()
+			for output_var, value in zip(self.output_variables, y):
+				output_var[0].set(output_var[0].saved, mb_id, value)
 
 		for module in self.model.modules():
-			if isinstance(module, LayerDW) and getattr(module, "last_input", None) is not None:
+			if isinstance(module, LayerDW):
 				module.move_last_computed("input", mb_id)
-
-		# Restore original forward functions
-		self.remat_manager.restore_forwards()
 
 	def recompute_backward_inputs(self, mb_id, **options):
 		"""
@@ -357,13 +361,16 @@ class PipelineBlock:
 		with Timer(name=f"recompute_backward_inputs({self.id}:{mb_id})") as timer:
 			for i, (output, grad) in enumerate(zip(outputs, grads)):
 				retain_graph = i != len(outputs) - 1  # save until the last backward
-				torch.autograd.backward(output, grad, inputs=inputs, retain_graph=retain_graph)
+
+				# Partial DX recomputation recomputes the minimal backward pass needed to compute W, instead of the full backward pass
+				# We can't use torch.grad with inputs=inputs, because if the inputs don't require grads (e.g., int tensors), then torch.grad will fail
+				partial_dx_recomputation(output, grad, retain_graph=retain_graph)
+				# torch.autograd.backward(output, grad, inputs=inputs, retain_graph=retain_graph)
 
 		self.compute_time.append(timer)
 
-		for name, module in self.model.named_modules():
-			# Some grads were not recomputed
-			if isinstance(module, LayerDW) and getattr(module, "last_grad_output", None) is not None:
+		for module in self.model.modules():
+			if isinstance(module, LayerDW):
 				module.move_last_computed("grad_output", mb_id)
 
 	def backward_params(self, mb_id, **options):
@@ -376,7 +383,9 @@ class PipelineBlock:
 		"""
 		with Timer(name=f"backward_params({self.id}:{mb_id})") as timer:
 			for module in self.model.modules():
-				if isinstance(module, LayerDW):
+				if isinstance(module, LayerDW) and not module.is_empty(
+					"grad_output"
+				):  # skip modules that are not involved in the computation
 					module.backward(mb_id)
 
 		self.compute_time.append(timer)
@@ -386,15 +395,16 @@ class PipelineBlock:
 		Send one activation to the next layer in the model
 
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		dst = options.get("dst")
+
+		if torch.cuda.is_available() and _is_mpi():
+			# This is a sync point that is needed for MPI but not for NCCL
+			self.fwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
 
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		sends = []
 		for var in self.output_variables:
 			for target in var:
 				# only perform communications for that dst
@@ -406,27 +416,25 @@ class PipelineBlock:
 				outputs = target.get(target.to_send, mb_id).contiguous()
 
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
-				if options.get(OpOptions.BATCHED_COMM):
-					sends.append(dist.P2POp(dist.isend, outputs, rank, group=self.pp_group))
-				else:
-					logger.debug(f"{self} - Sending outputs to rank {rank}")
-					dist.isend(outputs, rank, group=self.pp_group)
-
-		return sends  # if not batched, sends is still empty and therefore Falsy
+				logger.debug(f"{self} - Sending outputs to rank {rank}")
+				work = dist.isend(outputs, rank, group=self.send_pgs["fwd"][dst])
+				if _is_mpi():
+					self.send_ops.append(work)
 
 	def send_backward(self, mb_id, **options):
 		"""
 		Send one gradient tensor to the previous layer in the model
 
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		dst = options.get("dst")
+
+		if torch.cuda.is_available() and _is_mpi():
+			self.bwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
+
 		if dst is None or self.placement[dst] == self.rank:
 			return
 
-		sends = []
 		for var in self.input_variables:
 			if var.peer != dst:
 				continue
@@ -434,13 +442,10 @@ class PipelineBlock:
 			grads = var.get(var.to_send, mb_id).contiguous()
 
 			rank = self.placement[dst]
-			if options.get(OpOptions.BATCHED_COMM):
-				sends.append(dist.P2POp(dist.isend, grads, rank, group=self.pp_group))
-			else:
-				logger.debug(f"{self} - Sending gradients to rank {rank}")
-				dist.isend(grads, rank, group=self.pp_group)
-
-		return sends  # if not batched, sends is still empty and therefore Falsy
+			logger.debug(f"{self} - Sending gradients to rank {rank}")
+			work = dist.isend(grads, rank, group=self.send_pgs["bwd"][dst])
+			if _is_mpi():
+				self.send_ops.append(work)
 
 	def recv_forward(self, mb_id, mb_size, **options):
 		"""
@@ -449,8 +454,6 @@ class PipelineBlock:
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		src = options.get("src")
 
@@ -458,10 +461,9 @@ class PipelineBlock:
 			return
 
 		# If some metadata is missing, it should be received from the previous block before actual data
-		if any(not var.metadata for var in self.input_variables):
+		if any(not var.metadata and var.peer == src for var in self.input_variables):
 			self._receive_metadata(src)
 
-		recvs = []
 		# We couple buffer and work objects for now so that we can wait at the right moment
 		for var in self.input_variables:
 			if var.peer != src:
@@ -470,16 +472,10 @@ class PipelineBlock:
 			buffer = var.metadata.get_buffer(mb_size)
 
 			rank = self.placement[src]
-			if options.get(OpOptions.BATCHED_COMM):
-				recvs.append(dist.P2POp(dist.irecv, buffer, rank, group=self.pp_group))
-				work = None
-			else:
-				logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
-				work = dist.irecv(buffer, rank, group=self.pp_group)
+			logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
+			work = dist.irecv(buffer, rank, group=self.recv_pgs["fwd"][src])
 
 			var.set(var.to_process, mb_id, (work, buffer.requires_grad_(True)))
-
-		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
 	def recv_backward(self, mb_id, mb_size, **options):
 		"""
@@ -488,15 +484,12 @@ class PipelineBlock:
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
 		:param **options: options to modify the send behaviour
-		:return: If the communications need to be batched, returns them
-		:rtype: List[dist.P2POp] or None
 		"""
 		src = options.get("src")
 
 		if src is None or self.placement[src] == self.rank:
 			return
 
-		recvs = []
 		for var in self.output_variables:
 			for target in var:
 				if target.peer != src:
@@ -505,16 +498,10 @@ class PipelineBlock:
 				buffer = target.metadata.get_buffer(mb_size)
 
 				rank = self.placement[src]
-				if options.get(OpOptions.BATCHED_COMM):
-					recvs.append(dist.P2POp(dist.irecv, buffer, rank, group=self.pp_group))
-					work = None
-				else:
-					logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
-					work = dist.irecv(buffer, rank, group=self.pp_group)
+				logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
+				work = dist.irecv(buffer, rank, group=self.recv_pgs["bwd"][src])
 
 				target.set(target.to_process, mb_id, (work, buffer))
-
-		return recvs  # if not batched, recvs is still empty and therefore Falsy
 
 	def all_reduce_param_grads(self, **options):
 		"""
@@ -525,7 +512,8 @@ class PipelineBlock:
 		if self.dp_group is None:
 			return
 		for _, p in sorted(self.model.named_parameters()):
-			dist.all_reduce(p.grad.data, group=self.dp_group, op=dist.ReduceOp.AVG)
+			if p.grad is not None:
+				dist.all_reduce(p.grad.data, group=self.dp_group, op=dist.ReduceOp.AVG, async_op=True)
 
 	def scale_grads(self, batch_size):
 		"""
@@ -535,7 +523,7 @@ class PipelineBlock:
 		:type batch_size: int
 		"""
 		for p in self.model.parameters():
-			if p.requires_grad:
+			if p.requires_grad and p.grad is not None:
 				p.grad.data /= batch_size
 
 	def _receive_metadata(self, src):
@@ -556,7 +544,7 @@ class PipelineBlock:
 				rank = self.placement[src]  # we resolve the actual rank now
 				logger.debug(f"{self} - Receiving metadata from {rank}")
 				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=rank, group=self.pp_group)
+				dist.recv(metadata, src=rank, group=self.recv_pgs["fwd"][src])
 				var.metadata = TensorMetadata.from_tensor(metadata)
 
 		logger.debug(f"{self} - Registered metadata {[var for var in self.input_variables]} from {src}")
@@ -578,7 +566,7 @@ class PipelineBlock:
 
 				rank = self.placement[dst]  # we resolve the actual rank now
 				logger.debug(f"{self} - Sending metadata of {target.name} = {target.metadata} to {rank}")
-				dist.send(target.metadata.to_tensor(), dst=rank, group=self.pp_group)
+				dist.send(target.metadata.to_tensor(), dst=rank, group=self.send_pgs["fwd"][dst])
 				target.was_metadata_sent = True
 
 	def _register_out_metadata(self, output):
@@ -595,6 +583,18 @@ class PipelineBlock:
 				)  # omit batch dimension ; if the tensor is not batched, this is wrong!
 			logger.debug(f"{self} - registered output metadata {var[0].metadata} for {var[0].name}")
 
+	def _wait_for_send_ops(self):
+		"""
+		With MPI process groups, tensors sent by a P2P are held by the AsyncWork object.
+		If we don't keep a reference to them, they are garbage collected and the memory is lost.
+		Instead, we keep a reference to the AsyncWork object and wait for it at the end (when it won't slow down anything).
+		"""
+		for op in self.send_ops:
+			op.wait()
+		self.send_ops.clear()
+		self.fwd_compute_events.clear()
+		self.bwd_compute_events.clear()
+
 	def _offload_dw(self, to="cpu"):
 		"""
 		Offload the gradients and activations saved between B and W. The computation will be done on the new device.
@@ -606,13 +606,28 @@ class PipelineBlock:
 			if isinstance(module, LayerDW):
 				module.offload_last(to)
 
+	def _destroy_process_groups(self):
+		if self.dp_group:
+			logger.debug(
+				f"Destroying DP group with members {dist.get_process_group_ranks(self.dp_group)}"
+			)
+			dist.destroy_process_group(self.dp_group)
+		for recv_pg in self.recv_pgs["fwd"].values():
+			dist.destroy_process_group(recv_pg)
+		for send_pg in self.send_pgs["fwd"].values():
+			dist.destroy_process_group(send_pg)
+		for recv_pg in self.recv_pgs["bwd"].values():
+			dist.destroy_process_group(recv_pg)
+		for send_pg in self.send_pgs["bwd"].values():
+			dist.destroy_process_group(send_pg)
+
 	def backward_inputs(self, mb_id, **options):
 		"""
 		Perform the backward pass for the inputs of the model
 
 		Possible options:
-		- RBF_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
-		- RBB_STRATEGY: function(name, module) -> (bool, bool) - Indicator function deciding if a module's gradients should be recomputed during backward w.r.t params, and if the module is the last one to be recomputed (assuming sequential model)
+		- RECOMPUTE_ACTIVATIONS: bool - Whether to recompute the activations of the model before W
+		- RECOMPUTE_GRADIENTS: bool - Whether to recompute the gradients of the activations before W
 		"""
 		# We need inputs to get their gradients later on
 		# TODO: we don't actually need their data! find a way to get gradients without them (maybe GradientEdge?)
@@ -632,42 +647,48 @@ class PipelineBlock:
 		# Maybe we should time this and add to compute time, but it's probably negligible
 		output_grads = []
 		for output_var in self.output_variables:
+			logger.debug(f"{self} - Waiting for {output_var[0]}")
 			grad_accumulator = output_var[0].wait_and_pop(mb_id)
 			for dst in output_var[1:]:
+				logger.debug(f"{self} - Waiting for {dst}")
 				grad = dst.wait_and_pop(mb_id)
 				grad_accumulator += grad
 			output_grads.append(grad_accumulator)
 
 		# Get strategies from options
-		rbf_strategy = options.get(OpOptions.RBF_STRATEGY, lambda *_: False)
-		rbb_strategy = options.get(OpOptions.RBB_STRATEGY, None)
-
-		# Register hooks for backward
-		handles = self.remat_manager.register_backward_hooks(rbb_strategy, mb_id)
+		recompute_activations = options.get(OpOptions.RECOMPUTE_ACTIVATIONS, False)
+		recompute_gradients = options.get(OpOptions.RECOMPUTE_GRADIENTS, False)
 
 		input_grads = self._compute_backward_inputs(
 			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
 		)
 
-		# Clean up hooks
-		for handle in handles:
-			handle.remove()
+		if torch.cuda.is_available() and _is_mpi():
+			self.bwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
 				module.move_last_computed("grad_output", mb_id)
+				# sometimes a module does not use some of its submodules -> input/grad_output are not saved
+				if recompute_gradients and not module.is_empty("grad_output"):
+					module.delete("grad_output", mb_id)
+
 				# If we used checkpointing, we need to move the input as well
 				if getattr(module, "last_input", None) is not None:
 					module.move_last_computed("input", mb_id)
+
+				if recompute_activations and not module.is_empty("input"):
+					module.delete("input", mb_id)
 
 		# Register the gradients to send
 		for input_var, value in zip(self.input_variables, input_grads):
 			input_var.set(input_var.to_send, mb_id, value)
 
-		# We may need input to recompute F before W; we save them here and let W delete them
-		# This is not optimal, we could check here if any module needs recomputation to delete them right away
-		for input_var, value in zip(self.input_variables, inputs):
-			input_var.set(input_var.saved, mb_id, value)
+		# We may need input to recompute F before W; we save them here and let RF delete them
+		if recompute_activations:
+			for input_var, value in zip(self.input_variables, inputs):
+				input_var.set(input_var.saved, mb_id, value)
 
-		# Process cleanup based on strategies
-		self.remat_manager.process_after_backward(rbf_strategy, rbb_strategy, mb_id)
+		if recompute_gradients:
+			for output_var, value in zip(self.output_variables, output_grads):
+				output_var[0].set(output_var[0].to_process, mb_id, value)
