@@ -7,17 +7,18 @@ import torch
 import torch.distributed as dist
 
 from elf import (
-	Pipeline,
-	PipelineConfig,
 	get_sources_targets_sequential,
+	replace_layer_with_layer_dw,  # noqa: F401
+	PipelineConfig,
 	Placement,
-	replace_linear_with_linear_dw,  # noqa: F401
+	Pipeline,
 )
 from elf.registry import SCHEDULERS
 from benchmarks.benchmark_utils import (
 	get_checkpointed_scheduler,
-	get_offloaded_scheduler,
 	get_handcrafted_partition,
+	get_offloaded_scheduler,
+	write_detailed_stats,
 	meta_to_device,
 	init_dist,
 )
@@ -114,22 +115,6 @@ class MixedPrecisionOptimizer:
 	def __getattr__(self, name):
 		"""Forward other attributes to the underlying optimizer."""
 		return getattr(self.optimizer, name)
-
-
-def write_detailed_stats(detailed_stats, stats_file):
-	rank, world_size = dist.get_rank(), dist.get_world_size()
-	for r in range(world_size):
-		dist.barrier()
-		if r == rank:
-			if r == 0:
-				with open(stats_file, "w") as f:
-					json.dump({rank: detailed_stats}, f, indent=2)
-			else:
-				with open(stats_file, "r") as f:
-					stats_data = json.load(f)
-				stats_data[rank] = detailed_stats
-				with open(stats_file, "w") as f:
-					json.dump(stats_data, f, indent=2)
 
 
 def parse_args():
@@ -254,7 +239,7 @@ def main():
 	start_time = time.time()
 	with torch.device("meta"):
 		model, dtype = build_model_from_args(args)
-		replace_linear_with_linear_dw(model, "meta")
+		replace_layer_with_layer_dw(model, "meta")
 
 	if rank == 0:
 		print(f"The model has {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
@@ -267,7 +252,7 @@ def main():
 	else:
 		parts = model
 		sources, targets = None, None
-		sample = model.get_sample(mb_size, dtype=dtype)
+		sample = model.get_sample(mb_size, dtype=dtype, device="cuda")
 		if rank == 0:
 			model = meta_to_device(model, "cuda")
 
@@ -295,8 +280,8 @@ def main():
 	for _ in range(5):  # Warmup
 		optimizer.zero_grad()
 		y, loss = pipeline(
-			model.get_sample(batch_size, dtype=dtype),
-			model.get_target(batch_size, dtype=dtype),
+			model.get_sample(batch_size, dtype=dtype, device="cuda"),
+			model.get_target(batch_size, dtype=dtype, device="cuda"),
 			model.loss_fn,
 			split_size=mb_size,
 		)

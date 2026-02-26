@@ -236,7 +236,7 @@ def check_schedule_validity(schedule):
 	.. warning::
 		Some of these checks may not pass for your custom, specific schedule. If this is the case, please report it to the developers.
 	"""
-	n_ranks = len(set(op.rank for op in schedule))
+	ranks = set(op.rank for op in schedule)
 	n_mb = len(set(op.mb_id for op in schedule if op.mb_id is not None))
 
 	def find(nodes, cond):
@@ -245,7 +245,7 @@ def check_schedule_validity(schedule):
 				return i, node
 		return -1, None
 
-	for rank in range(n_ranks):
+	for rank in ranks:
 		rank_ops = [op for op in schedule if op.rank == rank]
 		rank_mb_ids = set(op.mb_id for op in rank_ops if op.mb_id is not None)
 		assert len(rank_mb_ids) == n_mb, (
@@ -265,6 +265,6 @@ def check_schedule_validity(schedule):
 			assert k != -1 or j == -1, (
 				f"[Rank {rank}] Backward params should be present for microbatch {mb_id} since backward inputs is present"
 			)
-			assert j < k, (
+			assert j <= k, (
 				f"[Rank {rank}] Backward params should be after backward inputs for microbatch {mb_id}"
 			)

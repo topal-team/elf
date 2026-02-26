@@ -2,19 +2,18 @@
 Various useful classes / functions
 """
 
+import math
 import time
 import logging
 
-
 import torch
-import torch.distributed as dist
 import torch.nn as nn
+import torch.distributed as dist
+
+from torch.utils.flop_counter import register_flop_formula
 
 from typing import List
 
-logger = logging.getLogger(__name__)
-
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 dtypes = [
@@ -25,6 +24,9 @@ dtypes = [
 	torch.int16,
 	torch.int32,
 	torch.int64,
+	torch.complex32,
+	torch.complex64,
+	torch.complex128,
 	torch.bool,
 ]
 
@@ -128,6 +130,21 @@ class Placement(List[int]):
 			return Placement([i for i in range(pp)] * 2)
 		else:
 			return Placement([i for i in range(pp)])
+
+	def head(self):
+		return self[0]
+
+	def tail(self):
+		return self[-1]
+
+	def add_offset(self, offset: int):
+		return Placement([i + offset for i in self])
+
+	def is_tail(self, rank: int):
+		return rank == self[-1]
+
+	def is_head(self, rank: int):
+		return rank == self[0]
 
 
 class TensorMetadata:
@@ -355,8 +372,19 @@ def send_models(models, dst, group=None):
 
 			module_path, leaf = _split_qualified_name(name)
 			submod = model.get_submodule(module_path) if module_path != "" else model
+			# Save original parameter object so we can restore it after pickling
 			model_saved_params.append((submod, leaf, p))
-			submod._parameters[leaf] = None
+
+			# During pickling (triggered by send_object_list), some module types
+			# such as torch.fx.GraphModule may perform symbolic tracing and expect
+			# parameters to be non-None. However, we do not want to serialize the
+			# full GPU tensors on the CPU channel.
+			#
+			# To avoid GPU->CPU transfers while still satisfying these expectations,
+			# we temporarily replace the parameter with a meta placeholder; the real GPU tensor
+			# is sent separately below via p2p.
+			dummy_param = nn.Parameter(torch.empty_like(p, device="meta"), requires_grad=False)
+			submod._parameters[leaf] = dummy_param  # type: ignore
 
 		# Collect buffer names and tensors
 		buffer_names = []
@@ -374,8 +402,13 @@ def send_models(models, dst, group=None):
 
 			module_path, leaf = _split_qualified_name(name)
 			submod = model.get_submodule(module_path) if module_path != "" else model
+			# Save original buffer so we can restore it after pickling
 			model_saved_buffers.append((submod, leaf, b))
-			submod._buffers[leaf] = None
+			# Same rationale as for parameters above: avoid serializing large
+			# GPU tensors while keeping non-None buffers for modules that rely
+			# on them during pickling.
+			dummy_buffer = nn.Parameter(torch.empty_like(b, device="meta"), requires_grad=False)
+			submod._buffers[leaf] = dummy_buffer
 
 		payloads.append((model, param_names, param_requires, buffer_names))
 		per_model_params.append(param_tensors)
@@ -469,6 +502,70 @@ def broadcast_models(models, src, group=None):
 	.. warning::
 		Efficient broadcasting the same way as :func:`send_models` and :func:`recv_models` is not supported yet. This function may take a lot of time if sending GPU models.
 	"""
-	dist.broadcast_object_list(models, src, group)
-	for m in models:
-		m.cuda()
+	dist.broadcast_object_list(models, src=src, group=group)
+	for model in models:
+		model.cuda()
+
+
+def prod(iterable):
+	if isinstance(iterable, (int, float)):
+		return iterable
+
+	acc = 1
+	for x in iterable:
+		acc *= x
+
+	return acc
+
+
+aten = torch.ops.aten
+
+
+@register_flop_formula([aten.add, aten.mul, aten.sub, aten.div])
+def ewise_binary_flops(a_shape, b_shape, *args, out_shape=None, **kwargs) -> int:
+	return prod(a_shape)
+
+
+@register_flop_formula([aten.abs])
+def ewise_unary_flops(a_shape, *args, out_shape=None, **kwargs) -> int:
+	return prod(a_shape)
+
+
+@register_flop_formula(aten.gelu)
+def gelu_flops(x_shape, *args, **kwargs) -> int:
+	# GELU with approximate='none' (default) uses: 0.5 * x * (1 + erf(x / sqrt(2)))
+	# Breaking down operations per element:
+	# - x / sqrt(2): div (1 FLOP)
+	# - erf(...): error function (~30 FLOPs for approximation)
+	# - 1 + erf(...): add (1 FLOP)
+	# - x * (...): mul (1 FLOP)
+	# - 0.5 * (...): mul (1 FLOP)
+	# Total: ~34 FLOPs per element
+	return 34 * prod(x_shape)
+
+
+@register_flop_formula([aten.gelu_backward])
+def gelu_backward_flops(x_shape, *args, **kwargs) -> int:
+	return gelu_flops(x_shape)  # it's not significantly different from the forward pass
+
+
+@register_flop_formula([aten._fft_c2c])
+def fft_flops_c2c(x_shape, dim, *args, **kwargs) -> int:
+	# Complex-to-complex FFT: 5 * N * log2(N) FLOPs per dimension
+	# where N is the size of the dimension being transformed
+	total_flops = 0
+	dims = dim if isinstance(dim, (list, tuple)) else [dim]
+
+	for d in dims:
+		n = x_shape[d]
+		if n > 1:
+			total_flops += 5 * n * math.log2(n)
+
+	# Multiply by the number of elements in all other dimensions
+	other_dims_size = prod(x_shape) // prod(x_shape[d] for d in dims)
+	return int(total_flops * other_dims_size)
+
+
+@register_flop_formula([aten._fft_r2c])
+def fft_flops_r2c(x_shape, dim, *args, **kwargs) -> int:
+	return fft_flops_c2c(x_shape, dim) // 2

@@ -1,6 +1,7 @@
 torch>2.4
-pytest
 pyyaml
 psutil
 dill
 numpy
+pytest
+scipy

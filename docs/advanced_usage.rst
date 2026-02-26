@@ -588,6 +588,8 @@ Set ``dp > 1`` to use data parallelism with pipeline parallelism:
 Ranks are organized in a 2D grid: ``[pp_rank, dp_rank]``.
 Parameter gradients are all-reduced between replicas at the end of each iteration.
 
+The assumption is that the placement for each pipeline is exactly the same as the first one, shifted by the PP degree.
+
 Advanced Partitioning Control
 ------------------------------
 

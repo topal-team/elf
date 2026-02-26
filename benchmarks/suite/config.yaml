@@ -1,0 +1,58 @@
+# Benchmark Suite Configuration
+# This configuration defines the models, training parameters, and output settings
+# for the benchmark suite that tracks performance across development.
+
+# Models to benchmark
+models:
+  - name: FullTransformer
+    type: FullTransformer
+    params:
+      input_dim: 20000
+      hidden_dim: 4096
+      n_blocks: 16
+      seq_len: 4096
+      num_heads: 32
+      ffn_dim: 16384
+      dropout: 0.1
+      sdp_backend: fatt3
+
+  - name: SimpleResNet
+    type: SimpleResNet
+    params:
+      nblocks: 64
+      channels: 512
+      num_classes: 1000
+
+# GPU scales to test (number of GPUs)
+scales: [4, 8]
+
+# Training parameters
+training:
+  batch_size: 32
+  mb_size: 4
+  niters: 30
+  warmup_iters: 5
+  dtype: bfloat16
+
+# Pipeline settings
+pipeline:
+  partitioner: dagP  # Options: naive, constrained, metis, dagP, handcrafted (for manual)
+  scheduler: zbh1
+  dp: 1
+
+# Hardware configuration
+hardware:
+  backend: nccl
+  device_type: h100
+
+# Output settings
+output:
+  results_dir: results
+  results_filename: benchmark_suite_results.json
+
+# WandB configuration
+wandb:
+  enabled: false
+  project: elf-benchmark-suite
+  entity: null
+  tags: [benchmark, performance-tracking]

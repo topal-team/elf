@@ -61,9 +61,6 @@ def check_partition(graph, parts, inputs, outputs):
 def create_subgraph(graph_module, nodes, inputs, outputs):
 	"""
 	Creates a module from one block of a partition.
-	The module takes as input a dictionary {inputs1: value1, inputs2: value2, ..} where the keys are the values in parameter inputs.
-	and returns a similar dictionary, with keys from parameter outputs.
-
 	:return: a graph that can be used like a nn.Module
 	:rtype: fx.GraphModule
 	"""
@@ -87,19 +84,25 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
 	return torch.fx.GraphModule(graph_module, subgraph)
 
 
-def get_inputs_outputs(parts):
+def _compute_part_dependencies(parts):
 	"""
-	Finds the dependencies between each block of a partition.
-	Removes inputs/outputs nodes of each part to merge them into 2 nodes.
-	The order of inputs and outputs is consistent.
+	Compute inputs, outputs, and dependencies for each part.
 
 	:param parts: partition of a model
 	:type parts: List[List[fx.Node]]
-	:return: 2 dicts, one for inputs and one for outputs, respectively. Each one has the format: {partition_idx: [target1, target2, ..]} where targets are node names.
-	:rtype: Dict[int, List[str]], Dict[int, List[str]]
+	:return: inputs dict, outputs dict, dependencies dict
+	:rtype: Tuple[Dict[int, List[str]], Dict[int, List[str]], Dict[int, Set[int]]]
 	"""
-	inputs = {i: [] for i in range(len(parts))}
-	outputs = {i: [] for i in range(len(parts))}
+	n = len(parts)
+	inputs = {i: [] for i in range(n)}
+	outputs = {i: [] for i in range(n)}
+	dependencies = {i: set() for i in range(n)}
+
+	# Build a mapping from node to its part index
+	node_to_part = {}
+	for i, part in enumerate(parts):
+		for node in part:
+			node_to_part[node] = i
 
 	def add_outputs(i, arg):
 		if isinstance(arg, (list, tuple)):
@@ -111,51 +114,134 @@ def get_inputs_outputs(parts):
 			for value in arg.values():
 				add_outputs(i, value)
 
-	i = len(parts)
-	for part in reversed(parts):
-		i -= 1
-		to_remove = []
+	# Process each part to identify inputs and outputs
+	for i, part in enumerate(parts):
 		for node in part:
+			# Handle existing placeholder nodes from original graph
 			if node.op == "placeholder":
 				inputs[i].append(node.target)
-				to_remove.append(node)
 				continue
-			elif node.op == "output":
+
+			# Handle existing output nodes from original graph
+			if node.op == "output":
 				for arg in node.args:
 					add_outputs(i, arg)
-				to_remove.append(node)
 				continue
+
+			# Find dependencies that come from outside this part
 			for dep in node.all_input_nodes:
-				if dep not in part and dep.name not in inputs[i]:
+				if dep not in part:
 					if dep.op == "placeholder":
-						inputs[i].append(dep.target)
+						if dep.target not in inputs[i]:
+							inputs[i].append(dep.target)
 					else:
-						inputs[i].append(dep.name)
-					if i != 0:
-						prev = i - 1
-						while prev >= 0:
-							if dep in parts[prev]:
-								break
-							prev -= 1
+						if dep.name not in inputs[i]:
+							inputs[i].append(dep.name)
 
-						if prev == -1:
-							continue
+						if dep in node_to_part:
+							source_part = node_to_part[dep]
+							if dep.name not in outputs[source_part]:
+								outputs[source_part].append(dep.name)
 
-						# Return each tensor only once ; sending it to multiple targets is managed later
-						if dep.name not in outputs[prev]:
-							outputs[prev].append(dep.name)
+							if source_part != i:
+								dependencies[i].add(source_part)
 
-		for node in to_remove:
-			part.remove(node)
+	return inputs, outputs, dependencies
 
-	# Make sure the order is consistent
+
+def _topological_sort_indices(dependencies):
+	"""
+	Topologically sort parts based on their dependencies using Kahn's algorithm.
+
+	:param dependencies: dict mapping part index to set of part indices it depends on
+	:type dependencies: Dict[int, Set[int]]
+	:return: list of part indices in topological order
+	:rtype: List[int]
+	"""
+	n = len(dependencies)
+	in_degree = {i: len(dependencies[i]) for i in range(n)}
+	queue = [i for i in range(n) if in_degree[i] == 0]
+	sorted_indices = []
+
+	while queue:
+		queue.sort()
+		current = queue.pop(0)
+		sorted_indices.append(current)
+
+		for i in range(n):
+			if current in dependencies[i]:
+				in_degree[i] -= 1
+				if in_degree[i] == 0:
+					queue.append(i)
+
+	if len(sorted_indices) != n:
+		raise Exception("Cycle detected in partition dependencies")
+
+	return sorted_indices
+
+
+def _reorder_by_indices(items, indices):
+	"""
+	Reorder a list or dict by a list of indices.
+
+	:param items: list or dict to reorder
+	:param indices: list of indices in desired order
+	:return: reordered list or dict
+	"""
+	if isinstance(items, list):
+		return [items[idx] for idx in indices]
+	elif isinstance(items, dict):
+		return {new_idx: items[old_idx] for new_idx, old_idx in enumerate(indices)}
+	else:
+		raise TypeError(f"Unsupported type for reordering: {type(items)}")
+
+
+def _remove_placeholder_output_nodes(parts):
+	"""
+	Remove placeholder and output nodes from parts.
+
+	:param parts: partition of a model
+	:type parts: List[List[fx.Node]]
+	:return: new parts without placeholder/output nodes
+	:rtype: List[List[fx.Node]]
+	"""
+	cleaned_parts = []
+	for part in parts:
+		cleaned_part = [node for node in part if node.op not in ("placeholder", "output")]
+		cleaned_parts.append(cleaned_part)
+	return cleaned_parts
+
+
+def get_inputs_outputs(parts):
+	"""
+	Compute inputs and outputs for each part, reorder parts topologically,
+	and remove placeholder/output nodes.
+
+	:param parts: partition of a model
+	:type parts: List[List[fx.Node]]
+	:return: reordered parts, inputs dict, outputs dict
+	:rtype: Tuple[List[List[fx.Node]], Dict[int, List[str]], Dict[int, List[str]]]
+	"""
+	# Compute dependencies between parts
+	inputs, outputs, dependencies = _compute_part_dependencies(parts)
+
+	# Topologically sort parts
+	sorted_indices = _topological_sort_indices(dependencies)
+
+	# Reorder everything according to topological order
+	parts = _reorder_by_indices(parts, sorted_indices)
+	inputs = _reorder_by_indices(inputs, sorted_indices)
+	outputs = _reorder_by_indices(outputs, sorted_indices)
+
+	# Remove placeholder and output nodes
+	parts = _remove_placeholder_output_nodes(parts)
+
+	# Sort inputs/outputs for consistency
 	for i in range(len(parts)):
-		if i != 0:
-			inputs[i].sort()
-		if i != len(parts) - 1:
-			outputs[i].sort()
+		inputs[i].sort()
+		outputs[i].sort()
 
-	return inputs, outputs
+	return parts, inputs, outputs
 
 
 def get_sources_targets(inputs, outputs):
@@ -220,6 +306,25 @@ def split_graph(graph, times, memories, n, partitioner):
 	return partitioner(graph, times, memories, n)
 
 
+def _create_subgraphs(graph_module, parts, inputs, outputs):
+	"""
+	Create subgraph modules from partitioned nodes.
+
+	:param graph_module: original graph module
+	:param parts: partitioned graph nodes
+	:param inputs: inputs dict for each part
+	:param outputs: outputs dict for each part
+	:return: list of subgraph modules
+	:rtype: List[fx.GraphModule]
+	"""
+	blocks = []
+	for i, part in enumerate(parts):
+		subgraph = create_subgraph(graph_module, part, inputs[i], outputs[i])
+		remove_inplace_leaves(subgraph)
+		blocks.append(subgraph)
+	return blocks
+
+
 def partition_graph(model, n, sample, partitioner, tracer):
 	"""
 	Splits a graph into n parts of roughly equal time.
@@ -246,36 +351,39 @@ def partition_graph(model, n, sample, partitioner, tracer):
 	"""
 	model.train()
 
-	# 1 - Trace the graph
+	# Trace and prepare the graph
 	graph = tracer(model, sample)
-
 	logger.info(f"Extracted graph has {len(graph.graph.nodes)} nodes")
+	# This is only correct if the graph is functionalized, i.e. no nodes have side effects.
+	# We don't have that guarantee here
+	# graph = prune_graph(graph)
 
-	# 2 - Profile operations
+	# Profile operations
 	times, memories = profile_operations(graph, sample)
 
-	# 3 - Partition using the selected partitioner
+	# Partition the graph
 	parts = split_graph(graph, times, memories, n, partitioner)
-
 	assert len(parts) == n, f"Expected {n} parts, got {len(parts)}"
 
-	# 4 - Find connections between parts
-	inputs, outputs = get_inputs_outputs(parts)
+	# Compute connections, reorder topologically, and clean up nodes
+	parts, inputs, outputs = get_inputs_outputs(parts)
 	sources, targets = get_sources_targets(inputs, outputs)
+
+	n = len(inputs)
 	signatures = [Signature(inputs[i], outputs[i], sources[i], targets[i]) for i in range(n)]
+
+	estimated_times = [sum(times.get(node.name, 0) for node in part) for part in parts]
+	estimated_mems = [sum(memories.get(o, 0) for o in out) / (2**20) for out in outputs.values()]
+
+	logger.info(f"Estimated times: {['%.3fs' % t for t in estimated_times]}")
+	logger.info(f"Estimated memory transfers: {['%.1fMB' % m for m in estimated_mems]}")
+
+	for i in range(n):
+		logger.debug(f"Part {i} - signature = {signatures[i]}")
 
 	check_partition(graph.graph, parts, inputs, outputs)
 
-	# 5 - Create subgraphs
-	blocks = []
-	for i, p in enumerate(parts):
-		subgraph = create_subgraph(graph, p, inputs[i], outputs[i])
-		remove_inplace_leaves(subgraph)
-		blocks.append(subgraph)
-		logger.debug(f"Part {i} - signature = {signatures[i]}")
+	# Create subgraph modules
+	blocks = _create_subgraphs(graph, parts, inputs, outputs)
 
-	estimated_times = [sum([times.get(n.name, 0) for n in part]) for part in parts]
-	estimated_mems = [sum([memories.get(o, 0) for o in out]) / (2**20) for out in outputs.values()]
-	logger.info(f"Estimated times : {['%.3fs' % t for t in estimated_times]}")
-	logger.info(f"Estimated memory transfers : {['%.1fMB' % t for t in estimated_mems]}")
 	return blocks, signatures

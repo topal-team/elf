@@ -2,6 +2,7 @@ import os
 import time
 import copy
 import logging
+import json
 
 from typing import List
 
@@ -49,11 +50,29 @@ def mem_state():
 	return f"Allocated: {allocated / (2**30):.2f}GB, Reserved: {reserved / (2**30):.2f}GB, Free: {free / (2**30):.2f} / {total / (2**30):.2f} GB, Inactive: {inactive / (2**30):.2f}GB"
 
 
-def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntrials=1):
+def write_detailed_stats(detailed_stats, stats_file):
+	rank, world_size = dist.get_rank(), dist.get_world_size()
+	for r in range(world_size):
+		dist.barrier()
+		if r == rank:
+			if r == 0:
+				with open(stats_file, "w") as f:
+					json.dump({rank: detailed_stats}, f, indent=2)
+			else:
+				with open(stats_file, "r") as f:
+					stats_data = json.load(f)
+				stats_data[rank] = detailed_stats
+				with open(stats_file, "w") as f:
+					json.dump(stats_data, f, indent=2)
+
+
+def bench(
+	model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntrials=1, stats_file=None
+):
 	local_rank = int(os.getenv("LOCAL_RANK"))
 	world_size = dist.get_world_size()
 	rank = dist.get_rank()
-	n_iterations = 15
+	n_iterations = 16
 
 	microbatch_size = 1
 	n_micro_batches = nmb or world_size * 2
@@ -76,8 +95,11 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntr
 	# test_correctness(model, pipe)
 
 	# Warmup iterations
-	for _ in range(3):
-		_ = pipe(
+	for i in range(3):
+		logger.info(
+			f"Before warmup iteration {i}: rank {rank} has {torch.cuda.memory_allocated() / (2**30):.2f}GB in use"
+		)
+		pipe(
 			model.get_sample(batch_size, dtype, device="cuda"),
 			model.get_target(batch_size, dtype, device="cuda"),
 			loss_fn,
@@ -98,8 +120,8 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntr
 
 		# Time n iterations
 		for i in range(n_iterations):
-			pipe.zero_grad()
-			_ = pipe(
+			pipe.zero_grad(set_to_none=False)
+			pipe(
 				model.get_sample(batch_size, dtype, device="cuda"),
 				model.get_target(batch_size, dtype, device="cuda"),
 				loss_fn,
@@ -119,6 +141,9 @@ def bench(model, parts, scheduler, placement, dtype=torch.float32, nmb=None, ntr
 		[torch.tensor(0.0, device=local_rank) for _ in range(world_size)] if rank == 0 else None
 	)
 	dist.gather(torch.tensor(peak_mem, device=local_rank), all_peak_mems, dst=0)
+
+	if stats_file is not None:
+		write_detailed_stats(pipe.detailed_stats, stats_file)
 
 	pipe.clear()
 	return np.median(times).item(), all_peak_mems, times

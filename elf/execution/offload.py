@@ -294,7 +294,7 @@ class OffloadToCPU:
 		return tensor
 
 	def _clear_cache(self):
-		if self._prefetch_stream is not None:
+		if self._prefetch_stream is not None and len(self._prefetch_events) > 0:
 			self._prefetch_stream.synchronize()
 
 		# Return CPU buffers to pool when possible

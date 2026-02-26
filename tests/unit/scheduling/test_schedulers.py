@@ -267,3 +267,24 @@ def test_schedulers():
 					pytest.fail(
 						f"Scheduler '{scheduler_name}' failed with placement={placement}, n_micro_batches={n_micro_batches}: {e}"
 					)
+
+
+@pytest.mark.unit
+def test_inference_scheduler():
+	"""Test that inference scheduler produces no backward operations."""
+	placement = [0, 1, 2, 3]
+	n_micro_batches = 4
+	sources, targets = get_sources_targets_sequential(placement)
+	signatures = signatures_from_sources_targets(sources, targets)
+
+	scheduler = SCHEDULERS["inference"]
+	schedule = scheduler(placement, n_micro_batches, signatures)
+
+	backward_ops = [
+		op
+		for op in schedule
+		if op.op
+		in [OperationType.BACKWARD_INPUTS, OperationType.BACKWARD_PARAMS, OperationType.LOSS_BACKWARD]
+	]
+
+	assert len(backward_ops) == 0, "Inference schedule should not have backward operations"

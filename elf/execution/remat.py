@@ -61,8 +61,10 @@ class RematManager:
 					if remat_strategy(name, module):
 						# Delete unwanted activations
 						for submodule in module.modules():
-							if isinstance(submodule, LayerDW) and not getattr(
-								submodule.ctx["input"][mb_id], "is_model_input", False
+							if (
+								isinstance(submodule, LayerDW)
+								and len(submodule.ctx["input"]) > mb_id
+								and not getattr(submodule.ctx["input"][mb_id], "is_model_input", False)
 							):
 								submodule.delete("input", mb_id)
 						# Restore original forwards

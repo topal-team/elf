@@ -1,8 +1,5 @@
-import sys
-
-sys.path.append(".")
 from elf.scheduling import OpOptions, OperationType, Operation
-from elf.scheduling.schedulers import _add_forward_pass, _add_backward_pass, _add_backward_params
+from elf.scheduling.schedulers import FixedSchedule
 from models.simple import Attention
 
 
@@ -11,29 +8,11 @@ class RematScheduler:
 
 	def __init__(self, solution):
 		self.solution = solution
+		self.scheduler = FixedSchedule(self.solution)
 
 	def __call__(self, placement, nmb, signatures):
-		# Create a new scheduler on the fly, that uses the order given from the solution
-		order = self.solution["order"]
+		schedule = self.scheduler(placement, nmb, signatures)
 
-		def new_base_scheduler(placement, nmb, signatures):
-			schedule = []
-			for optype, block_id, mb_id in order:
-				match optype:
-					case "f":
-						_add_forward_pass(
-							schedule, placement, block_id, mb_id, placement[block_id], signatures[block_id]
-						)
-					case "b":
-						_add_backward_pass(
-							schedule, placement, block_id, mb_id, placement[block_id], signatures[block_id]
-						)
-					case "w":
-						_add_backward_params(schedule, block_id, mb_id, placement[block_id])
-
-			return schedule
-
-		schedule = new_base_scheduler(placement, nmb, signatures)
 		for op in schedule.copy():
 			if op.op not in [OperationType.FORWARD, OperationType.BACKWARD_INPUTS]:
 				continue
@@ -97,7 +76,6 @@ class RematScheduler:
 
 		op.options[OpOptions.RECOMPUTE_ACTIVATIONS] = True
 
-		# Insert recompute activations operation
 		remat_fwd = self._insert_recompute_operation(
 			sched, op.block_id, op.mb_id, op.rank, OperationType.RECOMPUTE_FORWARD
 		)
@@ -110,7 +88,6 @@ class RematScheduler:
 
 		op.options[OpOptions.RECOMPUTE_GRADIENTS] = True
 
-		# Insert recompute backward operation
 		self._insert_recompute_operation(
 			sched, op.block_id, op.mb_id, op.rank, OperationType.RECOMPUTE_BACKWARD_INPUTS
 		)

@@ -6,19 +6,20 @@ from elf.zb_utils import LinearDW
 
 
 @pytest.mark.integration
-@pytest.mark.gpu
 def test_layerdw_correctness():
 	"""
 	Test case:
 	On a model that contains LinearDWs, perform 2 F+B (not W), then W on the first data. Check that model parameters are the same as performing regular F+B on the first data, without LinearDWs.
 	"""
-	if not torch.cuda.is_available():
-		pytest.skip("CUDA not available")
+	# Use cuda if available, otherwise cpu
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 	h = 128
-	groundtruth = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, h)).cuda()
+	groundtruth = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, h)).to(device)
 
-	zb_model = nn.Sequential(LinearDW(nn.Linear(h, h)), nn.ReLU(), LinearDW(nn.Linear(h, h))).cuda()
+	zb_model = nn.Sequential(LinearDW(nn.Linear(h, h)), nn.ReLU(), LinearDW(nn.Linear(h, h))).to(
+		device
+	)
 
 	def move_last_computed(mb_id):
 		for module in zb_model.modules():
@@ -35,10 +36,10 @@ def test_layerdw_correctness():
 
 	loss_fn = nn.MSELoss()
 
-	x1 = torch.randn(10, h, device=torch.device("cuda"))
-	x2 = torch.randn(10, h, device=torch.device("cuda"))
-	z1 = torch.randn(10, h, device=torch.device("cuda"))
-	z2 = torch.randn(10, h, device=torch.device("cuda"))
+	x1 = torch.randn(10, h, device=device)
+	x2 = torch.randn(10, h, device=device)
+	z1 = torch.randn(10, h, device=device)
+	z2 = torch.randn(10, h, device=device)
 
 	g1 = groundtruth(x1)
 	gt_loss = loss_fn(g1, z1)

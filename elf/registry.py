@@ -132,10 +132,12 @@ class SchedulerFn(Protocol):
 	Function that returns a list of operations to be performed.
 	"""
 
-	def __call__(self, placement: str, n_micro_batches: int, signatures: List[Any]) -> List[Any]:
+	def __call__(
+		self, placement: List[int], n_micro_batches: int, signatures: List[Any]
+	) -> List[Any]:
 		"""
-		:param placement: device on which each block is placed
-		:type placement: List[int]
+		:param placement: device on which each block is placed (Placement object, which is a List[int])
+		:type placement: Placement (List[int])
 		:param n_micro_batches: number of micro batches
 		:type n_micro_batches: int
 		:param signatures: signatures representing dependencies between blocks

@@ -1,34 +1,32 @@
 import os
-import sys
 import wandb
 import argparse
 
 import torch
-import torch.nn as nn
 import torch.distributed as dist
-
-sys.path.append("./")
 
 import elf
 import torch.distributed.pipelining as PiPPy
 
 from elf.utils import Timer
 from models.utils import add_transformer_args, build_model_from_args
-from benchmarks.benchmark_utils import meta_to_device
+from benchmarks.benchmark_utils import get_handcrafted_partition
 
 parser = argparse.ArgumentParser()
 
 # Model hyper-parameters
-add_transformer_args(parser, model_type="full")
+add_transformer_args(parser)
 
 # Script-specific arguments
 parser.add_argument("--pp", type=int, default=4, help="Pipeline parallelism degree")
 parser.add_argument("--run-id", type=str, default="", help="Run ID")
 parser.add_argument(
-	"--schedule", type=str, help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbv)"
+	"--schedule",
+	type=str,
+	help="Pipeline schedule type (supported: afab, 1f1b, megatron, zbh1, zbh2, zbv)",
 )
-parser.add_argument("--mb-size", type=int, default=2, help="Microbatch size")
-parser.add_argument("--niters", type=int, default=10, help="Number of iterations")
+parser.add_argument("--mb-size", type=int, help="Microbatch size")
+parser.add_argument("--niters", type=int, help="Number of iterations")
 parser.add_argument(
 	"--only",
 	type=str,
@@ -42,15 +40,11 @@ args = parser.parse_args()
 nmb = args.pp * 2
 batch_size = args.mb_size * nmb
 with torch.device("meta"):
-	model, dtype = build_model_from_args(args, model_type="full")
+	model, dtype = build_model_from_args(args)
 
 inputs = model.get_sample(batch_size, dtype)
 targets = model.get_target(batch_size, dtype)
 loss_fn = model.loss_fn
-
-assert args.nblocks >= args.pp, (
-	"Number of blocks must be greater than or equal to pipeline parallelism degree"
-)
 
 
 # TODO: use elf.Placement.default
@@ -91,7 +85,7 @@ def get_schedule(schedule_type, stages, nmb):
 		case "megatron":
 			assert len(stages) == 2
 			return PiPPy.ScheduleInterleaved1F1B(stages, nmb, loss_fn=loss_fn)
-		case "zbh1":
+		case "zbh1" | "zbh2":
 			assert len(stages) == 1
 			return PiPPy.ScheduleInterleavedZeroBubble(stages, nmb, loss_fn=loss_fn)
 		case "zbv":
@@ -99,28 +93,6 @@ def get_schedule(schedule_type, stages, nmb):
 			return PiPPy.ScheduleZBVZeroBubble(stages, nmb, loss_fn=loss_fn)
 		case _:
 			raise ValueError(f"Unknown schedule type '{schedule_type}' for PiPPy")
-
-
-def get_parts(rank, placement):
-	parts = []
-	blocks_per_stage = len(model.blocks) // len(placement)
-	start, end = 0, 0
-	for i, p in enumerate(placement):
-		end += blocks_per_stage + (1 if i < (len(model.blocks) % len(placement)) else 0)
-		if rank != p:
-			start = end
-			continue
-
-		if i == 0:
-			parts.append(nn.Sequential(model.embed, *model.blocks[start:end]))
-		elif i == len(placement) - 1:
-			parts.append(nn.Sequential(*model.blocks[start:end], model.head))
-		else:
-			parts.append(nn.Sequential(*model.blocks[start:end]))
-
-		start = end
-
-	return [meta_to_device(p) for p in parts]
 
 
 def find_stage_global_idx(rank, placement, local_idx):
@@ -137,7 +109,7 @@ def find_stage_global_idx(rank, placement, local_idx):
 
 def benchmark_pippy():
 	placement = get_placement(args.schedule, world_size)
-	parts = get_parts(rank, placement)
+	parts = get_handcrafted_partition(model, rank, placement)
 	n_stages = len(placement)
 	stages = [
 		PiPPy.PipelineStage(
@@ -151,9 +123,9 @@ def benchmark_pippy():
 		input_args = []
 		input_kwargs = {}
 		if rank == placement[0]:
-			input_args.append(inputs.clone())
+			input_args.append(inputs)
 		if rank == placement[-1]:
-			input_kwargs["target"] = targets.clone()
+			input_kwargs["target"] = targets
 
 		return input_args, input_kwargs
 
@@ -173,14 +145,12 @@ def benchmark_pippy():
 
 def benchmark_elf():
 	placement = get_placement(args.schedule, world_size)
-	parts = get_parts(rank, placement)
+	parts = get_handcrafted_partition(model, rank, placement)
 
 	scheduler = args.schedule
-	if scheduler == "megatron":
-		scheduler = "1f1b"  # Not the same name
 
 	for part in parts:
-		elf.replace_linear_with_linear_dw(part, "cpu")
+		elf.replace_linear_with_linear_dw(part, "cuda")
 
 	sources, dsts = elf.get_sources_targets_sequential(placement)
 	pipe = elf.Pipeline(
@@ -194,12 +164,12 @@ def benchmark_elf():
 	)
 	# Warmup
 	for _ in range(5):
-		y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=args.mb_size)
+		y, loss = pipe(inputs, targets, loss_fn, split_size=args.mb_size)
 
 	torch.cuda.reset_peak_memory_stats()
 	with Timer() as timer:
 		for _ in range(args.niters):
-			y, loss = pipe(inputs.clone(), targets.clone(), loss_fn, split_size=args.mb_size)
+			y, loss = pipe(inputs, targets, loss_fn, split_size=args.mb_size)
 
 	return timer.time(), torch.cuda.max_memory_allocated() / 2**30
 
@@ -244,10 +214,9 @@ if __name__ == "__main__":
 		config_dict = {
 			"pp_size": args.pp,
 			"batch_size": batch_size,
-			"seq_len": args.seq_len,
 			"schedule": args.schedule,
 			"niters": args.niters,
-			"nblocks": args.nblocks,
+			"args": vars(args),
 		}
 
 		wandb.init(

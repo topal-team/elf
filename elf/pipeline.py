@@ -13,7 +13,7 @@ import torch.distributed as dist
 
 from .execution import PipelineBlock, Engine
 from .scheduling import schedule_to_str, check_schedule_validity, reorder_communications
-from .utils import send_models, recv_models, broadcast_models, Placement
+from .utils import TensorMetadata, send_models, recv_models, broadcast_models, Placement
 from .zb_utils import LayerDW
 from .registry import Tracer, Partitioner, Scheduler, TRACERS, PARTITIONERS, SCHEDULERS, resolve
 from .partitioners import (
@@ -74,84 +74,82 @@ class Pipeline:
 		self,
 		model,
 		sample=None,
-		# Legacy arguments
+		*,
+		config: PipelineConfig | None = None,
+		# Configuration parameters (used when config is None)
 		placement="auto",
 		partitioner="constrained",
 		scheduler="1f1b",
+		tracer="default",
+		pp=None,
 		dp=1,
 		worker=0,
 		sources=None,
 		targets=None,
-		# New config usage
-		*,
-		config: PipelineConfig | None = None,
 	):
 		"""
 		Initialize a Pipeline with model parallelism configuration.
 
-		**Usage with PipelineConfig (recommended):**
+		**Simple usage (no config object needed):**
+
+		.. code-block:: python
+
+			pipeline = Pipeline(model, sample, scheduler="1f1b", dp=2)
+
+		**Usage with PipelineConfig (recommended for complex setups):**
 
 		.. code-block:: python
 
 			config = PipelineConfig(scheduler="zbh2", dp=2, pp=4)
 			pipeline = Pipeline(model, sample, config=config)
 
-		**Legacy usage (individual parameters):**
-
-		.. code-block:: python
-
-			pipeline = Pipeline(model, sample, scheduler="1f1b", dp=2)
-
-		When both `config` and individual parameters are provided, config takes precedence but
-		individual parameters serve as defaults for any unspecified config fields.
+		When `config` is provided, it takes precedence and individual parameters are ignored.
 
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
 		:type model: nn.Module
 		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model.
 		:type sample: torch.Tensor or List[torch.Tensor]
+		:param config: PipelineConfig object for centralized configuration. When provided, individual parameters are ignored.
+		:type config: PipelineConfig or None
 		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement.
 		:type placement: List[int] or str
-		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = metis), which will try to create balanced blocks according to their profiled execution time.
+		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = constrained), which will try to create balanced blocks according to their profiled execution time.
 		:type partitioner: boolean or str
 		:param scheduler: static scheduling algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b") (default), Hanayo ("hanayo"), ZBH1/ZBH2/ZBV ("zbh1", "zbh2", "zbv"), Full Remat ("full_remat"), Inference ("inference"). You can also define your own scheduler by registering it in the registry.
 		:type scheduler: str or function(List[int], int, **kwargs) -> List[Operation]
+		:param tracer: Tracer to use for model graph extraction. When using default, tries all available tracers one after the other. (default: "default")
+		:type tracer: Tracer or str
+		:param pp: Number of pipeline parallel processes. If None, computed as world_size // dp
+		:type pp: int or None
 		:param dp: number of data parallel processes to use.
-		:type dp: Optional[int]
+		:type dp: int
 		:param worker: rank of the process that will profile the model and partition it
 		:type worker: int
 		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :func:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type sources: List[Dict[str, int]]
 		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :func:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type targets: List[Dict[str, List[int]]]
-		:param config: PipelineConfig object for centralized configuration. When provided, it takes precedence over individual parameters for any fields it specifies.
-		:type config: PipelineConfig or None
 		"""
 		if not dist.is_initialized():
 			logger.warning(
 				"Trying to create a pipeline but no multi-gpu distributed setup has been found."
 			)
 		ws = dist.get_world_size()
+		rank = dist.get_rank()
 
-		cfg: dict[str, Any] = {}
+		# Create config from either provided config or individual parameters
 		if config is not None:
-			cfg = config.to_kwargs()
-			cfg.setdefault("placement", placement)
-			cfg.setdefault("partitioner", partitioner)
-			cfg.setdefault("scheduler", scheduler)
-			cfg.setdefault("dp", dp)
-			cfg.setdefault("worker", worker)
+			self.cfg = config
 		else:
-			cfg = {
-				"placement": placement,
-				"partitioner": partitioner,
-				"scheduler": scheduler,
-				"tracer": "default",  # hardcoded for now
-				"dp": dp,
-				"worker": worker,
-			}
-
-		# Create config
-		self.cfg = PipelineConfig(**cfg)
+			self.cfg = PipelineConfig(
+				tracer=tracer,
+				partitioner=partitioner,
+				scheduler=scheduler,
+				placement=placement,
+				pp=pp,
+				dp=dp,
+				worker=worker,
+			)
 		self.pp = self.cfg.pp or ws // self.cfg.dp  # Number of GPUs used for pipeline parallelism
 		self.dp = self.cfg.dp  # Number of GPUs used for data parallelism
 		assert self.pp * self.dp == ws, (
@@ -163,6 +161,11 @@ class Pipeline:
 			self.placement = Placement.default(self.cfg.scheduler, self.pp)
 		else:
 			self.placement = Placement(self.cfg.placement)
+
+		self.dp_rank = rank // self.pp
+		self.placement = self.placement.add_offset(
+			self.dp_rank * self.pp
+		)  # on each DP replica, placement is shifted to correspond to actual ranks of this replica
 
 		self._init_process_groups()  # sets pp_group and dp_groups
 
@@ -185,7 +188,7 @@ class Pipeline:
 		self.schedule = []
 		self.last_nmb = 0
 
-	def step(self, batch, target, loss_fn, split_size=0, profile=False):
+	def step(self, batch, target, loss_fn, split_size=0, profile=False, scheduler=None):
 		"""
 		Execute a training step on a batch of data using the pipeline schedule.
 
@@ -199,6 +202,8 @@ class Pipeline:
 		:type split_size: int or List[int]
 		:param profile: Whether to activate nvidia profiling or not. If True, NVTX ranges will be generated for each operation
 		:type profile: boolean
+		:param scheduler: scheduler to use for the step. If None, the one passed to the constructor is used.
+		:type scheduler: Scheduler or None
 
 		:return: result of the forward pass and loss value if the last block of the pipeline is managed by this process
 		:rtype: (List[Tensor], Tensor) or (None, None)
@@ -214,9 +219,17 @@ class Pipeline:
 		mb_sizes = self._get_mb_sizes(split_size, batch)
 		n_micro_batches = len(mb_sizes)
 
-		if n_micro_batches != self.last_nmb:
+		# we consider that a schedule is fixed for a given algorithm and number of micro-batches
+		regenerate_schedule = scheduler is not None or n_micro_batches != self.last_nmb
+		# Resolve scheduler to use
+		if scheduler is None:
+			scheduler = self.scheduler
+		else:
+			scheduler = resolve(scheduler, SCHEDULERS)
+
+		if regenerate_schedule:
 			# We have to recompute the schedule
-			self._generate_schedule(n_micro_batches)
+			self._generate_schedule(n_micro_batches, scheduler)
 
 			self.last_nmb = n_micro_batches
 
@@ -239,12 +252,8 @@ class Pipeline:
 				for dst in var:
 					dst.clear()
 
-			for name, module in block.model.named_modules():
+			for module in block.model.modules():
 				if isinstance(module, LayerDW):
-					if not module.is_empty("input") or not module.is_empty("grad_output"):
-						logger.warning(
-							f"{block} - Module {name} still has {module._state('input')} values in queues"
-						)
 					module.clear()
 
 		self.stats = stats
@@ -252,8 +261,8 @@ class Pipeline:
 
 		# Merge back the micro-batches outputs/losses into one batch
 		if len(result) != 0:
-			# Careful! if the result was offloaded to CPU, then this creates a sync point that slows down the execution
 			with torch.no_grad():
+				# Careful! if the result was offloaded to CPU, then this creates a sync point that slows down the execution
 				# result = torch.cat(result, dim=0)
 				# This causes a stream synchronization ; maybe it can be avoided
 				# From looking at the profiler, it does not incur important overhead, but need to check
@@ -309,11 +318,7 @@ class Pipeline:
 		torch.cuda.synchronize()
 		dist.barrier()
 		for block in self.blocks:
-			if block.dp_group:
-				logger.debug(
-					f"Destroying DP group with members {dist.get_process_group_ranks(block.dp_group)}"
-				)
-				dist.destroy_process_group(block.dp_group)
+			block._destroy_process_groups()
 
 		logger.debug(
 			f"Destroying PP group with members {dist.get_process_group_ranks(self.blocks[0].pp_group)}"
@@ -331,7 +336,7 @@ class Pipeline:
 		"""
 		rank = dist.get_rank()
 		dp = rank // self.pp
-		pp = rank % self.dp
+		pp = rank % self.pp
 		rank_state_dict = {"rank": rank, "pp": pp, "dp": dp, "epoch": epoch}
 
 		for block in self.blocks:
@@ -363,22 +368,26 @@ class Pipeline:
 			n_devices = max(self.placement) + 1
 			for d in range(n_devices):
 				if d == worker:
-					param_list = self.named_parameters()
-					for p_name, p in param_list.items():
+					for p_name, p in self.named_parameters():
 						full_state[p_name] = p.cpu().detach()
 				else:
-					param_list = [{}]
-					dist.recv_object_list(param_list, src=d, group=pp_group)
+					n_parts = len(self.placement.get_ids(d))
+					parts = [None for _ in range(n_parts)]
 
-					for p_name, p in param_list[0].items():
-						full_state[p_name] = p.cpu().detach()
+					recv_models(parts, src=d, group=pp_group)
 
+					for part in enumerate(parts):
+						for p_name, p in part.named_parameters():
+							full_state[p_name] = p.to("cpu", non_blocking=True).detach()
+
+			torch.cuda.synchronize()
 			torch.save(full_state, path)
 			logger.info(f"Saved model to {path}")
 
 		else:
 			if worker in dist.get_process_group_ranks(pp_group):
-				dist.send_object_list([self.named_parameters()], dst=worker, group=pp_group)
+				parts = [block.model for block in self.blocks]
+				send_models(parts, dst=worker, group=pp_group)
 
 	def gather_parameters(self, dst=0):
 		"""
@@ -391,25 +400,37 @@ class Pipeline:
 		"""
 		rank = dist.get_rank()
 		pp_group = self.blocks[0].pp_group
-		my_params = {}
+
+		# Build local state dict for each rank
+		local_params = {}
 		for block in self.blocks:
 			for name, param in block.model.named_parameters():
-				if name not in my_params:
-					my_params[name] = param.data.detach()
+				if name not in local_params:
+					local_params[name] = param.data
 				else:
 					logger.warning(
 						f"Duplicate parameter {name} found in block {block.id}, using first occurrence"
 					)
 
-		all_params = [None] * dist.get_world_size() if rank == dst else None
-		dist.gather_object(my_params, all_params, dst=dst, group=pp_group)
+		# Create and gather metadata on cpu-cpu communication
+		metadata = {name: TensorMetadata(tensor) for name, tensor in local_params.items()}
+		all_metadata = [None] * dist.get_world_size() if rank == dst else None
+		dist.gather_object(metadata, all_metadata, dst=dst, group=pp_group)
 
-		state_dict = {}
 		if rank == dst:
-			for params in all_params:
-				state_dict.update(params)
-
-		return state_dict
+			# Send actual parameters via gpu-gpu communication
+			state_dict = local_params.copy()  # prefill with local parameters
+			for peer, peer_metadata in enumerate(all_metadata):
+				if peer != rank:
+					for name, meta in peer_metadata.items():
+						buffer = meta.get_buffer(1).squeeze(0)
+						dist.recv(buffer, src=peer, group=pp_group)
+						state_dict[name] = buffer
+			return state_dict
+		else:
+			for tensor in local_params.values():
+				dist.send(tensor, dst=dst, group=pp_group)
+			return {}
 
 	def is_first(self):
 		"""Check if this process owns the first pipeline stage."""
@@ -449,21 +470,22 @@ class Pipeline:
 
 		return mb_sizes
 
-	def _generate_schedule(self, n_micro_batches):
+	def _generate_schedule(self, n_micro_batches, scheduler):
 		"""
 		Generate and optimize the execution schedule, then filter for current process.
 
 		:param n_micro_batches: Number of micro-batches
 		:type n_micro_batches: int
+		:param scheduler: scheduler to use for the step
+		:type scheduler: Scheduler
 		"""
-		schedule = self.scheduler(self.placement, n_micro_batches, self.signatures)
+		schedule = scheduler(self.placement, n_micro_batches, self.signatures)
 		check_schedule_validity(schedule)
 
-		schedule = reorder_communications(schedule, strategy="smart")
+		schedule = reorder_communications(schedule, strategy="pipelined")
 
 		if dist.get_rank() == 0:
-			logger.info(f"Schedule:\n{schedule_to_str(schedule)}")
-			logger.debug(f"Schedule:\n{schedule_to_str(schedule, print_comms=True)}")
+			logger.debug(f"Schedule:\n{schedule_to_str(schedule)}")
 
 		# Remove all operations that are not ours
 		ids = list(
@@ -494,9 +516,10 @@ class Pipeline:
 				parts = model
 
 			if sources is None and targets is None:
-				logger.warning(
-					"No sources and targets provided, assuming sequential partitioning. If this is not what you want, please explictly provide sources and targets when creating the pipeline."
-				)
+				if dist.get_rank() == 0:
+					logger.warning(
+						"No sources and targets provided, assuming sequential partitioning. If this is not what you want, please explictly provide sources and targets when creating the pipeline."
+					)
 				sources, targets = get_sources_targets_sequential(self.placement)
 			signatures = signatures_from_sources_targets(sources, targets)
 		else:
@@ -524,15 +547,24 @@ class Pipeline:
 		"""
 		rank = dist.get_rank()
 
-		offset = (rank // self.pp) * self.pp
-		placement = Placement([p + offset for p in self.placement])
+		ids = self.placement.get_ids(rank)
 
-		ids = placement.get_ids(rank)
+		# Initialize P2P process groups for all blocks this rank owns
+		block_p2p_groups = self._init_p2p_process_groups(signatures)
+
 		blocks = []
 		for i in range(len(parts)):
 			dp_group = self.dp_groups[ids[i] % self.pp] if self.dp > 1 else None
+			recv_pgs, send_pgs = block_p2p_groups[ids[i]]
 			new_block = PipelineBlock(
-				parts[i], ids[i], placement, signatures[ids[i]], pp_group=self.pp_group, dp_group=dp_group
+				parts[i],
+				ids[i],
+				self.placement,
+				signatures[ids[i]],
+				pp_group=self.pp_group,
+				dp_group=dp_group,
+				recv_pgs=recv_pgs,
+				send_pgs=send_pgs,
 			)
 			blocks.append(new_block)
 
@@ -547,7 +579,6 @@ class Pipeline:
 		rank = dist.get_rank()
 		world_size = dist.get_world_size()
 
-		dp_rank = rank // self.pp
 		timeout = os.getenv("ELF_TIMEOUT", None)
 		if timeout is not None:
 			timeout = timedelta(seconds=int(timeout))
@@ -559,15 +590,102 @@ class Pipeline:
 			if rank == members[0]:
 				logger.debug(f"Creating PP group with members {members}")
 			pp_group = dist.new_group(members, timeout=timeout)
-			if pp == dp_rank:
+			if pp == self.dp_rank:
 				self.pp_group = pp_group
 
 		if self.dp > 1:
 			for dp in range(self.pp):
 				members = [r for r in range(world_size) if r % self.pp == dp]
 				if rank == members[0]:
-					logger.info(f"Creating DP group with members {members}")
+					logger.debug(f"Creating DP group with members {members}")
 				self.dp_groups.append(dist.new_group(members, timeout=timeout))
+
+	def _init_p2p_process_groups(self, signatures):
+		"""
+		Initialize point-to-point process groups for efficient communication.
+		By default, torch distributed uses 1 cuda stream per pair of ranks.
+		Bidirectional communications are therefore sequentialized on that stream, even if they are independent.
+		We create separate groups for every type of communication (recv / send * fwd / bwd).
+
+		:param signatures: Dataflow signatures for each block
+		:type signatures: List[Signature]
+		:return: Dictionary mapping block_id to (recv_pgs, send_pgs) for each block this rank owns
+		:rtype: Dict[int, Tuple[Dict[int, ProcessGroup], Dict[int, ProcessGroup]]]
+		"""
+		rank = dist.get_rank()
+		device = (
+			torch.device(f"cuda:{torch.cuda.current_device()}") if torch.cuda.is_available() else None
+		)
+
+		block_p2p_groups = {}
+
+		# Get block IDs this rank owns
+		ids = self.placement.get_ids(rank)
+
+		# Gather all sources and targets for this rank's blocks
+		# pairs are BLOCKS, not RANKS
+		local_recv_pairs = []
+		local_send_pairs = []
+		for block_id in ids:
+			signature = signatures[block_id]
+			sources = [sig for sig in signature.get_all_sources() if sig is not None]
+			targets = [tgt for tgt in signature.get_all_targets() if tgt is not None]
+			local_recv_pairs.extend([(block_id, src) for src in sources])
+			local_send_pairs.extend([(block_id, dst) for dst in targets])
+
+		local_pairs = local_recv_pairs + local_send_pairs
+		all_pairs_list = [None] * self.pp
+		dist.all_gather_object(all_pairs_list, local_pairs, group=self.pp_group)
+
+		# Flatten and deduplicate
+		all_pairs = set()
+		for pairs in all_pairs_list:
+			for pair in pairs:
+				# Normalize pairs so (a, b) and (b, a) are treated the same
+				normalized = tuple(sorted(pair))
+				all_pairs.add(normalized)
+
+		# Sort for deterministic ordering across all ranks
+		all_pairs = sorted(list(all_pairs))
+
+		# Create all groups, but only save the ones each block needs
+		for block_id in ids:
+			signature = signatures[block_id]
+			sources = [sig for sig in signature.get_all_sources() if sig is not None]
+			targets = [tgt for tgt in signature.get_all_targets() if tgt is not None]
+
+			recv_pgs = {"fwd": {}, "bwd": {}}
+			send_pgs = {"fwd": {}, "bwd": {}}
+
+			for pair in all_pairs:
+				block_a, block_b = pair
+				rank_a, rank_b = (
+					self.placement[block_a],
+					self.placement[block_b],
+				)  # map to actual ranks only for PG creation
+				group_fwd = dist.new_group(
+					[rank_a, rank_b], device_id=device
+				)  # might fail if use_local_synchronization is not supported (for instance with MPI)
+				group_bwd = dist.new_group([rank_a, rank_b], device_id=device)
+
+				# Save group if this block needs it
+				if block_a in ids and block_b in sources:
+					recv_pgs["fwd"][block_b] = group_fwd
+					send_pgs["bwd"][block_b] = group_bwd
+				elif block_a in ids and block_b in targets:
+					send_pgs["fwd"][block_b] = group_fwd
+					recv_pgs["bwd"][block_b] = group_bwd
+				# Reverse direction
+				elif block_b in ids and block_a in sources:
+					recv_pgs["fwd"][block_a] = group_fwd
+					send_pgs["bwd"][block_a] = group_bwd
+				elif block_b in ids and block_a in targets:
+					send_pgs["fwd"][block_a] = group_fwd
+					recv_pgs["bwd"][block_a] = group_bwd
+
+			block_p2p_groups[block_id] = (recv_pgs, send_pgs)
+
+		return block_p2p_groups
 
 	def _shared_partition(self, model, sample):
 		"""
@@ -583,7 +701,7 @@ class Pipeline:
 		rank = dist.get_rank()
 
 		# Rank 'worker' profiles & partition the graph, then shares it to everyone
-		n_blocks = self.placement.count(rank % self.pp)
+		n_blocks = self.placement.count(rank)
 		blocks = [None for _ in range(n_blocks)]
 		signatures = [None for _ in range(len(self.placement))]
 		worker = self.cfg.worker

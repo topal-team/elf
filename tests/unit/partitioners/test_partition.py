@@ -161,3 +161,23 @@ def test_partition(mode, model_config):
 
 	for n in model_config["n_parts"]:
 		check_partition(model, n, sample, mode)
+
+
+@pytest.mark.unit
+def test_partition_single_stage():
+	"""Test that single stage partitioning works correctly."""
+	model = BaseModel()
+	sample = torch.randn(4, 256)
+
+	parts, signatures = partition_graph(
+		copy.deepcopy(model), 1, sample, PARTITIONERS["naive"], TRACERS["fx"]
+	)
+
+	assert len(parts) == 1
+	assert len(signatures) == 1
+
+	# Single stage should produce same output as original
+	output_original = model(sample)
+	output_partitioned = parts[0](*[sample])[0]
+
+	assert torch.allclose(output_original, output_partitioned, atol=1e-5)

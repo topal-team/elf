@@ -84,6 +84,7 @@ def preallocate_pool(pool: PinnedHostTensorPool):
 		"i8": torch.int8,
 		"i16": torch.int16,
 		"i32": torch.int32,
+		"c64": torch.complex64,
 	}
 
 	parts = val.split(",")
@@ -107,13 +108,16 @@ class Engine:
 		self.rank = self.blocks[0].rank if blocks else None
 		for b in self.blocks:
 			assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
+
 		if precise_timings and self.rank == 0:
-			logger.info("Using precise timings")
+			logger.info(f"{self.rank} - Using precise timings")
 
 		self.id_to_block = {b.id: b for b in self.blocks}
 		self.offload_stream = torch.cuda.Stream()
 
-		self.pool = PinnedHostTensorPool()  # global memory pool for this process
+		self.pool = (
+			PinnedHostTensorPool()
+		)  # global memory pool for this process (does nothing if env var is not set)
 		preallocate_pool(self.pool)
 
 	def train_step(self, batch, target, loss_fn, schedule, mb_sizes, profile=False):
@@ -171,7 +175,6 @@ class Engine:
 		for id_, block in self.id_to_block.items():
 			for offloader in offloaders[id_]:
 				offloader.exclude(block.model.parameters())
-		# print(f"Rank {self.rank} - Pool size: {self.pool.size()}, offloaders: {offloaders}")
 
 		result = []
 		losses = []

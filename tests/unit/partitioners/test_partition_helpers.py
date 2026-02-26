@@ -18,7 +18,14 @@ def test_get_inputs_outputs_and_sources_targets():
 	# Partition: [first linear], [relu], [second linear]
 	parts = [[placeholder_node, call_nodes[0]], [call_nodes[1]], [call_nodes[2], output_node]]
 
-	inputs, outputs = get_inputs_outputs(parts)
+	parts, inputs, outputs = get_inputs_outputs(parts)
+
+	# Parts should be reordered topologically and placeholder/output nodes removed
+	assert len(parts) == 3
+	# Verify placeholder and output nodes are removed
+	for part in parts:
+		for node in part:
+			assert node.op not in ("placeholder", "output")
 
 	# Expect:
 	# part0 inputs == original placeholder names, outputs some activation name

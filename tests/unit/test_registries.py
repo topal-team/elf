@@ -48,3 +48,19 @@ def test_registry():
 	assert "second_dummy_fn" in DummyRegistry
 
 	assert DummyRegistry.get_description("second_dummy_fn") == ""  # no description
+
+
+@pytest.mark.unit
+def test_registry_multiple_aliases():
+	"""Test that registering multiple aliases for same object works correctly."""
+	reg = Registry("test")
+
+	def my_func(x):
+		return x * 2
+
+	reg.register(["alias1", "alias2", "alias3"], my_func)
+
+	assert reg["alias1"] is my_func
+	assert reg["alias2"] is my_func
+	assert reg["alias3"] is my_func
+	assert len(reg) == 3

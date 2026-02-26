@@ -2,12 +2,20 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
+
 # Fused kernels (Flash, Mem-Efficient, CuDNN) require float16 or bfloat16
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
 	from flash_attn import flash_attn_func  # pyright: ignore[reportMissingImports]
 except ImportError:
+	logger.warning(
+		"WARNING: flash_attn not installed, using SDPA from torch instead. Ignore this warning if not using Transformers with flash-attn. Ignore this warning if not using Transformers with FlashAttention."
+	)
 	flash_attn_func = None
 
 """
@@ -116,7 +124,7 @@ class SimpleResNet(SimpleModel):
 		return torch.randn((batch_size, 3, 224, 224), dtype=dtype, device=device)
 
 	def get_target(self, batch_size, dtype=torch.int64, device=None):
-		return torch.randint(0, self.fc.out_features, (batch_size,), dtype=dtype, device=device)
+		return torch.randint(0, self.fc.out_features, (batch_size,), dtype=torch.int64, device=device)
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.cross_entropy(pred, target, *args, **kwargs)
@@ -549,3 +557,33 @@ class ChainTransformer(SimpleModel):
 
 	def loss_fn(self, pred, target, *args, **kwargs):
 		return torch.nn.functional.mse_loss(pred, target, *args, **kwargs)
+
+
+def make_simple_fno(fno_class):
+	class SimpleFNO(SimpleModel, fno_class):
+		def __init__(self, dims, *args, **kwargs):
+			super(SimpleFNO, self).__init__(*args, **kwargs)
+			self.dims = dims
+
+		def forward(self, x):
+			return self.forward(x)
+
+		def get_sample(self, batch_size, dtype=torch.float32, device=None):
+			return torch.randn((batch_size, self.in_channels, *self.dims), dtype=dtype, device=device)
+
+		def get_target(self, batch_size, dtype=torch.float32, device=None):
+			return torch.randn((batch_size, self.out_channels, *self.dims), dtype=dtype, device=device)
+
+		def loss_fn(self, pred, target, *args, **kwargs):
+			return torch.nn.functional.l1_loss(pred, target, *args, **kwargs)
+
+	return SimpleFNO
+
+
+try:
+	from neuralop import FNO, TFNO
+
+	SimpleFNO = make_simple_fno(FNO)
+	SimpleTFNO = make_simple_fno(TFNO)
+except ImportError:
+	pass

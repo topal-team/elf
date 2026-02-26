@@ -247,7 +247,7 @@ def execute_metis(file, n):
 			"-objtype=vol",
 			"-contig",  # avoid back and forths
 			"-minconn",  # avoid skip connections
-			"-ufactor=500",
+			"-ufactor=100",
 			"-ncuts=200",
 			"-niter=200",
 		],

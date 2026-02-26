@@ -2,6 +2,10 @@
 Handmade partition methods
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def split_graph(graph, times, memories, n):
 	"""
@@ -46,10 +50,10 @@ def _evaluate_partition_balance(parts, times):
 	Evaluates the balance of a partition.
 	"""
 	if any(len(part) == 0 for part in parts):
-		return -100
+		return float("inf")
 	loads = [sum(times.get(node.name, 0) for node in part) for part in parts]
 	avg_load = sum(loads) / len(loads)
-	balance = avg_load / max(loads)
+	balance = max(loads) / avg_load
 	return balance
 
 
@@ -58,7 +62,8 @@ def split_graph_constrained(graph, times, memories, n):
 	Naively splits a graph into roughly equal blocks in terms of time.
 	This algorithm does not take into account the memory used or transferred.
 	Unlike split_graph, it is guaranteed that every block has 1 tensor as input and 1 tensor as output.
-	This algorithm iteratively creates partitions, allowing more imbalance each time, until a valid and balanced partition is found.
+	This algorithm tries different numbers of cuts (1-5), finds the best partition for each,
+	and returns the one with the best balance score (with a small penalty for more cuts).
 
 	:param graph: symbolic trace of the module to partition (see torch.fx)
 	:type graph: fx.GraphModule
@@ -68,36 +73,43 @@ def split_graph_constrained(graph, times, memories, n):
 	:type memories: Dict[str, float]
 	:param n: number of partitions to create
 	:type n: int
-	:param imbalance_ratio: allowed imbalance in the partition, as a fraction of time per part
-	:type imbalance_ratio: float
 
 	:return: ``n`` lists of nodes corresponding to each part
 	:rtype: List[List[fx.Node]]
 	"""
-	imbalance_ratio = 0
-	parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio)
-	score = _evaluate_partition_balance(parts, times)
+	best_parts = None
+	best_penalized_score = float("inf")
+	cut_penalty = 0.1
+	max_cuts = 10
 
-	while True:
-		imbalance_ratio += 0.01
-		new_parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio)
-		new_score = _evaluate_partition_balance(new_parts, times)
-		if new_score < score:
-			break
+	for max_cuts in range(1, max_cuts + 1):
+		imbalance_ratio = 0
+		parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts)
+		score = _evaluate_partition_balance(parts, times)
 
-		parts = new_parts
-		score = new_score
+		while imbalance_ratio < 1:
+			imbalance_ratio += 0.01
+			new_parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts)
+			new_score = _evaluate_partition_balance(new_parts, times)
+			if new_score > score:
+				break
 
-	return parts
+			parts = new_parts
+			score = new_score
+
+		penalized_score = score + (max_cuts - 1) * cut_penalty
+		if penalized_score < best_penalized_score:
+			logger.debug(f"New best score: {penalized_score} with {max_cuts} cuts")
+			best_penalized_score = penalized_score
+			best_parts = parts
+
+	return best_parts
 
 
-def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio):
+def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts):
 	"""
-	Creates one partition of the graph, with a given imbalance ratio.
+	Creates one partition of the graph, with a given imbalance ratio and maximum number of cuts.
 	"""
-	if imbalance_ratio >= 1:
-		raise ValueError("Failed to partition the graph: imbalance ratio set to 1")
-
 	nodes = list(graph.graph.nodes)
 	total_time = sum(times.get(node.name, 0) for node in nodes)
 	target_time = total_time / n
@@ -109,11 +121,11 @@ def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio):
 	current_part = n - 1
 	current_time = 0
 	for node in reversed(nodes):
-		# Go to the next part if we are over the balance, or close to it, and we have only one input
+		# Go to the next part if we are over the balance, or close to it, and we have at most max_cuts inputs
 		if (
 			current_part > 0
 			and (current_time >= target_time or target_time - current_time < imbalance_margin)
-			and len(needed_inputs) <= 1
+			and len(needed_inputs) <= max_cuts
 		):
 			current_part -= 1
 			current_time = 0

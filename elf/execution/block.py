@@ -137,7 +137,9 @@ class PipelineBlock:
 	Each block is one layer or group of contiguous layers placed on one device
 	"""
 
-	def __init__(self, model, id_, placement, signature, pp_group, dp_group):
+	def __init__(
+		self, model, id_, placement, signature, pp_group, dp_group, recv_pgs=None, send_pgs=None
+	):
 		"""
 		:param model: layer / group of layers that will perform the computation
 		:type model: nn.Module
@@ -147,6 +149,10 @@ class PipelineBlock:
 		:type placement: List[int]
 		:param signature: signature of the block
 		:type signature: Signature
+		:param recv_pgs: Process groups for receiving data, keyed by source rank
+		:type recv_pgs: Dict[int, ProcessGroup] or None
+		:param send_pgs: Process groups for sending data, keyed by destination rank
+		:type send_pgs: Dict[int, ProcessGroup] or None
 		"""
 		super(PipelineBlock, self).__init__()
 		# Block infos
@@ -175,6 +181,13 @@ class PipelineBlock:
 			[Variable(name, dst, self.pp_group) for dst in dsts]
 			for name, dsts in zip(signature.outputs, signature.targets)
 		]
+
+		# Process groups for point-to-point communications
+		# By default, torch distributed uses 1 cuda stream per pair of ranks
+		# Bidirectional communications are therefore sequentialized on that stream, even if they are independent
+		# We use separate groups for the forward pass to avoid this, and keep the default (pipeline) group for the backward pass
+		self.recv_pgs = recv_pgs
+		self.send_pgs = send_pgs
 
 		self.compute_time = []  # used to measure idle time
 
@@ -207,7 +220,7 @@ class PipelineBlock:
 			logger.debug(f"{self} - Waiting for {input_var}")
 			x = input_var.wait_and_pop(mb_id)
 
-			if x.is_floating_point():
+			if x.is_floating_point() or x.is_complex():  # int tensors can't require grads
 				x.requires_grad_(True)
 
 			inputs.append(x)
@@ -302,11 +315,9 @@ class PipelineBlock:
 		# Inputs should have been saved by a previous forward pass
 		inputs = []
 		for input_var in self.input_variables:
-			# Keep it for backward
 			value = input_var.get(input_var.saved, mb_id)
 			inputs.append(value)
 
-		# Get options and strategies
 		save = options.get(OpOptions.SAVE, False)
 
 		# Execute forward pass with or without gradient tracking
@@ -323,7 +334,7 @@ class PipelineBlock:
 				output_var[0].set(output_var[0].saved, mb_id, value)
 
 		for module in self.model.modules():
-			if isinstance(module, LayerDW) and getattr(module, "last_input", None) is not None:
+			if isinstance(module, LayerDW):
 				module.move_last_computed("input", mb_id)
 
 	def recompute_backward_inputs(self, mb_id, **options):
@@ -372,7 +383,9 @@ class PipelineBlock:
 		"""
 		with Timer(name=f"backward_params({self.id}:{mb_id})") as timer:
 			for module in self.model.modules():
-				if isinstance(module, LayerDW):
+				if isinstance(module, LayerDW) and not module.is_empty(
+					"grad_output"
+				):  # skip modules that are not involved in the computation
 					module.backward(mb_id)
 
 		self.compute_time.append(timer)
@@ -404,7 +417,7 @@ class PipelineBlock:
 
 				rank = self.placement[dst]  # we now use the actual rank instead of the block id
 				logger.debug(f"{self} - Sending outputs to rank {rank}")
-				work = dist.isend(outputs, rank, group=self.pp_group)
+				work = dist.isend(outputs, rank, group=self.send_pgs["fwd"][dst])
 				if _is_mpi():
 					self.send_ops.append(work)
 
@@ -430,7 +443,7 @@ class PipelineBlock:
 
 			rank = self.placement[dst]
 			logger.debug(f"{self} - Sending gradients to rank {rank}")
-			work = dist.isend(grads, rank, group=self.pp_group)
+			work = dist.isend(grads, rank, group=self.send_pgs["bwd"][dst])
 			if _is_mpi():
 				self.send_ops.append(work)
 
@@ -460,7 +473,7 @@ class PipelineBlock:
 
 			rank = self.placement[src]
 			logger.debug(f"{self} - Starting to receive inputs from rank {rank}")
-			work = dist.irecv(buffer, rank, group=self.pp_group)
+			work = dist.irecv(buffer, rank, group=self.recv_pgs["fwd"][src])
 
 			var.set(var.to_process, mb_id, (work, buffer.requires_grad_(True)))
 
@@ -486,7 +499,7 @@ class PipelineBlock:
 
 				rank = self.placement[src]
 				logger.debug(f"{self} - Starting to receive gradients from rank {rank}")
-				work = dist.irecv(buffer, rank, group=self.pp_group)
+				work = dist.irecv(buffer, rank, group=self.recv_pgs["bwd"][src])
 
 				target.set(target.to_process, mb_id, (work, buffer))
 
@@ -499,7 +512,8 @@ class PipelineBlock:
 		if self.dp_group is None:
 			return
 		for _, p in sorted(self.model.named_parameters()):
-			dist.all_reduce(p.grad.data, group=self.dp_group, op=dist.ReduceOp.AVG, async_op=True)
+			if p.grad is not None:
+				dist.all_reduce(p.grad.data, group=self.dp_group, op=dist.ReduceOp.AVG, async_op=True)
 
 	def scale_grads(self, batch_size):
 		"""
@@ -530,7 +544,7 @@ class PipelineBlock:
 				rank = self.placement[src]  # we resolve the actual rank now
 				logger.debug(f"{self} - Receiving metadata from {rank}")
 				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=rank, group=self.pp_group)
+				dist.recv(metadata, src=rank, group=self.recv_pgs["fwd"][src])
 				var.metadata = TensorMetadata.from_tensor(metadata)
 
 		logger.debug(f"{self} - Registered metadata {[var for var in self.input_variables]} from {src}")
@@ -552,7 +566,7 @@ class PipelineBlock:
 
 				rank = self.placement[dst]  # we resolve the actual rank now
 				logger.debug(f"{self} - Sending metadata of {target.name} = {target.metadata} to {rank}")
-				dist.send(target.metadata.to_tensor(), dst=rank, group=self.pp_group)
+				dist.send(target.metadata.to_tensor(), dst=rank, group=self.send_pgs["fwd"][dst])
 				target.was_metadata_sent = True
 
 	def _register_out_metadata(self, output):
@@ -591,6 +605,21 @@ class PipelineBlock:
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
 				module.offload_last(to)
+
+	def _destroy_process_groups(self):
+		if self.dp_group:
+			logger.debug(
+				f"Destroying DP group with members {dist.get_process_group_ranks(self.dp_group)}"
+			)
+			dist.destroy_process_group(self.dp_group)
+		for recv_pg in self.recv_pgs["fwd"].values():
+			dist.destroy_process_group(recv_pg)
+		for send_pg in self.send_pgs["fwd"].values():
+			dist.destroy_process_group(send_pg)
+		for recv_pg in self.recv_pgs["bwd"].values():
+			dist.destroy_process_group(recv_pg)
+		for send_pg in self.send_pgs["bwd"].values():
+			dist.destroy_process_group(send_pg)
 
 	def backward_inputs(self, mb_id, **options):
 		"""
@@ -640,14 +669,15 @@ class PipelineBlock:
 		for module in self.model.modules():
 			if isinstance(module, LayerDW):
 				module.move_last_computed("grad_output", mb_id)
-				if recompute_gradients:
+				# sometimes a module does not use some of its submodules -> input/grad_output are not saved
+				if recompute_gradients and not module.is_empty("grad_output"):
 					module.delete("grad_output", mb_id)
 
 				# If we used checkpointing, we need to move the input as well
 				if getattr(module, "last_input", None) is not None:
 					module.move_last_computed("input", mb_id)
 
-				if recompute_activations:
+				if recompute_activations and not module.is_empty("input"):
 					module.delete("input", mb_id)
 
 		# Register the gradients to send

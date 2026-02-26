@@ -84,9 +84,9 @@ def execute_dagP(file, n):
 			"--print",
 			"0",
 			"--ratio",
-			"1.2",
+			"1.3",
 			"--runs",
-			"10",
+			"100",
 		],
 		stdout=subprocess.DEVNULL,
 	)
