@@ -5,3 +5,4 @@ dill
 numpy
 pytest
 scipy
+pulp
