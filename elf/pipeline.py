@@ -14,6 +14,7 @@ import torch.distributed as dist
 from .execution import PipelineBlock, Engine
 from .scheduling import schedule_to_str, check_schedule_validity, reorder_communications
 from .utils import TensorMetadata, send_models, recv_models, broadcast_models, Placement
+from .scheduling.ilp import solve_remat, RematScheduler
 from .zb_utils import LayerDW
 from .registry import Tracer, Partitioner, Scheduler, TRACERS, PARTITIONERS, SCHEDULERS, resolve
 from .partitioners import (
@@ -46,6 +47,8 @@ class PipelineConfig:
 	:type dp: int
 	:param worker: Rank that profiles and partitions the model (default: 0)
 	:type worker: int
+	:param memory_budget: GPU memory budget in MB for ILP-based rematerialization. When set, stages are profiled at partition time and an ILP is solved on the first training step to decide which operations to recompute. (default: None)
+	:type memory_budget: int or None
 	"""
 
 	tracer: Tracer | str = "default"
@@ -55,6 +58,7 @@ class PipelineConfig:
 	pp: int | None = None
 	dp: int = 1
 	worker: int = 0
+	memory_budget: int | None = None
 
 	def to_kwargs(self) -> dict[str, Any]:
 		"""Convert config to kwargs dict, excluding None values."""
@@ -86,6 +90,7 @@ class Pipeline:
 		worker=0,
 		sources=None,
 		targets=None,
+		memory_budget=None,
 	):
 		"""
 		Initialize a Pipeline with model parallelism configuration.
@@ -129,6 +134,8 @@ class Pipeline:
 		:type sources: List[Dict[str, int]]
 		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :func:`partitioners.utils.get_sources_targets_sequential` for an example.
 		:type targets: List[Dict[str, List[int]]]
+		:param memory_budget: GPU memory budget in MB for ILP-based rematerialization. When set, an ILP is solved on the first training step to decide which operations to recompute. (default: None)
+		:type memory_budget: int or None
 		"""
 		if not dist.is_initialized():
 			logger.warning(
@@ -149,7 +156,9 @@ class Pipeline:
 				pp=pp,
 				dp=dp,
 				worker=worker,
+				memory_budget=memory_budget,
 			)
+
 		self.pp = self.cfg.pp or ws // self.cfg.dp  # Number of GPUs used for pipeline parallelism
 		self.dp = self.cfg.dp  # Number of GPUs used for data parallelism
 		assert self.pp * self.dp == ws, (
@@ -187,6 +196,19 @@ class Pipeline:
 		# Used to avoid re-generating schedule every time
 		self.schedule = []
 		self.last_nmb = 0
+
+		# ILP remat: profile now (parallel), solve lazily at first step()
+		self._remat_scheduler = None
+		self._remat_nmb = None
+		if self.cfg.memory_budget is not None:
+			from elf.scheduling.ilp import profile_all_stages
+
+			assert sample is not None, "sample is required when memory_budget is set (used for profiling)"
+			self._remat_stats = profile_all_stages(
+				self.blocks, self.signatures, self.placement, sample, self.pp_group
+			)
+		else:
+			self._remat_stats = None
 
 	def step(self, batch, target, loss_fn, split_size=0, profile=False, scheduler=None):
 		"""
@@ -229,7 +251,7 @@ class Pipeline:
 
 		if regenerate_schedule:
 			# We have to recompute the schedule
-			self._generate_schedule(n_micro_batches, scheduler)
+			self._generate_schedule(n_micro_batches, scheduler, mb_sizes)
 
 			self.last_nmb = n_micro_batches
 
@@ -470,7 +492,7 @@ class Pipeline:
 
 		return mb_sizes
 
-	def _generate_schedule(self, n_micro_batches, scheduler):
+	def _generate_schedule(self, n_micro_batches, scheduler, mb_sizes):
 		"""
 		Generate and optimize the execution schedule, then filter for current process.
 
@@ -478,7 +500,27 @@ class Pipeline:
 		:type n_micro_batches: int
 		:param scheduler: scheduler to use for the step
 		:type scheduler: Scheduler
+		:param mb_sizes: List of micro-batch sizes
+		:type mb_sizes: List[int]
 		"""
+		if self._remat_stats is not None and n_micro_batches != self._remat_nmb:
+			solution_list = [None]
+			if dist.get_rank() == 0:
+				solution_list[0] = solve_remat(
+					self._remat_stats,
+					list(self.placement),
+					scheduler,
+					n_micro_batches,
+					self.cfg.memory_budget,
+					mb_sizes,
+				)
+			dist.broadcast_object_list(solution_list, src=0)
+			self._remat_scheduler = RematScheduler(scheduler, solution_list[0])
+			self._remat_nmb = n_micro_batches
+
+		if self._remat_scheduler is not None:
+			scheduler = self._remat_scheduler
+
 		schedule = scheduler(self.placement, n_micro_batches, self.signatures)
 		check_schedule_validity(schedule)
 
@@ -709,6 +751,7 @@ class Pipeline:
 			parts, signatures = partition_graph(
 				model, len(self.placement), sample, partitioner=self.partitioner, tracer=self.tracer
 			)
+
 			for d in range(self.pp):
 				blocks_on_d = [parts[i] for i in range(len(parts)) if self.placement[i] == d]
 				if d == worker:

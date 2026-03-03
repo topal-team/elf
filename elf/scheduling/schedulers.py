@@ -339,7 +339,7 @@ def generate_zbh2_schedule(placement, n_micro_batches, signatures):
 def generate_zbv_schedule(placement, n_micro_batches, signatures):
 	""" """
 	schedule = []
-	n_devices = max(placement) + 1
+	n_devices = len(set(placement))
 	stages_per_device = len(placement) // n_devices
 
 	if n_micro_batches != n_devices * 2:

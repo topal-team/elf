@@ -69,10 +69,13 @@ class LayerDW:
 		cls._dx_function_registry[cls] = dx_class
 		return dx_class
 
-	def backward(self):
+	def backward(self, mb_id: int):
 		"""
 		Compute and assign gradients for layer parameters using saved context.
 		Must be implemented by subclasses.
+
+		:param mb_id: Micro-batch index to compute gradients for
+		:type mb_id: int
 		"""
 		raise NotImplementedError("Subclasses must implement backward()")
 
