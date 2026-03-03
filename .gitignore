@@ -3,18 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Random stuff
-results/
-images/*.sif
-local/* 
-ilps/runs/*
-ilps/.snakemake
-
-# Slurm outputs
-core.*
-*.out
-out.*
-
 # Program outputs
 trace*.json
 
