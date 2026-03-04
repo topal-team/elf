@@ -17,11 +17,7 @@ from .utils import TensorMetadata, send_models, recv_models, broadcast_models, P
 from .scheduling.ilp import solve_remat, RematScheduler
 from .zb_utils import LayerDW
 from .registry import Tracer, Partitioner, Scheduler, TRACERS, PARTITIONERS, SCHEDULERS, resolve
-from .partitioners import (
-	partition_graph,
-	signatures_from_sources_targets,
-	get_sources_targets_sequential,
-)
+from .partitioners import partition, sequential_signatures
 
 import logging
 
@@ -88,8 +84,7 @@ class Pipeline:
 		pp=None,
 		dp=1,
 		worker=0,
-		sources=None,
-		targets=None,
+		signatures=None,
 		memory_budget=None,
 	):
 		"""
@@ -112,7 +107,7 @@ class Pipeline:
 
 		:param model: the entire model to pipeline, or this rank's portion of a pre-partitioned model
 		:type model: nn.Module
-		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model.
+		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model. The batch size should be the size of an individual micro-batch.
 		:type sample: torch.Tensor or List[torch.Tensor]
 		:param config: PipelineConfig object for centralized configuration. When provided, individual parameters are ignored.
 		:type config: PipelineConfig or None
@@ -130,10 +125,8 @@ class Pipeline:
 		:type dp: int
 		:param worker: rank of the process that will profile the model and partition it
 		:type worker: int
-		:param sources: For each stage of the entire model (not only this rank's portion), source block id for each input variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :func:`partitioners.utils.get_sources_targets_sequential` for an example.
-		:type sources: List[Dict[str, int]]
-		:param targets: For each stage of the entire model (not only this rank's portion), target block ids for each output variable. Only needed when partitioner is False, i.e. your model is already partitioned. See :func:`partitioners.utils.get_sources_targets_sequential` for an example.
-		:type targets: List[Dict[str, List[int]]]
+		:param signatures: Dataflow signatures describing the communication pattern between pipeline stages. Only needed when ``partitioner=False``, i.e. your model is already partitioned. Use :func:`elf.partitioners.sequential_signatures` for simple sequential models. If not provided, a sequential pattern is assumed.
+		:type signatures: List[Signature] or None
 		:param memory_budget: GPU memory budget in MB for ILP-based rematerialization. When set, an ILP is solved on the first training step to decide which operations to recompute. (default: None)
 		:type memory_budget: int or None
 		"""
@@ -186,7 +179,7 @@ class Pipeline:
 		)  # False if no partitioning is desired
 
 		# Partition model
-		parts, signatures = self._partition_model(model, sample, sources, targets)
+		parts, signatures = self._partition_model(model, sample, signatures)
 		self.signatures = signatures
 
 		# Create execution engine
@@ -535,7 +528,7 @@ class Pipeline:
 		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
 
-	def _partition_model(self, model, sample, sources, targets):
+	def _partition_model(self, model, sample, signatures):
 		"""
 		Partition the model or validate pre-partitioned model.
 
@@ -543,27 +536,24 @@ class Pipeline:
 		:type model: nn.Module or List[nn.Module]
 		:param sample: Sample input for tracing (required if partitioner is set)
 		:type sample: torch.Tensor or List[torch.Tensor] or None
-		:param sources: Source block IDs for pre-partitioned models
-		:type sources: List[Dict[str, int]] or None
-		:param targets: Target block IDs for pre-partitioned models
-		:type targets: List[Dict[str, List[int]]] or None
+		:param signatures: Dataflow signatures for pre-partitioned models
+		:type signatures: List[Signature] or None
 		:return: Model parts and signatures
 		:rtype: Tuple[List[nn.Module], List[Signature]]
 		"""
 		if not self.partitioner:
-			# Model is already the right part, just make sure it's a list
 			if isinstance(model, torch.nn.Module):
 				parts = [model]
 			else:
 				parts = model
 
-			if sources is None and targets is None:
+			if signatures is None:
 				if dist.get_rank() == 0:
 					logger.warning(
-						"No sources and targets provided, assuming sequential partitioning. If this is not what you want, please explictly provide sources and targets when creating the pipeline."
+						"No signatures provided, assuming sequential partitioning. "
+						"If this is not what you want, please explicitly provide signatures when creating the pipeline."
 					)
-				sources, targets = get_sources_targets_sequential(self.placement)
-			signatures = signatures_from_sources_targets(sources, targets)
+				signatures = sequential_signatures(self.placement)
 		else:
 			assert sample is not None, "Sample is required for partitioning"
 			try:
@@ -748,9 +738,11 @@ class Pipeline:
 		signatures = [None for _ in range(len(self.placement))]
 		worker = self.cfg.worker
 		if rank == worker:
-			parts, signatures = partition_graph(
+			result = partition(
 				model, len(self.placement), sample, partitioner=self.partitioner, tracer=self.tracer
 			)
+			parts = result.create_blocks()
+			signatures = result.signatures
 
 			for d in range(self.pp):
 				blocks_on_d = [parts[i] for i in range(len(parts)) if self.placement[i] == d]

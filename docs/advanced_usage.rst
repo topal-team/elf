@@ -21,14 +21,14 @@ When using manual partitioning, you need to:
 
 1. Split your model into parts yourself
 2. Materialize each part to the correct device
-3. Define sources and targets for communication
+3. Define signatures describing the communication pattern
 4. Set ``partitioner=False`` in the Pipeline
 
 .. code-block:: python
 
     import torch
     import torch.nn as nn
-    from elf import Pipeline
+    from elf import Pipeline, sequential_signatures
 
     # Split model manually (example for a sequential model)
     model = YourModel()  # Has .blocks, .embed, .head attributes
@@ -50,93 +50,78 @@ When using manual partitioning, you need to:
         # Middle ranks get only blocks
         part = nn.Sequential(*model.blocks[start_idx:end_idx])
 
-    # Define sources and targets (see next section)
+    # Build signatures for a sequential pipeline
     placement = list(range(world_size))
-    sources, targets = get_sources_targets_sequential(placement)
+    signatures = sequential_signatures(placement)
 
     # Create pipeline with manual partition
     pipe = Pipeline(
         part,
-        None,  # No sample needed for manual partitions
         partitioner=False,  # Critical: disable automatic partitioning
         placement=placement,
-        sources=sources,
-        targets=targets,
+        signatures=signatures,
     )
 
 **Key Points:**
 
 * Set ``partitioner=False`` to skip automatic partitioning
-* Pass ``None`` as the sample argument
-* You must define ``sources`` and ``targets`` yourself (see below)
+* Provide ``signatures`` describing the communication pattern between stages
+* Use ``sequential_signatures(placement)`` for simple sequential models
 
 
-Sources and Targets for Communication
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Signatures for Communication
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sources and targets define the communication pattern between pipeline stages.
+Signatures describe the communication pattern between pipeline stages: which stage
+sends to which, and what variables are exchanged.
 
 **For Sequential Models:**
 
-Use ``get_sources_targets_sequential()`` from ``elf.partitioners``:
+Use ``sequential_signatures()`` for models where each stage feeds the next in order:
 
 .. code-block:: python
 
-    from elf import get_sources_targets_sequential
+    from elf import sequential_signatures
 
     placement = [0, 1, 2, 3]  # Linear placement
-    sources, targets = get_sources_targets_sequential(placement)
+    signatures = sequential_signatures(placement)
 
-    # This creates:
-    # sources[0] = {"input": None}           # Stage 0 gets external input
-    # sources[1] = {"input": 0}              # Stage 1 receives from stage 0
-    # sources[2] = {"input": 1}              # Stage 2 receives from stage 1
-    # ...
-    # targets[0] = {"output": [1]}           # Stage 0 sends to stage 1
-    # targets[1] = {"output": [2]}           # Stage 1 sends to stage 2
-    # ...
-    # targets[N-1] = {"output": [None]}      # Last stage outputs final result
+    # Each signature describes one stage:
+    #   signature[0]: input from None (external), output to stage 1
+    #   signature[1]: input from stage 0, output to stage 2
+    #   ...
+    #   signature[N-1]: input from stage N-2, output to None (final result)
 
 **For Non-Sequential Models (Skip Connections):**
 
-For models with skip connections (e.g., ResNets, U-Nets), manually define the graph:
+For models with skip connections (e.g., ResNets, U-Nets), build ``Signature`` objects
+directly:
 
 .. code-block:: python
 
-    from elf import signatures_from_sources_targets
+    from elf.partitioners import Signature
 
     # Example: 4 stages where stage 2 receives from both stage 0 and stage 1
-    sources = {
-        0: {"x": None},              # Stage 0: external input
-        1: {"x": 0},                 # Stage 1: from stage 0
-        2: {"x": 1, "skip": 0},      # Stage 2: from stages 0 and 1
-        3: {"x": 2},                 # Stage 3: from stage 2
-    }
-
-    targets = {
-        0: {"out": [1, 2]},          # Stage 0: sends to stages 1 and 2
-        1: {"out": [2]},             # Stage 1: sends to stage 2
-        2: {"out": [3]},             # Stage 2: sends to stage 3
-        3: {"out": [None]},          # Stage 3: final output
-    }
-
-    # Convert to signatures for the scheduler
-    signatures = signatures_from_sources_targets(sources, targets)
+    signatures = [
+        Signature(inputs=["x"],          outputs=["out"],        sources=[None], targets=[[1, 2]]),
+        Signature(inputs=["x"],          outputs=["out"],        sources=[0],    targets=[[2]]),
+        Signature(inputs=["x", "skip"],  outputs=["out"],        sources=[1, 0], targets=[[3]]),
+        Signature(inputs=["x"],          outputs=["out"],        sources=[2],    targets=[[None]]),
+    ]
 
     pipe = Pipeline(
         parts,
-        None,
         partitioner=False,
         placement=placement,
-        sources=sources,
-        targets=targets,
+        signatures=signatures,
     )
 
-**Variable Naming:**
+**Signature Fields:**
 
-* Keys in sources/targets are the actual variable names used in your forward pass
-* Variable names must match between stages (output name of one stage = input name of next)
-* ``None`` means external input/output
+* ``inputs``: variable names this stage receives
+* ``outputs``: variable names this stage produces
+* ``sources``: for each input, which stage it comes from (``None`` = external input)
+* ``targets``: for each output, list of stages it goes to (``None`` = final output)
 
 
 Data Distribution and Results
@@ -460,11 +445,12 @@ and materialize only the parts needed per rank.
             param.reset_parameters()
 
     # Create pipeline
-    sources, targets = get_sources_targets_sequential(list(range(world_size)))
+    placement = list(range(world_size))
+    signatures = sequential_signatures(placement)
     pipe = Pipeline(
-        part, None, partitioner=False,
-        placement=list(range(world_size)),
-        sources=sources, targets=targets
+        part, partitioner=False,
+        placement=placement,
+        signatures=signatures,
     )
 
 **Benefits:**
@@ -681,7 +667,7 @@ Example: Complete Custom Setup
     import torch.distributed as dist
     from elf import (
         Pipeline, Placement, replace_linear_with_linear_dw,
-        get_sources_targets_sequential
+        sequential_signatures,
     )
     from elf.scheduling import OpOptions, OperationType
     from elf.registry import SCHEDULERS
@@ -728,18 +714,17 @@ Example: Complete Custom Setup
 
     # 4. Setup communication
     placement = Placement.default("zbh2", world_size)
-    sources, targets = get_sources_targets_sequential(placement)
+    signatures = sequential_signatures(placement)
 
     config = PipelineConfig(
         scheduler=my_scheduler,
         placement=placement,
-        sources=sources,
-        targets=targets,
+        partitioner=False,
     )
 
     # 5. Create pipeline
     pipe = Pipeline(
-        model, sample, config=config
+        part, config=config, signatures=signatures,
     )
 
     # 6. Training loop

@@ -3,15 +3,15 @@ Utility functions for partitioning
 """
 
 import sys
+import shutil
+import subprocess
 
 import torch
+import torch.fx as fx
 
-__all__ = [
-	"remove_inplace_leaves",
-	"signatures_from_sources_targets",
-	"get_sources_targets_sequential",
-	"Signature",
-]
+from typing import TextIO, List
+
+__all__ = ["remove_inplace_leaves", "sequential_signatures", "Signature"]
 
 
 def remove_dupes(seq):
@@ -129,6 +129,21 @@ def get_sources_targets_sequential(placement):
 		sources[i] = {"input": i - 1 if i != 0 else None}
 		targets[i] = {"output": [i + 1 if i != len(placement) - 1 else None]}
 	return sources, targets
+
+
+def sequential_signatures(placement):
+	"""
+	Build signatures for a fully sequential pipeline (no skip connections),
+	with one input and one output per stage. This is intended to be used
+	with the ``partitioner=False`` option.
+
+	:param placement: placement of the model blocks on gpus
+	:type placement: List[int]
+	:return: signatures for each stage
+	:rtype: List[Signature]
+	"""
+	sources, targets = get_sources_targets_sequential(placement)
+	return signatures_from_sources_targets(sources, targets)
 
 
 def remove_inplace_leaves(module):
@@ -328,3 +343,101 @@ def prune_graph(graph):
 
 	sys.setrecursionlimit(original_recursion_limit)
 	return graph
+
+
+def export_partition_to_dot(parts: List[List[fx.Node]], file: TextIO):
+	"""
+	Export a partition to a DOT file.
+	"""
+	text = "digraph partition {\n"
+	text += "\trankdir=TB;\n"
+	text += "\tnode [shape=box, style=rounded];\n"
+
+	colors = []
+	for i in range(len(parts)):
+		palette = [
+			"#FF6B6B",  # Red
+			"#4ECDC4",  # Teal
+			"#45B7D1",  # Blue
+			"#FFA07A",  # Light Salmon
+			"#98D8C8",  # Mint
+			"#F7DC6F",  # Yellow
+			"#BB8FCE",  # Purple
+			"#85C1E2",  # Sky Blue
+			"#F8B88B",  # Peach
+			"#ABEBC6",  # Light Green
+			"#F5B7B1",  # Pink
+			"#D7BDE2",  # Lavender
+		]
+		colors.append(palette[i % len(palette)])
+
+	for i, p in enumerate(parts):
+		text += f"\tsubgraph cluster_{i} {{\n"
+		text += f'\t\tlabel="Partition {i}";\n'
+		text += "\t\tstyle=rounded;\n"
+		text += "penwidth=2;\n"
+		text += f'\t\tcolor="{colors[i]}";\n'
+		for node in p:
+			# Use node name as label, escape special characters
+			label = str(node.name).replace('"', '\\"')
+			text += (
+				f'\t\t"{node.name}" [label="{label}", fillcolor="{colors[i]}", style="filled,rounded"];\n'
+			)
+		text += "\t}\n"
+
+	# Add edges between nodes
+	all_nodes = {node for part in parts for node in part}
+	for node in all_nodes:
+		for user in node.users:
+			if user in all_nodes:
+				text += f'\t"{node.name}" -> "{user.name}";\n'
+
+	text += "}\n"
+	file.write(text)
+
+
+def export_partition_to_image(parts: List[List[fx.Node]], filename: str, format: str = "png"):
+	"""
+	Export a partition to an image.
+
+	:param parts: list of partitions, each containing a list of nodes
+	:type parts: List[List[fx.Node]]
+	:param filename: output filename (with orwithout extension)
+	:type filename: str
+	:param format: output format (e.g., "png", "svg", "pdf")
+	:type format: str
+
+	:raise FileNotFoundError: if dot (Graphviz) is not found in PATH
+	:raise subprocess.CalledProcessError: if dot command fails
+
+	:return: path to the generated image file
+	:rtype: str
+	"""
+	if not shutil.which("dot"):
+		raise FileNotFoundError(
+			"Graphviz 'dot' command not found. Please install Graphviz and ensure it is in your PATH."
+		)
+
+	dot_filename = f"{filename}.dot"
+	output_filename = (
+		f"{filename}.{format}" if not filename.endswith(format) else filename
+	)  # append format if not already present
+
+	try:
+		with open(dot_filename, "w") as f:
+			export_partition_to_dot(parts, f)
+
+		subprocess.run(
+			["dot", "-T", format, dot_filename, "-o", output_filename],
+			check=True,
+			capture_output=True,
+			text=True,
+		)
+
+		return output_filename
+	except subprocess.CalledProcessError as e:
+		raise subprocess.CalledProcessError(
+			e.returncode, e.cmd, output=e.output, stderr=f"Failed to generate image with dot: {e.stderr}"
+		)
+	except IOError as e:
+		raise IOError(f"Failed to write DOT file or read output: {e}")

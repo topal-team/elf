@@ -7,10 +7,11 @@ from .tracing import (
 	extract_graph_fx,
 	extract_graph_fx_safe,
 	extract_graph_export,
+	trace,
 )
-from .partition import partition_graph
+from .partition import PartitionResult, partition, split
 from .profile import profile_operations
-from .utils import Signature, signatures_from_sources_targets, get_sources_targets_sequential
+from .utils import Signature, sequential_signatures
 
 from .custom import split_graph, split_graph_constrained
 from .metis import split_graph_metis
@@ -46,9 +47,11 @@ TRACERS.register("export", extract_graph_export, "Extract graph using torch.expo
 
 
 __all__ = [
-	"partition_graph",
+	"PartitionResult",
+	"partition",
+	"trace",
+	"split",
 	"profile_operations",
+	"sequential_signatures",
 	"Signature",
-	"signatures_from_sources_targets",
-	"get_sources_targets_sequential",
 ]

@@ -4,7 +4,6 @@ Utils to partition a computation graph using METIS
 
 import os
 import shutil
-import random
 import tempfile
 import subprocess
 
@@ -253,20 +252,3 @@ def execute_metis(file, n):
 		],
 		stdout=subprocess.DEVNULL,
 	)  # Execute gpmetis
-
-
-def export_partition_to_dot(parts):
-	text = "digraph partition {\n"
-	for i, p in enumerate(parts):
-		color = "#" + "".join([random.choice("0123456789abcdef") for _ in range(6)])
-		text += f"\tsubgraph cluster_{i} {{\n"
-		text += f'bgcolor="{color}";\n'
-		for n in p:
-			text += f"{n.idx} [weight={n.time}];\n"
-		text += "}"
-	for p in parts:
-		for n in p:
-			text += n.to_dot_edges()
-	text += "}"
-	with open("partition.dot", "w+") as f:
-		f.write(text)

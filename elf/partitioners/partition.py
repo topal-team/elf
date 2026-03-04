@@ -3,14 +3,127 @@ API and main utils for graph partition
 """
 
 import shutil
+from typing import Dict, List, Optional
+
 import torch
+import torch.fx as fx
 
 from ..registry import PARTITIONERS, resolve
 from .profile import profile_operations
-from .utils import remove_inplace_leaves, Signature
+from .tracing import trace
+from .utils import remove_inplace_leaves, Signature, export_partition_to_image
 import logging
 
 logger = logging.getLogger("partition")
+
+
+class PartitionResult:
+	"""
+	Result of partitioning a computation graph.
+
+	Wraps all intermediate data and provides convenient access to
+	signatures, estimated costs, blocks, and visualization.
+
+	:param graph_module: the traced graph module
+	:type graph_module: fx.GraphModule
+	:param parts: reordered partition (lists of fx.Node per part)
+	:type parts: List[List[fx.Node]]
+	:param inputs: input variable names for each part
+	:type inputs: Dict[int, List[str]]
+	:param outputs: output variable names for each part
+	:type outputs: Dict[int, List[str]]
+	:param times: profiled execution time per node name
+	:type times: Dict[str, float]
+	:param memories: profiled memory size per node name
+	:type memories: Dict[str, float]
+	"""
+
+	def __init__(
+		self,
+		graph_module: fx.GraphModule,
+		parts: List[List[fx.Node]],
+		inputs: Dict[int, List[str]],
+		outputs: Dict[int, List[str]],
+		times: Dict[str, float],
+		memories: Dict[str, float],
+	):
+		self.graph_module = graph_module
+		self.parts = parts
+		self.inputs = inputs
+		self.outputs = outputs
+		self.times = times
+		self.memories = memories
+		self._signatures: Optional[List[Signature]] = None
+
+	@property
+	def n(self) -> int:
+		"""Number of parts in the partition."""
+		return len(self.parts)
+
+	@property
+	def signatures(self) -> List[Signature]:
+		"""Dataflow signatures for each part."""
+		if self._signatures is None:
+			sources, targets = get_sources_targets(self.inputs, self.outputs)
+			self._signatures = [
+				Signature(self.inputs[i], self.outputs[i], sources[i], targets[i]) for i in range(self.n)
+			]
+		return self._signatures
+
+	@property
+	def estimated_times(self) -> List[float]:
+		"""Per-part estimated execution times (seconds)."""
+		return [sum(self.times.get(node.name, 0) for node in part).item() for part in self.parts]
+
+	@property
+	def estimated_memory_transfers(self) -> List[float]:
+		"""Per-part estimated memory transfers (MB)."""
+		return [sum(self.memories.get(o, 0) for o in self.outputs[i]) / (2**20) for i in range(self.n)]
+
+	@property
+	def balance_score(self) -> float:
+		"""
+		Balance score of the partition, defined as:
+
+		.. math::
+			\\max_{p \\in [0, n-1]} \\frac{T_p}{\\frac{1}{n} \\sum_{p=0}^{n-1} T_p}
+
+		Lower is better. The optimal balance score is 1.
+		"""
+		return max(self.estimated_times) / (sum(self.estimated_times) / self.n)
+
+	@property
+	def transfer_score(self) -> float:
+		"""Transfer score of the partition. Lower is better."""
+		return sum(
+			self.estimated_memory_transfers[:-1]
+		)  # don't count last part, as it will not need to send its output to anyone
+
+	def create_blocks(self) -> List[fx.GraphModule]:
+		"""Create executable subgraph modules from the partition."""
+		return _create_subgraphs(self.graph_module, self.parts, self.inputs, self.outputs)
+
+	def validate(self):
+		"""
+		Check that the partition is valid.
+
+		:raise Exception: if the partition is invalid
+		"""
+		check_partition(self.graph_module.graph, self.parts, self.inputs, self.outputs)
+
+	def to_image(self, filename: str, format: str = "png") -> str:
+		"""
+		Export partition visualization to an image file.
+
+		:param filename: output filename
+		:param format: image format (e.g. "png", "svg", "pdf")
+		:return: path to the generated image
+		"""
+		return export_partition_to_image(self.parts, filename, format)
+
+	def __repr__(self):
+		times_str = ", ".join(f"{t:.3f}s" for t in self.estimated_times)
+		return f"PartitionResult(n={self.n}, estimated_times=[{times_str}])"
 
 
 def _check_for_partitioner(partitioner):
@@ -297,9 +410,9 @@ def get_sources_targets(inputs, outputs):
 	return sources, targets
 
 
-def split_graph(graph, times, memories, n, partitioner):
+def _dispatch_partitioner(graph, times, memories, n, partitioner):
 	"""
-	Split a graph using the selected partitioner.
+	Resolve and run the selected partitioner.
 	"""
 	partitioner = resolve(partitioner, PARTITIONERS)
 	partitioner = _check_for_partitioner(partitioner)
@@ -325,65 +438,66 @@ def _create_subgraphs(graph_module, parts, inputs, outputs):
 	return blocks
 
 
-def partition_graph(model, n, sample, partitioner, tracer):
+def split(graph_module, times, memories, n, partitioner="constrained") -> PartitionResult:
 	"""
-	Splits a graph into n parts of roughly equal time.
+	Partition a traced graph into ``n`` parts and return a :class:`PartitionResult`.
+
+	:param graph_module: traced graph module (from :func:`trace`)
+	:type graph_module: fx.GraphModule
+	:param times: profiled execution time per node name (from :func:`profile_operations`)
+	:type times: Dict[str, float]
+	:param memories: profiled memory size per node name (from :func:`profile_operations`)
+	:type memories: Dict[str, float]
+	:param n: number of parts
+	:type n: int
+	:param partitioner: partitioner to use (name or callable)
+	:type partitioner: str or Partitioner
+	:return: partition result
+	:rtype: PartitionResult
+	"""
+	raw_parts = _dispatch_partitioner(graph_module, times, memories, n, partitioner)
+	assert len(raw_parts) == n, f"Expected {n} parts, got {len(raw_parts)}"
+
+	parts, inputs, outputs = get_inputs_outputs(raw_parts)
+	result = PartitionResult(graph_module, parts, inputs, outputs, times, memories)
+
+	result.validate()
+
+	return result
+
+
+def partition(model, n, sample, partitioner="constrained", tracer="default") -> PartitionResult:
+	"""
+	Trace, profile, and partition a model in one call.
 
 	:param model: torch model
 	:type model: nn.Module
 	:param n: number of parts to create
 	:type n: int
-	:param sample: example of inputs to feed to the model (used for profiling)
+	:param sample: example input (used for tracing and profiling)
 	:type sample: Tensor
-	:param partitioner: partitioner to use, as registered in registry.PARTITIONERS
-	:type partitioner: Partitioner
-	:param tracer: tracer to use, as registered in registry.TRACERS
-	:type tracer: Tracer
-
-	:raise Exception: if the partition is invalid
-
-	:return:
-
-	        - ``n`` new modules corresponding to the partition
-			- ``signatures``: list of signatures for each part
-
-	:rtype: List[fx.GraphModule], List[Signature]
+	:param partitioner: partitioner to use (name or callable)
+	:type partitioner: str or Partitioner
+	:param tracer: tracer to use (name or callable)
+	:type tracer: str or Tracer
+	:return: partition result
+	:rtype: PartitionResult
 	"""
 	model.train()
 
-	# Trace and prepare the graph
-	graph = tracer(model, sample)
-	logger.info(f"Extracted graph has {len(graph.graph.nodes)} nodes")
-	# This is only correct if the graph is functionalized, i.e. no nodes have side effects.
-	# We don't have that guarantee here
-	# graph = prune_graph(graph)
+	graph_module = trace(model, sample, tracer)
+	logger.info(f"Extracted graph has {len(graph_module.graph.nodes)} nodes")
 
-	# Profile operations
-	times, memories = profile_operations(graph, sample)
+	times, memories = profile_operations(graph_module, sample)
 
-	# Partition the graph
-	parts = split_graph(graph, times, memories, n, partitioner)
-	assert len(parts) == n, f"Expected {n} parts, got {len(parts)}"
+	result = split(graph_module, times, memories, n, partitioner)
 
-	# Compute connections, reorder topologically, and clean up nodes
-	parts, inputs, outputs = get_inputs_outputs(parts)
-	sources, targets = get_sources_targets(inputs, outputs)
+	logger.info(f"Estimated times: {['%.3fs' % t for t in result.estimated_times]}")
+	logger.info(
+		f"Estimated memory transfers: {['%.1fMB' % m for m in result.estimated_memory_transfers]}"
+	)
 
-	n = len(inputs)
-	signatures = [Signature(inputs[i], outputs[i], sources[i], targets[i]) for i in range(n)]
+	for i in range(result.n):
+		logger.debug(f"Part {i} - signature = {result.signatures[i]}")
 
-	estimated_times = [sum(times.get(node.name, 0) for node in part) for part in parts]
-	estimated_mems = [sum(memories.get(o, 0) for o in out) / (2**20) for out in outputs.values()]
-
-	logger.info(f"Estimated times: {['%.3fs' % t for t in estimated_times]}")
-	logger.info(f"Estimated memory transfers: {['%.1fMB' % m for m in estimated_mems]}")
-
-	for i in range(n):
-		logger.debug(f"Part {i} - signature = {signatures[i]}")
-
-	check_partition(graph.graph, parts, inputs, outputs)
-
-	# Create subgraph modules
-	blocks = _create_subgraphs(graph, parts, inputs, outputs)
-
-	return blocks, signatures
+	return result

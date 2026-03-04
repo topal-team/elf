@@ -25,11 +25,7 @@ from torch.utils.checkpoint import checkpoint
 
 from elf.utils import TensorMetadata, Timer
 from elf.zb_utils import LayerDW
-from elf.partitioners.utils import (
-	Signature,
-	get_sources_targets_sequential,
-	signatures_from_sources_targets,
-)
+from elf.partitioners.utils import Signature, sequential_signatures
 from elf.scheduling.scheduling import OpOptions, OperationType, Operation
 
 logger = logging.getLogger("elf.ilp")
@@ -321,6 +317,9 @@ def propagate_sample(block_models, placement, sample, pp_group):
 				block_in_metas[block_id] = in_meta
 				fake_out = block_models[block_id](fake_inp)
 				if isinstance(fake_out, tuple):
+					assert len(fake_out) == 1, (
+						"ILP is only supported for models that exchange a single tensor between blocks."
+					)
 					fake_out = fake_out[0]
 				assert fake_out.size(0) == mb_size, (
 					f"Fake output has size {fake_out.size(0)} but expected {mb_size}"
@@ -423,7 +422,7 @@ def _generate_simplified_schedule(placement, n_micro_batches, scheduler):
 	*scheduler* is a resolved callable, not a registry key.
 	"""
 	p = len(set(placement))
-	signatures = signatures_from_sources_targets(*get_sources_targets_sequential(placement))
+	signatures = sequential_signatures(placement)
 	schedule = scheduler(placement, n_micro_batches, signatures)
 
 	simplified = [[] for _ in range(p)]
@@ -439,7 +438,10 @@ def _generate_simplified_schedule(placement, n_micro_batches, scheduler):
 
 
 def _scale_stats_by_batch_size(statistics, mb_size):
-	"""Scale the statistics by the micro-batch size."""
+	"""
+	Scale the statistics by the micro-batch size.
+	This util was written in case we profile with a batch size different from the one used at runtime. Since it's not a satisfying solution, we rather warn the user to use a constant batch size instead.
+	"""
 	return [
 		{
 			"T": {k: v * mb_size for k, v in stats["T"].items()},
@@ -464,13 +466,10 @@ def build_ilp_params(statistics, placement, scheduler, n_micro_batches, memory_b
 	assert len(statistics) == nstages
 
 	sched = _generate_simplified_schedule(placement, n_micro_batches, scheduler)
-	scaled_stats = _scale_stats_by_batch_size(statistics, mb_size)
-	assert all((key in scaled for key in stats) for scaled, stats in zip(scaled_stats, statistics)), (
-		"Scaled stats do not contain all keys of the original stats"
-	)
+	# scaled_stats = _scale_stats_by_batch_size(statistics, mb_size)
 
 	stages = []
-	for stats in scaled_stats:
+	for stats in statistics:
 		T = stats["T"]
 		M = stats["M"]
 		Mpeak = dict(stats["Mpeak"])
@@ -728,7 +727,9 @@ def solve_remat(
 		f"Solving ILP with {solver_name} solver, {time_limit} seconds time limit and {memory_budget} MB memory budget"
 	)
 	start = time.time()
-	prob.solve(solver(msg=False, timeLimit=time_limit)) # TODO: add env variable to control solver/time limit
+	prob.solve(
+		solver(msg=False, timeLimit=time_limit)
+	)  # TODO: add env variable to control solver/time limit
 	end = time.time()
 	solve_time = end - start
 

@@ -9,7 +9,7 @@ from torch.export import Dim
 
 import logging
 
-from elf.registry import TRACERS
+from elf.registry import TRACERS, resolve
 from elf.zb_utils import LayerDWTracer
 
 
@@ -308,3 +308,20 @@ def get_shapes(input):
 	else:
 		# For non-tensor and non-container types, return as is
 		return input
+
+
+def trace(model, sample, tracer="default") -> torch.fx.GraphModule:
+	"""
+	Trace a model into an ``fx.GraphModule``.
+
+	:param model: torch model
+	:type model: nn.Module
+	:param sample: example input for tracing
+	:type sample: Tensor
+	:param tracer: tracer to use (name or callable)
+	:type tracer: str or Tracer
+	:return: traced graph module
+	:rtype: fx.GraphModule
+	"""
+	tracer_fn = resolve(tracer, TRACERS)
+	return tracer_fn(model, sample)
