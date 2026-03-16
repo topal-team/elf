@@ -22,9 +22,9 @@ cd elf
 
 # Create and activate a virtual environment (recommended)
 python3 -m venv .venv
-source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+source .venv/bin/activate
 
-# Install ELF in editable mode (changes in the repo are picked up immediately)
+# Install ELF in editable mode
 pip install -e .
 ```
 
