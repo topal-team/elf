@@ -11,6 +11,30 @@ ELF is a research-oriented framework built on top of **PyTorch** that makes trai
 - **Fine-grained rematerialisation control** – inject your own policy to trade memory for extra compute, or use ILP-based optimization to fit your budget.
 - **Plugin registries** – add new schedulers, partitioners or tracers without touching the core code.
 
+## Installation
+
+Install ELF from the repository for local development or use.
+
+```bash
+# Clone the repository
+git clone https://github.com/topal-team/elf.git
+cd elf
+
+# Create and activate a virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install ELF in editable mode
+pip install -e .
+```
+
+**Optional extras** (install from PyPI when you add the extra):
+
+- **Dev** — pytest and ruff (tests and linting). Ruff uses the repo’s `ruff.toml` for config: `pip install -e ".[dev]"`
+- **Docs** — Sphinx and Read the Docs theme (build docs): `pip install -e ".[docs]"`
+(On **zsh**, quote the package spec so brackets are not interpreted as globs)
+
+
 ## Quick start
 
 ```python

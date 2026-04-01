@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elf"
+version = "0.1.0"
+description = "ELF: PyTorch Framework for Memory-Aware Pipeline Parallel Training"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    {name = "Adrien Aguila--Multner <adrienaguila@gmail.com>, Julia Gusak <julgusak@gmail.com>},
+]
+keywords = ["pytorch", "efficient", "training", "pipeline-parallel",
+"rematerizlization", "activation-checkpointing", "offloading", 
+"distributed", "deep-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.4",
+    "pyyaml",
+    "psutil",
+    "dill",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+docs = [
+    "sphinx",
+    "sphinx_rtd_theme",
+]
+
+[project.urls]
+Repository = "https://github.com/topal-team/elf"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["elf*"]
