@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, Generic, Iterable, List, TypeVar, Protoc
 
 import torch
 
-__all__ = ["Registry", "SCHEDULERS", "PARTITIONERS", "TRACERS", "resolve"]
+__all__ = ["Registry", "SCHEDULERS", "PARTITIONERS", "TRACERS", "COMM_SCHEDULERS", "resolve"]
 
 T = TypeVar("T", bound=Callable[..., object])
 
@@ -71,6 +71,13 @@ class Registry(Generic[T]):
 				f"Unknown {self._name} '{key}'. Available {self._name}s: [{available}]"
 			) from exc
 
+	def get_key(self, obj: T) -> str:
+		"""Retrieve the key of an object."""
+		for key, value in self._values.items():
+			if value is obj:
+				return key
+		raise ValueError(f"Object {obj} not found in {self._name}")
+
 	def get_description(self, key: str) -> str:
 		"""Retrieve the description of an object by *key*.
 
@@ -86,7 +93,16 @@ class Registry(Generic[T]):
 
 	def available(self) -> List[str]:
 		"""Return the list of registered keys (sorted for reproducibility)."""
-		return sorted(self._values.keys())
+		# Deduplicate by tracking seen objects
+		seen_objs = set()
+		unique_keys = []
+		for key in sorted(self._values.keys()):
+			obj = self._values[key]
+			obj_id = id(obj)
+			if obj_id not in seen_objs:
+				seen_objs.add(obj_id)
+				unique_keys.append(key)
+		return unique_keys
 
 	def __contains__(self, item: str) -> bool:
 		return item in self._values
@@ -110,6 +126,7 @@ class Registry(Generic[T]):
 SCHEDULERS: Registry[SchedulerFn] = Registry("scheduler")
 PARTITIONERS: Registry[PartitionerFn] = Registry("partitioner")
 TRACERS: Registry[TracerFn] = Registry("tracer")
+COMM_SCHEDULERS: Registry[CommSchedulerFn] = Registry("comm_scheduler")
 
 
 def resolve(var: str | Callable, registry: Registry) -> T:
@@ -132,16 +149,12 @@ class SchedulerFn(Protocol):
 	Function that returns a list of operations to be performed.
 	"""
 
-	def __call__(
-		self, placement: List[int], n_micro_batches: int, signatures: List[Any]
-	) -> List[Any]:
+	def __call__(self, placement: List[int], n_micro_batches: int) -> List[Any]:
 		"""
 		:param placement: device on which each block is placed (Placement object, which is a List[int])
 		:type placement: Placement (List[int])
 		:param n_micro_batches: number of micro batches
 		:type n_micro_batches: int
-		:param signatures: signatures representing dependencies between blocks
-		:type signatures: List[Signature]
 
 		:return: a list containing the operations to execute for **all** processes
 		:rtype: List[Operation]
@@ -206,4 +219,23 @@ class TracerFn(Protocol):
 
 Tracer: TypeAlias = TracerFn
 
-__all__ += ["Scheduler", "Partitioner", "Tracer"]
+
+class CommSchedulerFn(Protocol):
+	"""
+	Function that reorders communications in a schedule. The order of computations should NOT be changed.
+	"""
+
+	def __call__(self, schedule: List[Operation]) -> List[Operation]:  # noqa: F821 #type: ignore
+		"""
+		:param schedule: Schedule to reorder
+		:type schedule: List[Any]
+
+		:return: Reordered schedule
+		:rtype: List[Operation]
+		"""
+		...
+
+
+CommScheduler: TypeAlias = CommSchedulerFn
+
+__all__ += ["Scheduler", "Partitioner", "Tracer", "CommScheduler"]

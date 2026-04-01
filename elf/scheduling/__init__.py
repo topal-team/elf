@@ -3,11 +3,10 @@ Scheduling strategies for both computations and communications.
 """
 
 from .scheduling import schedule_to_str, check_schedule_validity, OpOptions
-from .comm_scheduling import reorder_communications
+from .comm_scheduling import *
 from .schedulers import *
 
-from ..registry import SCHEDULERS
-
+from ..registry import SCHEDULERS, COMM_SCHEDULERS
 
 SCHEDULERS.register(
 	["afab", "gpipe"],
@@ -59,4 +58,30 @@ SCHEDULERS.register(
 	"fixed", FixedSchedule, "Fixed schedule. Use a dictionary to specify the schedule."
 )
 
-__all__ = ["schedule_to_str", "check_schedule_validity", "reorder_communications", "OpOptions"]
+
+SCHEDULERS.register(
+	"auto",
+	lambda *_: None,
+	"Auto scheduler that solves the ILP for all base schedulers and uses the best objective value.",
+)  # dummy scheduler: it will be overridden by the AutoScheduler class during stage-rematification
+# this trick is a bit ugly, I'd rather have a proper registration that solves lazily
+
+COMM_SCHEDULERS.register(
+	"topo",
+	topological_sort,
+	"Topological sort of the communications. No optimizations are performed.",
+)
+
+COMM_SCHEDULERS.register(
+	"simulation",
+	smart_topological_sort,
+	"Simulate execution to schedule communications together across ranks.",
+)
+
+COMM_SCHEDULERS.register(
+	"pipelined",
+	pipelined_topological_sort,
+	"Pipelines receive -> compute -> send to utilize compute/comm overlapping.",
+)
+
+__all__ = ["schedule_to_str", "check_schedule_validity", "add_comms", "OpOptions"]

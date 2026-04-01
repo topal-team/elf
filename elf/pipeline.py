@@ -2,22 +2,34 @@
 Pipeline API and orchestration
 """
 
+from __future__ import annotations
+
 import os
 
-from dataclasses import asdict, dataclass
-from typing import Any
+from dataclasses import asdict, dataclass, field, fields
 from datetime import timedelta
+from typing import Any, List
 
 import torch
 import torch.distributed as dist
 
 from .execution import PipelineBlock, Engine
-from .scheduling import schedule_to_str, check_schedule_validity, reorder_communications
-from .utils import TensorMetadata, send_models, recv_models, broadcast_models, Placement
-from .scheduling.ilp import solve_remat, RematScheduler
+from .scheduling import schedule_to_str, check_schedule_validity, add_comms
+from .scheduling.ilp import stagerematify, AutoScheduler
 from .zb_utils import LayerDW
-from .registry import Tracer, Partitioner, Scheduler, TRACERS, PARTITIONERS, SCHEDULERS, resolve
-from .partitioners import partition, sequential_signatures
+from .utils import TensorMetadata, send_models, recv_models, broadcast_models, Placement
+from .registry import (
+	resolve,
+	Tracer,
+	Partitioner,
+	Scheduler,
+	CommScheduler,
+	TRACERS,
+	PARTITIONERS,
+	SCHEDULERS,
+	COMM_SCHEDULERS,
+)
+from .partitioners import partition, sequential_signatures, Signature
 
 import logging
 
@@ -26,16 +38,17 @@ logger = logging.getLogger("pipeline")
 
 @dataclass
 class PipelineConfig:
-	"""
-	Configuration for Pipeline initialization.
+	r"""
+	Configuration for Pipeline initialization. Registry arguments (tracer, partitioner, scheduler & comm_scheduler) can take any value listed in the :py:mod:`elf.registry`. Call ``elf.registry.[REGISTRY].available()`` to list the available values.
 
 	:param tracer: Tracer to use for model graph extraction. When using default, tries all available tracers one after the other. (default: "default")
 	:type tracer: Tracer or str
 	:param partitioner: Partitioning strategy or False to skip partitioning (default: "constrained")
 	:type partitioner: Partitioner or str
-	:param scheduler: Static scheduling algorithm (default: "1f1b")
+	:param scheduler: Static scheduling algorithm (default: "1f1b"). Can be "auto" to solve the ILP for all base schedulers and use the best objective value.
 	:type scheduler: Scheduler or str
-	:param placement: Device placement strategy or list of ranks (default: "auto")
+	:param comm_scheduler: Communication scheduler to use for reordering communications. (default: "pipelined")
+	:param placement: Device placement strategy as a list that maps stage id -> processor id (default: "auto")
 	:type placement: Placement or str
 	:param pp: Number of pipeline parallel processes. If None, computed as world_size // dp
 	:type pp: int or None
@@ -45,16 +58,36 @@ class PipelineConfig:
 	:type worker: int
 	:param memory_budget: GPU memory budget in MB for ILP-based rematerialization. When set, stages are profiled at partition time and an ILP is solved on the first training step to decide which operations to recompute. (default: None)
 	:type memory_budget: int or None
+	:param signatures: Dataflow signatures describing the communication pattern between pipeline stages. Only needed when ``partitioner=False``, i.e. your model is already partitioned. Use :func:`elf.partitioners.sequential_signatures` for simple sequential models. If not provided, a sequential pattern is assumed.
+	:type signatures: List[Signature] or None
 	"""
 
-	tracer: Tracer | str = "default"
-	partitioner: Partitioner | str = "constrained"
-	scheduler: Scheduler | str = "1f1b"
+	# Registry fields (need to be resolved)
+	tracer: Tracer | str = field(default="default", metadata={"registry": TRACERS})
+	partitioner: Partitioner | str = field(default="constrained", metadata={"registry": PARTITIONERS})
+	scheduler: Scheduler | str = field(default="auto", metadata={"registry": SCHEDULERS})
+	comm_scheduler: CommScheduler | str = field(
+		default="pipelined", metadata={"registry": COMM_SCHEDULERS}
+	)
+	# Regular fields
 	placement: Placement | str = "auto"
 	pp: int | None = None
 	dp: int = 1
 	worker: int = 0
 	memory_budget: int | None = None
+	signatures: List[int, Signature] | None = None  # only needed when partitioner = False
+
+	def resolve(self):
+		resolved = {}
+		for f in fields(self):
+			val = getattr(self, f.name)
+			registry = f.metadata.get("registry")
+			if registry is not None and val is not False:
+				resolved[f.name] = resolve(val, registry)
+			else:
+				resolved[f.name] = val
+
+		return PipelineConfig(**resolved)
 
 	def to_kwargs(self) -> dict[str, Any]:
 		"""Convert config to kwargs dict, excluding None values."""
@@ -77,15 +110,7 @@ class Pipeline:
 		*,
 		config: PipelineConfig | None = None,
 		# Configuration parameters (used when config is None)
-		placement="auto",
-		partitioner="constrained",
-		scheduler="1f1b",
-		tracer="default",
-		pp=None,
-		dp=1,
-		worker=0,
-		signatures=None,
-		memory_budget=None,
+		**kwargs,
 	):
 		"""
 		Initialize a Pipeline with model parallelism configuration.
@@ -109,26 +134,8 @@ class Pipeline:
 		:type model: nn.Module
 		:param sample: sample inputs used for profiling. Not needed when using pre-partitioned model. The batch size should be the size of an individual micro-batch.
 		:type sample: torch.Tensor or List[torch.Tensor]
-		:param config: PipelineConfig object for centralized configuration. When provided, individual parameters are ignored.
+		:param config: PipelineConfig object for centralized configuration. When provided, individual parameters are ignored. If not provided, individual fields can be filled via kwargs. All fields that are not provided will use default values. See :class:`elf.pipeline.PipelineConfig` for more details.
 		:type config: PipelineConfig or None
-		:param placement: list of device ranks. Block ``i`` of the pipeline will be placed on rank ``placement[i]``. Leave to default ("auto") for automatic placement.
-		:type placement: List[int] or str
-		:param partitioner: if your model is already partitioned, set to False. Otherwise set to the partition strategy you want to use (default = constrained), which will try to create balanced blocks according to their profiled execution time.
-		:type partitioner: boolean or str
-		:param scheduler: static scheduling algorithm to use. currently supported : GPipe ("afab"), PipeDream ("1f1b") (default), Hanayo ("hanayo"), ZBH1/ZBH2/ZBV ("zbh1", "zbh2", "zbv"), Full Remat ("full_remat"), Inference ("inference"). You can also define your own scheduler by registering it in the registry.
-		:type scheduler: str or function(List[int], int, **kwargs) -> List[Operation]
-		:param tracer: Tracer to use for model graph extraction. When using default, tries all available tracers one after the other. (default: "default")
-		:type tracer: Tracer or str
-		:param pp: Number of pipeline parallel processes. If None, computed as world_size // dp
-		:type pp: int or None
-		:param dp: number of data parallel processes to use.
-		:type dp: int
-		:param worker: rank of the process that will profile the model and partition it
-		:type worker: int
-		:param signatures: Dataflow signatures describing the communication pattern between pipeline stages. Only needed when ``partitioner=False``, i.e. your model is already partitioned. Use :func:`elf.partitioners.sequential_signatures` for simple sequential models. If not provided, a sequential pattern is assumed.
-		:type signatures: List[Signature] or None
-		:param memory_budget: GPU memory budget in MB for ILP-based rematerialization. When set, an ILP is solved on the first training step to decide which operations to recompute. (default: None)
-		:type memory_budget: int or None
 		"""
 		if not dist.is_initialized():
 			logger.warning(
@@ -138,19 +145,8 @@ class Pipeline:
 		rank = dist.get_rank()
 
 		# Create config from either provided config or individual parameters
-		if config is not None:
-			self.cfg = config
-		else:
-			self.cfg = PipelineConfig(
-				tracer=tracer,
-				partitioner=partitioner,
-				scheduler=scheduler,
-				placement=placement,
-				pp=pp,
-				dp=dp,
-				worker=worker,
-				memory_budget=memory_budget,
-			)
+		self.cfg = config or PipelineConfig(**kwargs)
+		self.cfg = self.cfg.resolve()
 
 		self.pp = self.cfg.pp or ws // self.cfg.dp  # Number of GPUs used for pipeline parallelism
 		self.dp = self.cfg.dp  # Number of GPUs used for data parallelism
@@ -179,7 +175,7 @@ class Pipeline:
 		)  # False if no partitioning is desired
 
 		# Partition model
-		parts, signatures = self._partition_model(model, sample, signatures)
+		parts, signatures = self._partition_model(model, sample, self.cfg.signatures)
 		self.signatures = signatures
 
 		# Create execution engine
@@ -190,7 +186,7 @@ class Pipeline:
 		self.schedule = []
 		self.last_nmb = 0
 
-		# ILP remat: profile now (parallel), solve lazily at first step()
+		# ILP remat: profile now, solve lazily at first step()
 		self._remat_scheduler = None
 		self._remat_nmb = None
 		if self.cfg.memory_budget is not None:
@@ -200,6 +196,13 @@ class Pipeline:
 			self._remat_stats = profile_all_stages(
 				self.blocks, self.signatures, self.placement, sample, self.pp_group
 			)
+			if resolve(self.cfg.scheduler, SCHEDULERS) is SCHEDULERS.get("auto"):
+				# Special case: auto scheduler solves StageRemat for all base schedulers and uses the best objective value
+				self.scheduler = AutoScheduler(self._remat_stats, self.cfg.memory_budget, self.cfg.worker)
+			else:
+				self.scheduler = stagerematify(
+					self.scheduler, self._remat_stats, self.cfg.memory_budget, self.cfg.worker
+				)
 		else:
 			self._remat_stats = None
 
@@ -244,7 +247,7 @@ class Pipeline:
 
 		if regenerate_schedule:
 			# We have to recompute the schedule
-			self._generate_schedule(n_micro_batches, scheduler, mb_sizes)
+			self._generate_schedule(n_micro_batches, scheduler, self.cfg.comm_scheduler, mb_sizes)
 
 			self.last_nmb = n_micro_batches
 
@@ -449,11 +452,27 @@ class Pipeline:
 
 	def is_first(self):
 		"""Check if this process owns the first pipeline stage."""
-		return dist.get_rank() == self.placement[0]
+		return self.placement.is_head(dist.get_rank())
 
 	def is_last(self):
 		"""Check if this process owns the last pipeline stage."""
-		return dist.get_rank() == self.placement[-1]
+		return self.placement.is_tail(dist.get_rank())
+
+	def get_profiling_statistics(self):
+		"""
+		Get the profiling statistics measured to solve the ILP.
+		Only available after the first step() has been called with a memory budget.
+		The output format for each entry of the list is described in :func:`~elf.scheduling.ilp.profile`. There is one entry per stage of the entire pipeline.
+
+		:return: Profiling statistics
+		:rtype: List[dict]
+
+		"""
+		if not self._remat_stats:
+			raise ValueError(
+				"Profiling statistics are not available before the first step() with a memory budget"
+			)
+		return self._remat_stats
 
 	def _get_mb_sizes(self, split_size, batch):
 		"""
@@ -485,7 +504,7 @@ class Pipeline:
 
 		return mb_sizes
 
-	def _generate_schedule(self, n_micro_batches, scheduler, mb_sizes):
+	def _generate_schedule(self, n_micro_batches, scheduler, comm_scheduler, mb_sizes):
 		"""
 		Generate and optimize the execution schedule, then filter for current process.
 
@@ -493,31 +512,17 @@ class Pipeline:
 		:type n_micro_batches: int
 		:param scheduler: scheduler to use for the step
 		:type scheduler: Scheduler
+		:param comm_scheduler: communication scheduler to use for the step
+		:type comm_scheduler: CommScheduler
 		:param mb_sizes: List of micro-batch sizes
 		:type mb_sizes: List[int]
 		"""
-		if self._remat_stats is not None and n_micro_batches != self._remat_nmb:
-			solution_list = [None]
-			if dist.get_rank() == 0:
-				solution_list[0] = solve_remat(
-					self._remat_stats,
-					list(self.placement),
-					scheduler,
-					n_micro_batches,
-					self.cfg.memory_budget,
-					mb_sizes,
-				)
-			dist.broadcast_object_list(solution_list, src=0)
-			self._remat_scheduler = RematScheduler(scheduler, solution_list[0])
-			self._remat_nmb = n_micro_batches
+		schedule = scheduler(self.placement, n_micro_batches)
+		schedule = add_comms(schedule, self.signatures)
+		if comm_scheduler:
+			schedule = comm_scheduler(schedule)
 
-		if self._remat_scheduler is not None:
-			scheduler = self._remat_scheduler
-
-		schedule = scheduler(self.placement, n_micro_batches, self.signatures)
 		check_schedule_validity(schedule)
-
-		schedule = reorder_communications(schedule, strategy="pipelined")
 
 		if dist.get_rank() == 0:
 			logger.debug(f"Schedule:\n{schedule_to_str(schedule)}")
@@ -695,9 +700,7 @@ class Pipeline:
 					self.placement[block_a],
 					self.placement[block_b],
 				)  # map to actual ranks only for PG creation
-				group_fwd = dist.new_group(
-					[rank_a, rank_b], device_id=device
-				)  # might fail if use_local_synchronization is not supported (for instance with MPI)
+				group_fwd = dist.new_group([rank_a, rank_b], device_id=device)
 				group_bwd = dist.new_group([rank_a, rank_b], device_id=device)
 
 				# Save group if this block needs it

@@ -7,6 +7,7 @@ from typing import List, Tuple, Set, Dict
 from collections import defaultdict
 
 from .scheduling import OperationType, get_peer, matching, comm_types, compute_types, Operation
+from ..partitioners import Signature
 
 
 class DirectedGraph:
@@ -168,12 +169,13 @@ class DirectedGraph:
 		return False
 
 
-def topological_sort(graph: DirectedGraph) -> List[int]:
+def topological_sort(schedule: List[Operation]) -> List[int]:
 	"""
 	Sort the nodes of the graph topologically (in reverse order).
 	Nodes that are connected by bidirectional edges are forced to be consecutive in the output.
 	"""
-
+	graph = schedule_to_graph(schedule)
+	node_to_op = {i: op for i, op in enumerate(schedule)}
 	out_degree = [0] * graph.num_nodes
 	pairings = {}  # Nodes connected by bidirectional edges
 	for node in range(graph.num_nodes):
@@ -205,7 +207,7 @@ def topological_sort(graph: DirectedGraph) -> List[int]:
 	result = []
 
 	def process_node(node: int):
-		result.append(node)
+		result.append(node_to_op[node])
 
 		for neighbor in graph.get_predecessors(node):
 			out_degree[neighbor] -= 1
@@ -231,11 +233,12 @@ def topological_sort(graph: DirectedGraph) -> List[int]:
 	return result
 
 
-def smart_topological_sort(graph: DirectedGraph, schedule: List[Operation]) -> List[int]:
+def smart_topological_sort(schedule: List[Operation]) -> List[int]:
 	"""
 	Topological sort using simulation of execution.
 	We use a step mechanism to try to synchronize communications when both send and recv are ready.
 	"""
+	graph = schedule_to_graph(schedule)
 	node_to_op = {i: op for i, op in enumerate(schedule)}
 	op_to_node = {op: i for i, op in enumerate(schedule)}
 	out_degree = [0] * graph.num_nodes
@@ -265,7 +268,7 @@ def smart_topological_sort(graph: DirectedGraph, schedule: List[Operation]) -> L
 
 	def process_node(node: int):
 		# Mark a node as processed (added to the result), and update the dependency count of its predecessors
-		result.append(node)
+		result.append(node_to_op[node])
 		for neighbor in graph.get_predecessors(node):
 			out_degree[neighbor] -= 1
 
@@ -337,20 +340,14 @@ def smart_topological_sort(graph: DirectedGraph, schedule: List[Operation]) -> L
 		if len(result) == len(schedule):
 			break
 
-	# Check that the schedule is valid (acyclic)
-	# for i, op in enumerate(result):
-	# 	for j in range(i + 1, len(result)):
-	# 		assert not graph.has_unidirectional_edge(i, j), (
-	# 			"Backward edge found in the toposort! The schedule with reordered communications can hang."
-	# 		)
-
 	return result
 
 
-def pipelined_topological_sort(graph: DirectedGraph, schedule: List[Operation]) -> List[int]:
+def pipelined_topological_sort(schedule: List[Operation]) -> List[int]:
 	"""
 	Topological sort using pipelined execution.
 	"""
+	graph = schedule_to_graph(schedule)
 	op_to_node = {op: i for i, op in enumerate(schedule)}
 	out_degree = [0] * graph.num_nodes
 	pairings = {}  # match send to corresponding recv
@@ -403,7 +400,7 @@ def pipelined_topological_sort(graph: DirectedGraph, schedule: List[Operation]) 
 			]
 			while len(skippable_ops) > 0:
 				for op in skippable_ops:
-					result.append(op_to_node[op])  # append and process immediately
+					result.append(op)  # append and process immediately
 					process_node(op_to_node[op])
 					rank_ops[rank].remove(op)
 
@@ -415,7 +412,7 @@ def pipelined_topological_sort(graph: DirectedGraph, schedule: List[Operation]) 
 			next_recv = next((op for op in ops if op.op in recv_types and is_ready(op_to_node[op])), None)
 			if next_recv is not None:
 				result.append(
-					op_to_node[next_recv]
+					next_recv
 				)  # append but don't process yet ; it will be finished after this step
 				to_process[rank].append(op_to_node[next_recv])
 				rank_ops[rank].remove(next_recv)
@@ -425,16 +422,12 @@ def pipelined_topological_sort(graph: DirectedGraph, schedule: List[Operation]) 
 			)
 			if next_compute is not None:
 				rank_ops[rank].remove(next_compute)
-				result.append(
-					op_to_node[next_compute]
-				)  # append AND process immediately so that the next send is ready
+				result.append(next_compute)  # append AND process immediately so that the next send is ready
 				process_node(op_to_node[next_compute])
 
 			next_send = next((op for op in ops if op.op in send_types and is_ready(op_to_node[op])), None)
 			if next_send is not None:
-				result.append(
-					op_to_node[next_send]
-				)  # append but don't process yet ; it will be ready after this step
+				result.append(next_send)  # append but don't process yet ; it will be ready after this step
 				to_process[rank].append(op_to_node[next_send])
 				rank_ops[rank].remove(next_send)
 
@@ -449,14 +442,15 @@ def pipelined_topological_sort(graph: DirectedGraph, schedule: List[Operation]) 
 
 	for i, op in enumerate(result):
 		for j in range(i + 1, len(result)):
-			assert not graph.has_unidirectional_edge(i, j), (
+			assert not graph.has_unidirectional_edge(op_to_node[result[i]], op_to_node[result[j]]), (
 				"Backward edge found in the toposort! The schedule with reordered communications can hang."
+				+ f" {op_to_node[result[i]]} -> {op_to_node[result[j]]}"
 			)
 
 	return result
 
 
-def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[int, Operation]]:
+def schedule_to_graph(schedule: List[Operation]) -> DirectedGraph:
 	"""
 	Convert a schedule into a directed graph representation.
 
@@ -560,24 +554,45 @@ def schedule_to_graph(schedule: List[Operation]) -> Tuple[DirectedGraph, Dict[in
 	return graph
 
 
-def reorder_communications(schedule: List[Operation], strategy: str = "smart") -> List[Operation]:
+def add_comms(schedule: List[Operation], signatures: List[Signature]) -> List[Operation]:
 	"""
-	Reorder communications in the schedule to break all dependency cycles.
-	This function also performs some optimizations on the order of communications.
-
-	:param schedule: List of operations to reorder
-	:type schedule: List[Operation]
-	:return: Reordered schedule
-	:rtype: List[Operation]
+	Add communications to the schedule based on the signatures.
 	"""
-	graph = schedule_to_graph(schedule)
+	_COMPUTE_TO_COMMS = {
+		OperationType.FORWARD: (OperationType.RECV_FORWARD, OperationType.SEND_FORWARD),
+		OperationType.BACKWARD_INPUTS: (OperationType.RECV_BACKWARD, OperationType.SEND_BACKWARD),
+	}
 
-	if strategy == "smart":
-		topo_order = smart_topological_sort(graph, schedule)
-	elif strategy == "pipelined":
-		topo_order = pipelined_topological_sort(graph, schedule)
-	else:
-		topo_order = topological_sort(graph)
+	def _exists(op_type, block_id, mb_id):
+		for op in schedule:
+			if op.op == op_type and op.block_id == block_id and op.mb_id == mb_id:
+				return True
+		return False
 
-	new_schedule = [schedule[i] for i in topo_order]
-	return new_schedule
+	for op in schedule:
+		if op.op in _COMPUTE_TO_COMMS:
+			recv_type, send_type = _COMPUTE_TO_COMMS[op.op]
+			signature = signatures[op.block_id]
+			# Add send and recvs
+			if not _exists(recv_type, op.block_id, op.mb_id):
+				sources = (
+					sorted(signature.get_all_sources(), reverse=True)
+					if recv_type == OperationType.RECV_FORWARD
+					else sorted(signature.get_all_targets())
+				)
+				for src in sources:
+					schedule.append(Operation(op.block_id, op.mb_id, recv_type, op.rank, src=src))
+			if not _exists(send_type, op.block_id, op.mb_id):
+				destinations = (
+					sorted(signature.get_all_targets())
+					if send_type == OperationType.SEND_FORWARD
+					else sorted(signature.get_all_sources(), reverse=True)
+				)
+				for dst in destinations:
+					schedule.append(Operation(op.block_id, op.mb_id, send_type, op.rank, dst=dst))
+
+	stages = set((op.block_id, op.rank) for op in schedule)
+	for stage, rank in stages:
+		schedule.append(Operation(stage, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank))
+
+	return schedule

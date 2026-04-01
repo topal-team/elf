@@ -23,9 +23,10 @@ import torch.distributed as dist
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.utils.checkpoint import checkpoint
 
+from elf.registry import resolve, SchedulerFn, SCHEDULERS
 from elf.utils import TensorMetadata, Timer
 from elf.zb_utils import LayerDW
-from elf.partitioners.utils import Signature, sequential_signatures
+from elf.partitioners.utils import Signature
 from elf.scheduling.scheduling import OpOptions, OperationType, Operation
 
 logger = logging.getLogger("elf.ilp")
@@ -55,7 +56,7 @@ def _measure_full_pass(
 	as the input sample for the next pipeline stage, avoiding an extra forward
 	pass just for shape propagation.
 	"""
-	outputs = stage(sample)
+	outputs = stage(*sample)
 	outputs = (outputs,) if not isinstance(outputs, tuple) else outputs
 	warmup_output = outputs[0].detach().cpu()
 	loss = _fake_loss(outputs)
@@ -72,11 +73,11 @@ def _measure_full_pass(
 		torch.cuda.reset_peak_memory_stats()
 		start_mem = torch.cuda.memory_allocated()
 		with Timer() as timer:
-			outputs = stage(sample)
+			outputs = stage(*sample)
 			outputs = (outputs,) if not isinstance(outputs, tuple) else outputs
 			loss = _fake_loss(outputs)
 
-		minput = (sample.nbytes) / 1024 / 1024
+		minput = sum(s.nbytes for s in sample) / 1024 / 1024
 		moutput = (
 			sum(output.nbytes for output in outputs if isinstance(output, torch.Tensor)) / 1024 / 1024
 		)
@@ -111,7 +112,7 @@ def _measure_full_pass(
 def _measure_ckpt_forward(stage: torch.nn.Module, sample: torch.Tensor) -> tuple[float, float]:
 	torch.cuda.reset_peak_memory_stats()
 	start_mem = torch.cuda.memory_allocated()
-	_ = checkpoint(stage, sample, use_reentrant=False)
+	_ = checkpoint(stage, *sample, use_reentrant=False)
 	peak_ckpt = (torch.cuda.max_memory_allocated() - start_mem) / 1024 / 1024
 
 	mba = 0
@@ -122,7 +123,7 @@ def _measure_ckpt_forward(stage: torch.nn.Module, sample: torch.Tensor) -> tuple
 				mba += inputs.nbytes
 			delattr(module, "last_input")
 
-	return peak_ckpt, mba
+	return peak_ckpt, (mba / 1024 / 1024)
 
 
 def _measure_communication(
@@ -160,39 +161,24 @@ def profile(
 	signatures: list[Signature],
 	placement: list[int],
 ) -> list[dict]:
-	"""Measure profiling statistics for each stage (standalone, with communication).
+	r"""Measure profiling statistics for each stage (standalone, with communication).
 
 	Statistics format per stage::
 
 		{
-			"T": {"f": float, "b": float, "w": float},
-			"M": {"f": float, "b": float, "w": float},
-			"Mpeak": {"f": float, "b": float, "w": float},
-			"Mpeak_ckpt": float,
-			"Mparams": float,
-			"Mba": float,
-			"Mbg": float,
-			"Minput": float,
-			"Moutput": float,
-			"Tcomm": float,
-			"forward_remat_options": [...],
-			"backward_remat_options": [...],
+			"T": {"f": float, "b": float, "w": float}, # Time for each operation F, B, W
+			"M": {"f": float, "b": float, "w": float}, # Memory kept after each operation
+			"Mpeak": {"f": float, "b": float, "w": float}, # Peak memory during each operation
+			"Mpeak_ckpt": float, # Peak memory during forward with full checkpointing (useful for full remat)
+			"Mparams": float, # Memory for parameters
+			"Mba": float, # Memory for activations after B
+			"Mbg": float, # Memory for gradients after B
+			"Minput": float, # Memory for input(s)
+			"Moutput": float, # Memory for output(s)
+			"Tcomm": float, # Time for communication of the output of this stage
 		}
 	"""
-	_KEYS = (
-		"T",
-		"M",
-		"Mpeak",
-		"Mpeak_ckpt",
-		"Mparams",
-		"Mba",
-		"Mbg",
-		"Minput",
-		"Moutput",
-		"Tcomm",
-		"forward_remat_options",
-		"backward_remat_options",
-	)
+	_KEYS = ("T", "M", "Mpeak", "Mpeak_ckpt", "Mparams", "Mba", "Mbg", "Minput", "Moutput", "Tcomm")
 
 	statistics = [{} for _ in stages]
 
@@ -212,8 +198,6 @@ def profile(
 		stats["Moutput"] = Moutput
 		stats["Mparams"] = sum(p.nbytes for p in stage.parameters()) / 1024 / 1024
 		stats["Tcomm"] = tcomm
-		stats["forward_remat_options"] = []
-		stats["backward_remat_options"] = []
 
 	for stats in statistics:
 		for key in _KEYS:
@@ -246,9 +230,10 @@ def profile_stage(
 		is the detached CPU output from the warmup forward, ready to be
 		used as input for the next pipeline stage.
 	"""
-	sample = sample_metadata.get_buffer(1)  # TODO: use the actual mb size instead of 1!
-	init_tensor_(sample)
-	# Or, we could also profile for 1 and assume everything is linear in batch size ; then we need to multiply everything by mb size before solving
+	sample = tuple(meta.get_buffer(1).squeeze(0) for meta in sample_metadata)
+	for s in sample:
+		init_tensor_(s)
+
 	T, M, Mpeak, Minput, Moutput, next_input = _measure_full_pass(stage, sample, n_iter)
 	peak_ckpt, mba = _measure_ckpt_forward(stage, sample)
 
@@ -283,19 +268,22 @@ def propagate_sample(block_models, placement, sample, pp_group):
 	:param placement: stage-to-rank mapping
 	:param sample: original model input (on any device)
 	:param pp_group: pipeline-parallel process group
-	:return: dict mapping local block ids to :class:`TensorMetadata` for each block's input.
+	:return: dict mapping local block ids to :class:`TensorMetadata` for each block's input
 	"""
 	rank = dist.get_rank()
 	n_blocks = len(placement)
 
 	block_in_metas = {}
 	out_meta = None
-	mb_size = sample.size(0) if isinstance(sample, torch.Tensor) else sample[0].size(0)
 	fake_mode = FakeTensorMode(
 		allow_non_fake_inputs=True
 	)  # necessary unless we also convert all parameters
 	converter = fake_mode.fake_tensor_converter
-	fake_sample = converter.from_real_tensor(fake_mode, sample)
+	sample = (sample,) if not isinstance(sample, tuple) else sample
+	fake_sample = tuple(
+		converter.from_real_tensor(fake_mode, s)
+		for s in sample  # hope every argument is a tensor
+	)
 
 	for block_id in range(n_blocks):
 		owner = placement[block_id]
@@ -303,35 +291,47 @@ def propagate_sample(block_models, placement, sample, pp_group):
 
 		if owner == rank:
 			if block_id == 0:
-				ref = sample[0] if isinstance(sample, (list, tuple)) else sample
-				in_meta = TensorMetadata(ref[0])
+				in_meta = tuple(TensorMetadata(s) for s in fake_sample)
 			elif prev_owner == rank:
 				in_meta = out_meta
 			else:
-				meta_buf = torch.empty(TensorMetadata.MAX_SIZE, device="cuda")
-				dist.recv(meta_buf, src=prev_owner, group=pp_group)
-				in_meta = TensorMetadata.from_tensor(meta_buf)
+				n_connections = torch.empty(
+					1, device="cuda", dtype=torch.uint8
+				)  # send number of tensors between blocks
+				dist.recv(n_connections, src=prev_owner, group=pp_group)
+				n_connections = int(n_connections.item())
+
+				in_meta = []  # then send actual metadata
+				for _ in range(n_connections):
+					meta_buf = torch.empty(TensorMetadata.MAX_SIZE, device="cuda")
+					dist.recv(meta_buf, src=prev_owner, group=pp_group)
+					in_meta.append(TensorMetadata.from_tensor(meta_buf))
 
 			with fake_mode, torch.no_grad():
-				fake_inp = in_meta.get_buffer(mb_size) if block_id != 0 else fake_sample
+				fake_inp = tuple(
+					(meta.get_buffer(1).squeeze(0) if block_id != 0 else fake_sample[i])
+					for i, meta in enumerate(in_meta)
+				)  # buffer has an additional dimension for the batch size, but it's already there in the tensor
+				# TODO: what happends if some arguments are not tensors?
+
 				block_in_metas[block_id] = in_meta
-				fake_out = block_models[block_id](fake_inp)
-				if isinstance(fake_out, tuple):
-					assert len(fake_out) == 1, (
-						"ILP is only supported for models that exchange a single tensor between blocks."
-					)
-					fake_out = fake_out[0]
-				assert fake_out.size(0) == mb_size, (
-					f"Fake output has size {fake_out.size(0)} but expected {mb_size}"
-				)
-				out_meta = TensorMetadata(fake_out[0])
+				fake_out = block_models[block_id](*fake_inp)
+				fake_out = (fake_out,) if not isinstance(fake_out, tuple) else fake_out
+
+				out_meta = tuple(TensorMetadata(s) for s in fake_out)
 
 			for module in block_models[block_id].modules():
 				if isinstance(module, LayerDW):
 					module.clear()
 
 		elif prev_owner == rank:
-			dist.send(out_meta.to_tensor(), dst=owner, group=pp_group)
+			n_connections = len(out_meta)
+			dist.send(
+				torch.tensor([n_connections], device="cuda", dtype=torch.uint8), dst=owner, group=pp_group
+			)
+
+			for meta in out_meta:
+				dist.send(meta.to_tensor(), dst=owner, group=pp_group)
 
 	return block_in_metas
 
@@ -422,8 +422,7 @@ def _generate_simplified_schedule(placement, n_micro_batches, scheduler):
 	*scheduler* is a resolved callable, not a registry key.
 	"""
 	p = len(set(placement))
-	signatures = sequential_signatures(placement)
-	schedule = scheduler(placement, n_micro_batches, signatures)
+	schedule = scheduler(placement, n_micro_batches)
 
 	simplified = [[] for _ in range(p)]
 	for op in schedule:
@@ -434,39 +433,17 @@ def _generate_simplified_schedule(placement, n_micro_batches, scheduler):
 				simplified[op.rank].append(("b", op.block_id, op.mb_id))
 			case OperationType.BACKWARD_PARAMS:
 				simplified[op.rank].append(("w", op.block_id, op.mb_id))
+
 	return simplified
 
 
-def _scale_stats_by_batch_size(statistics, mb_size):
-	"""
-	Scale the statistics by the micro-batch size.
-	This util was written in case we profile with a batch size different from the one used at runtime. Since it's not a satisfying solution, we rather warn the user to use a constant batch size instead.
-	"""
-	return [
-		{
-			"T": {k: v * mb_size for k, v in stats["T"].items()},
-			"M": {k: v * mb_size for k, v in stats["M"].items()},
-			"Mpeak": {k: v * mb_size for k, v in stats["Mpeak"].items()},
-			"Mpeak_ckpt": stats["Mpeak_ckpt"] * mb_size,
-			"Mparams": stats["Mparams"],  # this does not depend on the batch size
-			"Minput": stats["Minput"] * mb_size,
-			"Moutput": stats["Moutput"] * mb_size,
-			"Tcomm": stats["Tcomm"] * mb_size,
-			"forward_remat_options": stats["forward_remat_options"],
-			"backward_remat_options": stats["backward_remat_options"],
-		}
-		for stats in statistics
-	]
-
-
-def build_ilp_params(statistics, placement, scheduler, n_micro_batches, memory_budget, mb_size):
+def build_ilp_params(statistics, placement, scheduler, n_micro_batches, memory_budget):
 	"""Convert profiling stats to the params dict expected by the ILP solver."""
 	p = len(set(placement))
 	nstages = len(placement)
 	assert len(statistics) == nstages
 
 	sched = _generate_simplified_schedule(placement, n_micro_batches, scheduler)
-	# scaled_stats = _scale_stats_by_batch_size(statistics, mb_size)
 
 	stages = []
 	for stats in statistics:
@@ -476,20 +453,14 @@ def build_ilp_params(statistics, placement, scheduler, n_micro_batches, memory_b
 		Mpeak["f_no_grad"] = stats["Mpeak_ckpt"]
 		Minput = stats["Minput"]
 		Moutput = stats["Moutput"]
+		Mba = stats["Mba"]
 
-		fwd_remat_options = [
-			RematOption(opt["name"], "forward", opt["mem_freed"], opt["overhead"])
-			for opt in stats["forward_remat_options"]
-		]
-		fwd_remat_options.append(RematOption("full_fwd", "forward", M["f"] - Minput - Moutput, T["f"]))
+		fwd_remat_options = [RematOption("full_fwd", "forward", M["f"] - Minput - Moutput, T["f"])]
 
 		bwd_remat_options = [
-			RematOption(opt["name"], "backward", opt["mem_freed"], opt["overhead"])
-			for opt in stats["backward_remat_options"]
+			RematOption("activations_bwd", "backward", Mba, T["f"]),
+			RematOption("full_bwd", "backward", M["b"] - Moutput - Minput, T["f"] + T["b"]),
 		]
-		bwd_remat_options.append(
-			RematOption("full_bwd", "backward", M["b"] - Moutput - Minput, T["f"] + T["b"])
-		)
 
 		stages.append(
 			{
@@ -523,8 +494,8 @@ def solve_remat(
 	scheduler,
 	n_micro_batches: int,
 	memory_budget: int,
-	mb_sizes: list[int],
 	time_limit: int = 60,
+	gap_rel_limit: float = 0.03,
 ) -> dict:
 	"""Solve the rematerialization ILP.
 
@@ -537,7 +508,6 @@ def solve_remat(
 	:param scheduler: resolved scheduler callable
 	:param n_micro_batches: number of micro-batches
 	:param memory_budget: GPU memory budget in MB
-	:param mb_sizes: List of micro-batch sizes
 	:param time_limit: ILP solver time limit in seconds
 	:return: solution dict with ``placement``, ``order``, and remat options per (stage, mb)
 	:raises ImportError: if ``pulp`` is not installed
@@ -551,12 +521,7 @@ def solve_remat(
 			"Install it with: pip install pulp"
 		)
 
-	mb_size = int(
-		np.median(mb_sizes).item()
-	)  # ILP does not support different micro-batch sizes anyway ; use the median as an approximation
-	params = build_ilp_params(
-		statistics, placement, scheduler, n_micro_batches, memory_budget, mb_size
-	)
+	params = build_ilp_params(statistics, placement, scheduler, n_micro_batches, memory_budget)
 
 	p = params["p"]
 	m = params["m"]
@@ -724,11 +689,11 @@ def solve_remat(
 		raise RuntimeError(f"No solver found in {_SOLVERS}")
 
 	logger.info(
-		f"Solving ILP with {solver_name} solver, {time_limit} seconds time limit and {memory_budget} MB memory budget"
+		f"Solving ILP with {solver_name} solver, {SCHEDULERS.get_key(scheduler)} scheduler, {time_limit} seconds time limit and {memory_budget} MB memory budget"
 	)
 	start = time.time()
 	prob.solve(
-		solver(msg=False, timeLimit=time_limit)
+		solver(msg=False, timeLimit=time_limit, gapRel=gap_rel_limit)
 	)  # TODO: add env variable to control solver/time limit
 	end = time.time()
 	solve_time = end - start
@@ -800,8 +765,12 @@ class RematScheduler:
 		self.base_scheduler = base_scheduler
 		self.solution = solution
 
-	def __call__(self, placement, nmb, signatures):
-		schedule = self.base_scheduler(placement, nmb, signatures)
+	@property
+	def makespan(self):
+		return self.solution["objective"]
+
+	def __call__(self, placement, nmb):
+		schedule = self.base_scheduler(placement, nmb)
 
 		for op in schedule.copy():
 			if op.op == OperationType.FORWARD:
@@ -854,3 +823,88 @@ class RematScheduler:
 		w_idx = self._find_operation(sched, OperationType.BACKWARD_PARAMS, op.block_id, op.mb_id)
 		if w_idx is not None:
 			sched.insert(w_idx, remat_bwd)
+
+
+def stagerematify(scheduler: SchedulerFn, stats: list[dict], budget: int, worker=0):  # noqa: F821 # type: ignore
+	"""
+	Transform a scheduler into a scheduler + ILP-solved remat strategy.
+
+	:param scheduler: The base scheduler to transform.
+	:type scheduler: SchedulerFn
+	:param stats: The statistics to use for the ILP.
+	:type stats: list[dict]
+	:param budget: The memory budget to use for the ILP in MB.
+	:type budget: int
+	:param worker: The worker rank to solve the ILP on.
+	:type worker: int
+
+	:return: A new scheduler, respecting the scheduler interface, that does both scheduling and remat optimization via ILP formulation.
+	"""
+
+	def StageRemat(placement: list[int], nmb: int) -> list[Operation]:
+		solution_list = [None]
+		if dist.get_rank() == worker:
+			solution_list[0] = solve_remat(stats, placement, scheduler, nmb, budget)
+		dist.broadcast_object_list(solution_list, src=worker)
+		remat_scheduler = RematScheduler(scheduler, solution_list[0])
+		schedule = remat_scheduler(placement, nmb)
+		return schedule
+
+	return StageRemat
+
+
+class AutoScheduler:
+	"""Scheduler that solves StageRemat for all base schedulers and uses the best objective value"""
+
+	def __init__(self, stats: list[dict], budget: int, worker=0):
+		self.stats = stats
+		self.budget = budget
+		self.worker = worker
+		self.schedulers = SCHEDULERS.available()
+		self.schedulers.remove("auto")  # auto is a dummy scheduler that we are currently overriding
+		self.schedulers.remove(
+			"fixed"
+		)  # fixed is another special case that needs an external input (the schedule)
+		self.schedulers.remove(
+			"full_remat"
+		)  # full_remat is not a base scheduler, remat is already included in it
+
+	def __call__(self, placement: list[int], nmb: int) -> list[Operation]:
+		if dist.get_rank() == self.worker:
+			best = (float("inf"), None, None)  # (objective, scheduler_name, solution)
+			for scheduler_name in self.schedulers:
+				scheduler = resolve(scheduler_name, SCHEDULERS)
+				try:
+					solution = solve_remat(self.stats, placement, scheduler, nmb, self.budget)
+					objective = solution["objective"]
+					if objective < best[0]:
+						best = (objective, scheduler_name, solution)
+				except Exception as e:
+					logger.info(
+						f"Error solving ILP for {scheduler_name} scheduler: {e}. This is expected for instance for multi-wave schedulers if you use single-wave placement. Skipping."
+					)
+				finally:
+					# send a keepalive signal to prevent NCCL timeouts during long ILP solves
+					dist.broadcast_object_list([("keepalive", scheduler_name)], src=self.worker)
+
+			logger.info(f"Best scheduler: {best[1]} with {best[0]:.2f}ms makespan")
+			dist.broadcast_object_list([best], src=self.worker)
+			objective, scheduler_name, solution = best
+		else:
+			# receive keepalive signals
+			for _ in self.schedulers:
+				keepalive_list = [None]
+				dist.broadcast_object_list(keepalive_list, src=self.worker)
+				# check if this is the final result or just a keepalive
+				if keepalive_list[0][0] != "keepalive":
+					# this is the final result, not a keepalive, stop there
+					objective, scheduler_name, solution = keepalive_list[0]
+					break
+			else:
+				# all messages were keepalives, receive the final result
+				solution_list = [None]
+				dist.broadcast_object_list(solution_list, src=self.worker)
+				objective, scheduler_name, solution = solution_list[0]
+
+		schedule = RematScheduler(resolve(scheduler_name, SCHEDULERS), solution)(placement, nmb)
+		return schedule

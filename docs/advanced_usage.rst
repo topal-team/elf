@@ -33,7 +33,6 @@ When using manual partitioning, you need to:
     # Split model manually (example for a sequential model)
     model = YourModel()  # Has .blocks, .embed, .head attributes
 
-    # Determine which blocks go to this rank
     n_blocks = len(model.blocks)
     blocks_per_rank = n_blocks // world_size
     start_idx = rank * blocks_per_rank
@@ -57,7 +56,7 @@ When using manual partitioning, you need to:
     # Create pipeline with manual partition
     pipe = Pipeline(
         part,
-        partitioner=False,  # Critical: disable automatic partitioning
+        partitioner=False,
         placement=placement,
         signatures=signatures,
     )
@@ -254,6 +253,7 @@ A schedule is a list of ``Operation`` objects that define what each device does 
 * ``FORWARD``: Forward pass through a stage
 * ``BACKWARD_INPUTS``: Backward pass (compute input gradients)
 * ``BACKWARD_PARAMS``: Weight gradient computation
+* ``LOSS_FORWARD``, ``LOSS_BACKWARD``: Loss computation
 * ``SEND``, ``RECV``: Communication operations (added automatically)
 * ``PREFETCH_ACTIVATIONS``: Prefetch from CPU (for offloading)
 * ``RECOMPUTE_FORWARD``, ``RECOMPUTE_BACKWARD_INPUTS``: For checkpointing
@@ -261,24 +261,20 @@ A schedule is a list of ``Operation`` objects that define what each device does 
 Writing a Custom Scheduler
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A scheduler is a function that takes ``(placement, nmb, signatures)`` and returns a schedule:
+A scheduler is a function that takes ``(placement, nmb)`` and returns a schedule:
 
 .. code-block:: python
 
     from elf.scheduling import Operation, OperationType
-    from elf.scheduling.schedulers import (
-        _add_forward_pass, _add_backward_pass, _add_backward_params
-    )
     from elf.registry import SCHEDULERS
 
-    def my_custom_scheduler(placement, nmb, signatures):
+    def my_custom_scheduler(placement, nmb):
         """
         Custom scheduler that processes microbatches in a specific order.
 
         Args:
             placement: List[int] - device assignment for each stage
             nmb: int - number of microbatches
-            signatures: List[Signature] - input/output info for each stage
 
         Returns:
             List[Operation] - the execution schedule
@@ -295,23 +291,17 @@ A scheduler is a function that takes ``(placement, nmb, signatures)`` and return
             # All forwards
             for mb in range(nmb):
                 for stage_id in stage_ids:
-                    _add_forward_pass(
-                        schedule, placement, stage_id, mb, rank, signatures[stage_id]
-                    )
+                    schedule.append(Operation(stage_id, mb, OperationType.FORWARD, rank))
+                    if stage_id == n_stages - 1:
+                        schedule.append(Operation(stage_id, mb, OperationType.LOSS_FORWARD, rank))
 
             # All backwards
             for mb in range(nmb):
                 for stage_id in reversed(stage_ids):
-                    _add_backward_pass(
-                        schedule, placement, stage_id, mb, rank, signatures[stage_id]
-                    )
-                    _add_backward_params(schedule, stage_id, mb, rank)
-
-            # Gradient synchronization (for data parallelism)
-            for stage_id in stage_ids:
-                schedule.append(
-                    Operation(stage_id, None, OperationType.ALL_REDUCE_PARAM_GRADS, rank)
-                )
+                    if stage_id == n_stages - 1:
+                        schedule.append(Operation(stage_id, mb, OperationType.LOSS_BACKWARD, rank))
+                    schedule.append(Operation(stage_id, mb, OperationType.BACKWARD_INPUTS, rank))
+                    schedule.append(Operation(stage_id, mb, OperationType.BACKWARD_PARAMS, rank))
 
         return schedule
 
@@ -319,23 +309,8 @@ A scheduler is a function that takes ``(placement, nmb, signatures)`` and return
     # Use custom scheduler
     pipe = Pipeline(model, sample, scheduler="my_custom_scheduler")
 
-**Helper Functions:**
+All necessary are automatically added between the scheduling and the communication scheduling steps.
 
-ELF provides helper functions to add operations with correct communication:
-
-* ``_add_forward_pass(schedule, placement, block_id, mb_id, rank, signature)``
-
-  Adds RECV (if needed), FORWARD, SEND (if needed), and LOSS_FORWARD (if last stage)
-
-* ``_add_backward_pass(schedule, placement, block_id, mb_id, rank, signature)``
-
-  Adds LOSS_BACKWARD (if last stage), RECV, BACKWARD_INPUTS, and SEND
-
-* ``_add_backward_params(schedule, block_id, mb_id, rank)``
-
-  Adds BACKWARD_PARAMS operation for weight gradient computation
-
-These helpers automatically insert communication operations based on the signatures.
 
 Modifying Existing Schedulers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -346,11 +321,11 @@ You can wrap existing schedulers to add custom behavior:
 
     from elf.scheduling import OpOptions, OperationType
 
-    def checkpointed_1f1b(placement, nmb, signatures):
+    def checkpointed_1f1b(placement, nmb):
         """1F1B with activation checkpointing"""
         # Get base schedule
         base_scheduler = SCHEDULERS["1f1b"]
-        schedule = base_scheduler(placement, nmb, signatures)
+        schedule = base_scheduler(placement, nmb)
 
         # Modify operations
         for op in schedule:
@@ -372,7 +347,6 @@ You can wrap existing schedulers to add custom behavior:
 See :class:`elf.scheduling.scheduling.OpOptions` for an up-to-date and complete list of available `OpOptions` and their meaning.
 
 
-
 Zero Bubble Schedules
 ---------------------
 
@@ -384,12 +358,12 @@ Enabling ZB Schedules
 
 .. code-block:: python
 
-    from elf import replace_linear_with_linear_dw
+    from elf import replace_layer_with_layer_dw
 
     model = YourModel()
 
     # Required before using ZB schedulers
-    replace_linear_with_linear_dw(model, device="cuda")
+    replace_layer_with_layer_dw(model, device="cuda")
 
     pipe = Pipeline(model, sample, scheduler="zbh1")  # or "zbh2", "zbv"
 
@@ -666,7 +640,7 @@ Example: Complete Custom Setup
     import torch.nn as nn
     import torch.distributed as dist
     from elf import (
-        Pipeline, Placement, replace_linear_with_linear_dw,
+        Pipeline, Placement, replace_layer_with_layer_dw,
         sequential_signatures,
     )
     from elf.scheduling import OpOptions, OperationType
@@ -679,7 +653,7 @@ Example: Complete Custom Setup
     # 1. Create model on meta device
     with torch.device("meta"):
         model = LargeTransformer(n_blocks=96)
-        replace_linear_with_linear_dw(model, "meta")
+        replace_layer_with_layer_dw(model, "meta")
 
     # 2. Manual partitioning
     blocks_per_rank = len(model.blocks) // world_size
