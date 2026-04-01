@@ -10,11 +10,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    {name = "Adrien Aguila--Multner <adrienaguila@gmail.com>, Julia Gusak <julgusak@gmail.com>},
+    {name = "Adrien Aguila--Multner <adrienaguila@gmail.com>, Julia Gusak <julgusak@gmail.com>"},
 ]
 keywords = ["pytorch", "efficient", "training", "pipeline-parallel",
-"rematerizlization", "activation-checkpointing", "offloading", 
+"rematerialization", "activation-checkpointing", "offloading", 
 "distributed", "deep-learning"]
+
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Research",
