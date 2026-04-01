@@ -111,3 +111,15 @@ placement = [0,1,2,3, 3,2,1,0]   # bidirectional pipeline for Hanayo / ZBV
 ## Docs
 
 The full documentation can be generated with Sphinx. Go to `docs/` and run `make html`.
+
+## Citation
+
+If you use this project, please cite:
+
+```
+@article{aguila2025optimized,
+  title={Optimized Forward-Backward Rematerialization for Memory-Efficient Pipeline Parallel Training},
+  author={Aguila, Adrien and Beaumont, Olivier and Eyraud-Dubois, Lionel and Gusak, Julia},
+  year={2025}
+}
+```
