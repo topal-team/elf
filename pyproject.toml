@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "ELF Developers" }
+    {name = "Adrien Aguila--Multner <adrienaguila@gmail.com>, Julia Gusak <julgusak@gmail.com>},
 ]
 keywords = ["pytorch", "efficient", "training", "pipeline-parallel",
 "rematerizlization", "activation-checkpointing", "offloading", 
