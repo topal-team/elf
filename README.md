@@ -119,7 +119,7 @@ If you use this project, please cite:
 ```
 @article{aguila2025optimized,
   title={Optimized Forward-Backward Rematerialization for Memory-Efficient Pipeline Parallel Training},
-  author={Aguila, Adrien and Beaumont, Olivier and Eyraud-Dubois, Lionel and Gusak, Julia},
+  author={Aguila--Multner, Adrien and Beaumont, Olivier and Eyraud-Dubois, Lionel and Gusak, Julia},
   year={2025}
 }
 ```
