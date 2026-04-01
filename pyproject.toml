@@ -24,18 +24,19 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "torch>=2.4",
+    "torch>=2.8",
     "pyyaml",
     "psutil",
     "dill",
     "numpy",
-    "scipy",
+
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "ruff",
+    "scipy"
 ]
 
 docs = [
