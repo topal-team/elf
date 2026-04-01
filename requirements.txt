@@ -1,8 +1,0 @@
-torch>2.4
-pyyaml
-psutil
-dill
-numpy
-pytest
-scipy
-pulp

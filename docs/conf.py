@@ -10,8 +10,8 @@ import os
 import sys
 
 project = "ELF"
-copyright = "2025, Adrien Aguila--Multner"
-author = "Adrien Aguila--Multner"
+copyright = "2026, ELF Developers"
+author = "Adrien Aguila--Multner, Julia Gusak"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
