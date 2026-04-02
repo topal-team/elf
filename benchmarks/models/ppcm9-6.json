@@ -1,0 +1,14 @@
+{
+    "model": {
+        "architecture": "full",
+        "hidden_dim": 5120,
+        "seq_len": 8192,
+        "n_blocks": 30,
+        "num_heads": 40,
+        "dropout": 0.1,
+        "ffn_dim": 20480,
+        "sdp_backend": "fatt3",
+        "input_dim": 16000,
+        "dtype": "bfloat16"
+    }
+}
