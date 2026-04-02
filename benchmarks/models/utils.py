@@ -32,12 +32,10 @@ from typing import Any, Dict
 import torch
 
 from models.simple import FullTransformer, ChainTransformer
-from models.qwen import Qwen
-
 
 __all__ = ["add_transformer_args", "build_model_from_args", "model_config_from_args"]
 
-_ARCHITECTURES = ["full", "chain", "qwen3"]
+_ARCHITECTURES = ["full", "chain"]
 
 logger = logging.getLogger(__name__)
 
@@ -292,5 +290,3 @@ def build_model_from_args(args: argparse.Namespace) -> tuple[torch.nn.Module, to
 			return FullTransformer(**cfg).to(dtype), dtype
 		case "chain":
 			return ChainTransformer(**cfg).to(dtype), dtype
-		case "qwen3":
-			return Qwen(**cfg).to(dtype), dtype

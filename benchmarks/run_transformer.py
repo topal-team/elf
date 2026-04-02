@@ -14,7 +14,7 @@ from elf import (
 	sequential_signatures,
 )
 from elf.registry import SCHEDULERS, TRACERS
-from benchmarks.benchmark_utils import (
+from benchmark_utils import (
 	get_checkpointed_scheduler,
 	get_handcrafted_partition,
 	get_offloaded_scheduler,
@@ -154,7 +154,7 @@ def parse_args():
 	parser.add_argument(
 		"--partitioner",
 		type=str,
-		default="naive",
+		default="constrained",
 		choices=["naive", "constrained", "metis", "dagP", "handcrafted"],
 		help="Partitioner type",
 	)

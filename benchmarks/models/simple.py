@@ -14,9 +14,15 @@ try:
 	from flash_attn import flash_attn_func  # pyright: ignore[reportMissingImports]
 except ImportError:
 	logger.warning(
-		"WARNING: flash_attn not installed, using SDPA from torch instead. Ignore this warning if not using Transformers with flash-attn. Ignore this warning if not using Transformers with FlashAttention."
+		"WARNING: flash_attn not installed, using SDPA from torch instead. Ignore this warning if not using Transformers with FlashAttention."
 	)
-	flash_attn_func = None
+	def flash_attn_func(q, k, v, dropout_p, causal=False):
+		q = q.transpose(1, 2)
+		k = k.transpose(1, 2)
+		v = v.transpose(1, 2)
+		with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+			out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, enable_gqa=True, is_causal=causal)
+		return out.transpose(1, 2)
 
 """
 This is a model zoo for tests and benchmarks.
