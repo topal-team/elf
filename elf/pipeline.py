@@ -156,7 +156,9 @@ class Pipeline:
 
 		# Distributed setups
 		if self.cfg.placement == "auto":
-			self.placement = Placement.default(self.cfg.scheduler, self.pp)
+			self.placement = Placement.default(
+				SCHEDULERS.get_key(self.cfg.scheduler), self.pp
+			)  # Placement.default expects a name
 		else:
 			self.placement = Placement(self.cfg.placement)
 
@@ -167,12 +169,10 @@ class Pipeline:
 
 		self._init_process_groups()  # sets pp_group and dp_groups
 
-		# Resolve components from registries
-		self.scheduler = resolve(self.cfg.scheduler, SCHEDULERS)
-		self.tracer = resolve(self.cfg.tracer, TRACERS)
-		self.partitioner = (
-			resolve(self.cfg.partitioner, PARTITIONERS) if self.cfg.partitioner else False
-		)  # False if no partitioning is desired
+		# Components are already resolved in the config
+		self.scheduler = self.cfg.scheduler
+		self.tracer = self.cfg.tracer
+		self.partitioner = self.cfg.partitioner  # False if no partitioning is desired
 
 		# Partition model
 		parts, signatures = self._partition_model(model, sample, self.cfg.signatures)
@@ -196,7 +196,7 @@ class Pipeline:
 			self._remat_stats = profile_all_stages(
 				self.blocks, self.signatures, self.placement, sample, self.pp_group
 			)
-			if resolve(self.cfg.scheduler, SCHEDULERS) is SCHEDULERS.get("auto"):
+			if self.scheduler is SCHEDULERS.get("auto"):
 				# Special case: auto scheduler solves StageRemat for all base schedulers and uses the best objective value
 				self.scheduler = AutoScheduler(self._remat_stats, self.cfg.memory_budget, self.cfg.worker)
 			else:

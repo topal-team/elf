@@ -18,7 +18,7 @@ if __name__ == "__main__":
 
 	model = resnet50()
 	sample = torch.randn((8, 3, 224, 224), device="cuda")
-	model = Pipeline(model, sample)
+	model = Pipeline(model, sample, scheduler="1f1b")
 	loss_fn = nn.functional.cross_entropy
 	optimizer = torch.optim.Adam(model.parameters())
 	for e in range(10):
