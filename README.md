@@ -78,7 +78,7 @@ The full argument list is defined in [the documentation](#docs).
 ELF exposes three global registries in `elf.registry`:
 
 ```python
-from elf.registry import SCHEDULERS, PARTITIONERS, TRACERS
+from elf.registry import SCHEDULERS, COMM_SCHEDULERS, PARTITIONERS, TRACERS
 ```
 
 Register a new component by key:
