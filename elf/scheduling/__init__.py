@@ -72,9 +72,7 @@ SCHEDULERS.register(
 )
 
 SCHEDULERS.register(
-	"inference",
-	Scheduler(generate_inference_schedule, true_),
-	"Inference schedule. Forward pass only.",
+	"inference", generate_inference_schedule, "Inference schedule. Forward pass only."
 )
 
 
