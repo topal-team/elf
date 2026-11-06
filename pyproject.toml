@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "elf-pipelining"
+name = "elf-pipeline"
 version = "0.1.0"
 description = "ELF: PyTorch Framework for Memory-Aware Pipeline Parallel Training"
 readme = "README.md"
@@ -18,7 +18,6 @@ keywords = ["pytorch", "efficient", "training", "pipeline-parallel",
 
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Intended Audience :: Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",

@@ -8,13 +8,14 @@ from typing import Dict, List, Optional
 import torch
 import torch.fx as fx
 
-from ..registry import PARTITIONERS, resolve
-from .profile import profile_operations
-from .tracing import trace
-from .utils import remove_inplace_leaves, Signature, export_partition_to_image
+from elf.registry import PARTITIONERS, resolve
+from elf.partitioners.profile import profile_operations
+from elf.partitioners.tracing import trace
+from elf.partitioners.utils import remove_inplace_leaves, export_partition_to_image
+from elf.signature import Signature
 import logging
 
-logger = logging.getLogger("partition")
+logger = logging.getLogger(__name__)
 
 
 class PartitionResult:
@@ -154,9 +155,13 @@ def check_partition(graph, parts, inputs, outputs):
 	original_inputs = list(node.target for node in graph.nodes if node.op == "placeholder")
 
 	if original_inputs != inputs[0]:
-		raise Exception(
-			f"Inputs of the first part do not match original inputs: {original_inputs} != {inputs[0]}"
-		)
+		# maybe they're right, but in the wrong order
+		if set(original_inputs) == set(inputs[0]):
+			inputs[0] = original_inputs
+		else:
+			raise Exception(
+				f"Inputs of the first part do not match original inputs: {original_inputs} != {inputs[0]}"
+			)
 
 	for i in range(1, len(parts)):
 		if len(parts[i]) == 0:
@@ -169,6 +174,19 @@ def check_partition(graph, parts, inputs, outputs):
 					break
 			if not is_in_prev_part:
 				raise Exception(f"Input {input} of part {i} is not an output of any previous part")
+
+
+def _default_value(graph, x):
+	"""
+	Find the default value of input `x` in the original fx.Graph `graph`
+	"""
+	nodes = graph.find_nodes(op="placeholder", target=x)
+	if len(nodes) == 0:
+		return torch.inspect.Signature.empty
+	args = nodes[0].args
+	if not args:
+		return torch.inspect.Signature.empty
+	return args[0]
 
 
 def create_subgraph(graph_module, nodes, inputs, outputs):
@@ -185,7 +203,9 @@ def create_subgraph(graph_module, nodes, inputs, outputs):
 
 	with subgraph.inserting_before():
 		for i in reversed(inputs):  # we are inserting before, so we do in reverse order
-			node = subgraph.placeholder(i)
+			# if the original input had a default value, keep it
+			default = _default_value(graph_module.graph, i)
+			node = subgraph.placeholder(i, default_value=default)
 			env[node.name] = node
 
 	for node in nodes:
@@ -438,7 +458,7 @@ def _create_subgraphs(graph_module, parts, inputs, outputs):
 	return blocks
 
 
-def split(graph_module, times, memories, n, partitioner="constrained") -> PartitionResult:
+def split(graph_module, times, memories, n, partitioner="balanced") -> PartitionResult:
 	"""
 	Partition a traced graph into ``n`` parts and return a :class:`PartitionResult`.
 
@@ -466,7 +486,7 @@ def split(graph_module, times, memories, n, partitioner="constrained") -> Partit
 	return result
 
 
-def partition(model, n, sample, partitioner="constrained", tracer="default") -> PartitionResult:
+def partition(model, n, sample, partitioner="balanced", tracer="default") -> PartitionResult:
 	"""
 	Trace, profile, and partition a model in one call.
 

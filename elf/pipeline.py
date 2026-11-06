@@ -4,21 +4,24 @@ Pipeline API and orchestration
 
 from __future__ import annotations
 
-import os
-
-from dataclasses import asdict, dataclass, field, fields
-from datetime import timedelta
+from pathlib import Path
 from typing import Any, List
+from dataclasses import asdict, dataclass, field, fields
 
 import torch
 import torch.distributed as dist
 
-from .execution import PipelineBlock, Engine
-from .scheduling import schedule_to_str, check_schedule_validity, add_comms
-from .scheduling.ilp import stagerematify, AutoScheduler
-from .zb_utils import LayerDW
-from .utils import TensorMetadata, send_models, recv_models, broadcast_models, Placement
-from .registry import (
+from elf.execution import PipelineBlock, Engine
+from elf.scheduling import (
+	schedule_to_str,
+	check_schedule_validity,
+	add_comms,
+	mark_replayable_forwards,
+)
+from elf.profiling import profile_pipeline
+from elf.scheduling.ilp import stagerematify, AutoScheduler
+from elf.utils import TensorMetadata
+from elf.registry import (
 	resolve,
 	Tracer,
 	Partitioner,
@@ -29,25 +32,33 @@ from .registry import (
 	SCHEDULERS,
 	COMM_SCHEDULERS,
 )
-from .partitioners import partition, sequential_signatures, Signature
+from elf.partitioners import partition
+from elf.signature import Signature, sequential_signatures
+from elf.topology import Placement, PipelineTopology, send_models, recv_models, broadcast_models
 
 import logging
 
-logger = logging.getLogger("pipeline")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PipelineConfig:
 	r"""
-	Configuration for Pipeline initialization. Registry arguments (tracer, partitioner, scheduler & comm_scheduler) can take any value listed in the :py:mod:`elf.registry`. Call ``elf.registry.[REGISTRY].available()`` to list the available values.
+	Configuration for Pipeline initialization.
+	Registry arguments (tracer, partitioner, scheduler & comm_scheduler) can take any value listed in the :py:mod:`elf.registry`.
+	Call ``elf.registry.[REGISTRY].available()`` to list the available values.
 
 	:param tracer: Tracer to use for model graph extraction. When using default, tries all available tracers one after the other. (default: "default")
 	:type tracer: Tracer or str
-	:param partitioner: Partitioning strategy or False to skip partitioning (default: "constrained")
+	:param partitioner: Partitioning strategy or False to skip partitioning (default: "balanced")
 	:type partitioner: Partitioner or str
-	:param scheduler: Static scheduling algorithm (default: "1f1b"). Can be "auto" to solve the ILP for all base schedulers and use the best objective value.
+	:param scheduler: Static scheduling algorithm (default: "1f1b").\
+		Can be "auto" to solve the ILP for all base schedulers and use the best objective value.
 	:type scheduler: Scheduler or str
-	:param comm_scheduler: Communication scheduler to use for reordering communications. (default: "pipelined")
+	:param comm_scheduler: Communication scheduler to use for reordering communications. (default: "timed-overlap")
+	:param profiling: Measure every stage at setup (:func:`elf.profiling.profile_pipeline`) and hand\
+		the result to the scheduler and to the communication scheduler. Requires ``sample``. (default: True)
+	:type profiling: bool
 	:param placement: Device placement strategy as a list that maps stage id -> processor id (default: "auto")
 	:type placement: Placement or str
 	:param pp: Number of pipeline parallel processes. If None, computed as world_size // dp
@@ -56,25 +67,31 @@ class PipelineConfig:
 	:type dp: int
 	:param worker: Rank that profiles and partitions the model (default: 0)
 	:type worker: int
-	:param memory_budget: GPU memory budget in MB for ILP-based rematerialization. When set, stages are profiled at partition time and an ILP is solved on the first training step to decide which operations to recompute. (default: None)
-	:type memory_budget: int or None
-	:param signatures: Dataflow signatures describing the communication pattern between pipeline stages. Only needed when ``partitioner=False``, i.e. your model is already partitioned. Use :func:`elf.partitioners.sequential_signatures` for simple sequential models. If not provided, a sequential pattern is assumed.
+	:param memory_budgets: GPU memory budget in MB for ILP-based rematerialization.
+	When set, stages are profiled at partition time and an ILP is solved on the first training step to decide which operations to recompute. (default: None)
+	Can be either one budget per rank or a single budget used for every rank
+	:type memory_budgets: int, List[int] or None
+	:param signatures: Dataflow signatures describing the communication pattern between pipeline stages.\
+	Only needed when ``partitioner=False``, i.e. your model is already partitioned. \
+		Use :func:`elf.signature.sequential_signatures` for simple sequential models. \
+		If not provided, a sequential pattern is assumed.
 	:type signatures: List[Signature] or None
 	"""
 
 	# Registry fields (need to be resolved)
 	tracer: Tracer | str = field(default="default", metadata={"registry": TRACERS})
-	partitioner: Partitioner | str = field(default="constrained", metadata={"registry": PARTITIONERS})
+	partitioner: Partitioner | str = field(default="balanced", metadata={"registry": PARTITIONERS})
 	scheduler: Scheduler | str = field(default="auto", metadata={"registry": SCHEDULERS})
 	comm_scheduler: CommScheduler | str = field(
-		default="pipelined", metadata={"registry": COMM_SCHEDULERS}
+		default="timed-overlap", metadata={"registry": COMM_SCHEDULERS}
 	)
 	# Regular fields
+	profiling: bool = True
 	placement: Placement | str = "auto"
 	pp: int | None = None
 	dp: int = 1
 	worker: int = 0
-	memory_budget: int | None = None
+	memory_budgets: int | List[int] | None = None
 	signatures: List[int, Signature] | None = None  # only needed when partitioner = False
 
 	def resolve(self):
@@ -141,33 +158,22 @@ class Pipeline:
 			logger.warning(
 				"Trying to create a pipeline but no multi-gpu distributed setup has been found."
 			)
-		ws = dist.get_world_size()
-		rank = dist.get_rank()
-
 		# Create config from either provided config or individual parameters
+		if config and kwargs and dist.get_rank() == 0:
+			logger.warning(
+				"Both PipelineConfig and named arguments provided. Named arguments will be ignored. Write them to the PipelineConfig object instead."
+			)
+
 		self.cfg = config or PipelineConfig(**kwargs)
 		self.cfg = self.cfg.resolve()
 
-		self.pp = self.cfg.pp or ws // self.cfg.dp  # Number of GPUs used for pipeline parallelism
-		self.dp = self.cfg.dp  # Number of GPUs used for data parallelism
-		assert self.pp * self.dp == ws, (
-			f"Requested PP = {self.pp}, DP = {self.dp} need {self.pp * self.dp} processes, but {ws} were spawned"
+		# Distributed setup: ranks, placement and process groups
+		self.topology = PipelineTopology(
+			placement=self.cfg.placement,
+			pp=self.cfg.pp,
+			dp=self.cfg.dp,
+			scheduler=self._default_placement_hint(),
 		)
-
-		# Distributed setups
-		if self.cfg.placement == "auto":
-			self.placement = Placement.default(
-				SCHEDULERS.get_key(self.cfg.scheduler), self.pp
-			)  # Placement.default expects a name
-		else:
-			self.placement = Placement(self.cfg.placement)
-
-		self.dp_rank = rank // self.pp
-		self.placement = self.placement.add_offset(
-			self.dp_rank * self.pp
-		)  # on each DP replica, placement is shifted to correspond to actual ranks of this replica
-
-		self._init_process_groups()  # sets pp_group and dp_groups
 
 		# Components are already resolved in the config
 		self.scheduler = self.cfg.scheduler
@@ -186,25 +192,75 @@ class Pipeline:
 		self.schedule = []
 		self.last_nmb = 0
 
-		# ILP remat: profile now, solve lazily at first step()
+		# Measure the stages once, for everything downstream that reasons about time or memory
+		self.profiles = self._profile_stages(sample)
+
+		# ILP remat: solve lazily at first step(), once the number of micro-batches is known
 		self._remat_scheduler = None
 		self._remat_nmb = None
-		if self.cfg.memory_budget is not None:
-			from elf.scheduling.ilp import profile_all_stages
-
-			assert sample is not None, "sample is required when memory_budget is set (used for profiling)"
-			self._remat_stats = profile_all_stages(
-				self.blocks, self.signatures, self.placement, sample, self.pp_group
+		if self.cfg.memory_budgets is not None:
+			assert self.profiles is not None, (
+				"memory_budget needs the profiling statistics: pass a sample and leave profiling on"
 			)
+			if type(self.cfg.memory_budgets) is int:
+				self.cfg.memory_budgets = [self.cfg.memory_budgets for _ in range(self.topology.pp)]
+
 			if self.scheduler is SCHEDULERS.get("auto"):
 				# Special case: auto scheduler solves StageRemat for all base schedulers and uses the best objective value
-				self.scheduler = AutoScheduler(self._remat_stats, self.cfg.memory_budget, self.cfg.worker)
+				self.scheduler = AutoScheduler(self.cfg.memory_budgets, self.cfg.worker)
 			else:
-				self.scheduler = stagerematify(
-					self.scheduler, self._remat_stats, self.cfg.memory_budget, self.cfg.worker
-				)
-		else:
-			self._remat_stats = None
+				self.scheduler = stagerematify(self.scheduler, self.cfg.memory_budgets, self.cfg.worker)
+
+	def _default_placement_hint(self):
+		"""
+		Name of the scheduler, used by the topology to pick the default placement.
+
+		:return: the registry key of the scheduler, or None for a scheduler that is not registered
+		:rtype: str or None
+		"""
+		if self.cfg.placement != "auto":
+			return None
+		try:
+			return SCHEDULERS.get_key(self.cfg.scheduler)
+		except ValueError:
+			return None  # a custom scheduler: fall back to the default placement
+
+	@property
+	def placement(self):
+		"""Device placement of every stage, shifted to the ranks of this data-parallel replica."""
+		return self.topology.placement
+
+	@property
+	def pp(self):
+		"""Number of processes used for pipeline parallelism."""
+		return self.topology.pp
+
+	@property
+	def dp(self):
+		"""Number of data-parallel replicas."""
+		return self.topology.dp
+
+	@property
+	def pp_group(self):
+		"""Process group of this replica's pipeline."""
+		return self.topology.pp_group
+
+	@property
+	def dp_groups(self):
+		"""Process groups over which gradients are averaged, one per position in the pipeline."""
+		return self.topology.dp_groups
+
+	def _clear_blocks(self):
+		for block in self.blocks:
+			block._wait_for_send_ops()
+			block.sync_all_reduce()
+			for var in block.input_variables:
+				var.clear()
+			for var in block.output_variables:
+				for dst in var:
+					dst.clear()
+			for module in block._layers_dw:
+				module.clear()
 
 	def step(self, batch, target, loss_fn, split_size=0, profile=False, scheduler=None):
 		"""
@@ -247,45 +303,30 @@ class Pipeline:
 
 		if regenerate_schedule:
 			# We have to recompute the schedule
-			self._generate_schedule(n_micro_batches, scheduler, self.cfg.comm_scheduler, mb_sizes)
+			self._generate_schedule(n_micro_batches, scheduler, self.cfg.comm_scheduler)
 
 			self.last_nmb = n_micro_batches
 
-		for block in self.blocks:
-			for module in block.model.modules():
-				if isinstance(module, LayerDW):
-					module.clear()
+		self._clear_blocks()  # clear before to make sure iteration starts clean
 
 		# Execute the schedule
 		result, losses, stats, detailed_stats = self.engine.train_step(
 			batch, target, loss_fn, self.schedule, mb_sizes, profile
 		)
 
-		# First and last block have some remaining tensors
-		for block in self.blocks:
-			block._wait_for_send_ops()
-			for var in block.input_variables:
-				var.clear()
-			for var in block.output_variables:
-				for dst in var:
-					dst.clear()
-
-			for module in block.model.modules():
-				if isinstance(module, LayerDW):
-					module.clear()
+		self._clear_blocks()  # clear after to avoid keeping unnecessary tensors in memory
 
 		self.stats = stats
 		self.detailed_stats = detailed_stats
 
 		# Merge back the micro-batches outputs/losses into one batch
-		if len(result) != 0:
+		if any(r is not None for r in result):
 			with torch.no_grad():
 				# Careful! if the result was offloaded to CPU, then this creates a sync point that slows down the execution
 				# result = torch.cat(result, dim=0)
 				# This causes a stream synchronization ; maybe it can be avoided
 				# From looking at the profiler, it does not incur important overhead, but need to check
-				losses = torch.tensor(losses, device="cuda")
-				losses = losses.sum() / sum(mb_sizes)
+				losses = torch.stack(losses).sum()
 
 			if self.dp > 1:
 				dist.all_reduce(losses, group=self.blocks[-1].dp_group, op=dist.ReduceOp.AVG)
@@ -335,13 +376,7 @@ class Pipeline:
 		"""
 		torch.cuda.synchronize()
 		dist.barrier()
-		for block in self.blocks:
-			block._destroy_process_groups()
-
-		logger.debug(
-			f"Destroying PP group with members {dist.get_process_group_ranks(self.blocks[0].pp_group)}"
-		)
-		dist.destroy_process_group(self.blocks[0].pp_group)
+		self.topology.destroy()
 
 	def checkpoint(self, epoch="init", dir_path="./"):
 		"""
@@ -353,8 +388,7 @@ class Pipeline:
 		:type dir_path: str
 		"""
 		rank = dist.get_rank()
-		dp = rank // self.pp
-		pp = rank % self.pp
+		dp, pp = self.topology.dp_rank, self.topology.pp_rank
 		rank_state_dict = {"rank": rank, "pp": pp, "dp": dp, "epoch": epoch}
 
 		for block in self.blocks:
@@ -362,9 +396,8 @@ class Pipeline:
 				k: v.data for k, v in block.model.state_dict().items()
 			}
 
-		dir_path = f"{dir_path}/{epoch}/"
-		if not os.path.exists(dir_path):
-			os.makedirs(dir_path)
+		dir_path = Path(dir_path) / str(epoch)
+		dir_path.mkdir(parents=True, exist_ok=True)
 		torch.save(rank_state_dict, f"{dir_path}/dp{dp}_pp{pp}.pt")
 
 	def save(self, path, worker=0):
@@ -394,7 +427,7 @@ class Pipeline:
 
 					recv_models(parts, src=d, group=pp_group)
 
-					for part in enumerate(parts):
+					for part in parts:
 						for p_name, p in part.named_parameters():
 							full_state[p_name] = p.to("cpu", non_blocking=True).detach()
 
@@ -452,27 +485,34 @@ class Pipeline:
 
 	def is_first(self):
 		"""Check if this process owns the first pipeline stage."""
-		return self.placement.is_head(dist.get_rank())
+		return self.topology.is_first()
 
 	def is_last(self):
 		"""Check if this process owns the last pipeline stage."""
-		return self.placement.is_tail(dist.get_rank())
+		return self.topology.is_last()
 
-	def get_profiling_statistics(self):
+	def _profile_stages(self, sample):
 		"""
-		Get the profiling statistics measured to solve the ILP.
-		Only available after the first step() has been called with a memory budget.
-		The output format for each entry of the list is described in :func:`~elf.scheduling.ilp.profile`. There is one entry per stage of the entire pipeline.
+		Measure every stage of the pipeline, unless asked not to or unable to.
 
-		:return: Profiling statistics
-		:rtype: List[dict]
+		Profiling replays each stage a few dozen times, so it needs a sample to replay it on; a
+		pre-partitioned model built without one simply goes unprofiled, and the components that
+		would have used the numbers fall back to their structural defaults.
 
+		:param sample: the sample the pipeline was built with
+		:return: one profile per stage, or None
+		:rtype: List[StageProfile] or None
 		"""
-		if not self._remat_stats:
-			raise ValueError(
-				"Profiling statistics are not available before the first step() with a memory budget"
+		if not self.cfg.profiling:
+			return None
+		if sample is None:
+			logger.warning(
+				"No sample was given, so the stages cannot be profiled. The scheduler and the"
+				" communication scheduler will fall back to reasoning about the order of the"
+				" operations alone."
 			)
-		return self._remat_stats
+			return None
+		return profile_pipeline(self.blocks, self.signatures, self.placement, sample, self.pp_group)
 
 	def _get_mb_sizes(self, split_size, batch):
 		"""
@@ -504,7 +544,7 @@ class Pipeline:
 
 		return mb_sizes
 
-	def _generate_schedule(self, n_micro_batches, scheduler, comm_scheduler, mb_sizes):
+	def _generate_schedule(self, n_micro_batches, scheduler, comm_scheduler):
 		"""
 		Generate and optimize the execution schedule, then filter for current process.
 
@@ -517,20 +557,24 @@ class Pipeline:
 		:param mb_sizes: List of micro-batch sizes
 		:type mb_sizes: List[int]
 		"""
-		schedule = scheduler(self.placement, n_micro_batches)
+		if not scheduler.check(self.placement, n_micro_batches):
+			raise ValueError(
+				f"{self.placement} is not valid with {n_micro_batches} microbatches for scheduler {scheduler}."
+			)  # todo; write somewhere the constraints for each scheduler and redirect to this table from this message
+
+		schedule = scheduler(self.placement, n_micro_batches, self.profiles)
+		schedule = mark_replayable_forwards(schedule)
 		schedule = add_comms(schedule, self.signatures)
 		if comm_scheduler:
-			schedule = comm_scheduler(schedule)
+			schedule = comm_scheduler(schedule, self.profiles)
 
 		check_schedule_validity(schedule)
 
 		if dist.get_rank() == 0:
-			logger.debug(f"Schedule:\n{schedule_to_str(schedule)}")
+			logger.debug(f"Schedule:\n{schedule_to_str(schedule, True)}")
 
 		# Remove all operations that are not ours
-		ids = list(
-			map(lambda b: b.id, self.blocks)
-		)  # funny python tips: a map in itself can be iterated only once ! never forget to create a list from it before anything else
+		ids = {block.id for block in self.blocks}
 		self.schedule = list(filter(lambda op: op.block_id in ids, schedule))
 
 	def _partition_model(self, model, sample, signatures):
@@ -582,145 +626,21 @@ class Pipeline:
 		:return: Pipeline blocks for this process
 		:rtype: List[PipelineBlock]
 		"""
-		rank = dist.get_rank()
-
-		ids = self.placement.get_ids(rank)
-
 		# Initialize P2P process groups for all blocks this rank owns
-		block_p2p_groups = self._init_p2p_process_groups(signatures)
+		self.topology.build_p2p_groups(signatures)
 
-		blocks = []
-		for i in range(len(parts)):
-			dp_group = self.dp_groups[ids[i] % self.pp] if self.dp > 1 else None
-			recv_pgs, send_pgs = block_p2p_groups[ids[i]]
-			new_block = PipelineBlock(
-				parts[i],
-				ids[i],
-				self.placement,
-				signatures[ids[i]],
-				pp_group=self.pp_group,
-				dp_group=dp_group,
-				recv_pgs=recv_pgs,
-				send_pgs=send_pgs,
-			)
-			blocks.append(new_block)
+		ids = self.topology.stage_ids()
+		assert len(parts) == len(ids), (
+			f"This process was given {len(parts)} parts but the placement assigns it {len(ids)} stages"
+		)
+		blocks = [
+			PipelineBlock(part, block_id, signatures[block_id], self.topology)
+			for part, block_id in zip(parts, ids)
+		]
 
 		dist.barrier(self.pp_group)  # init communicators for this process group with a collective
 
 		return blocks
-
-	def _init_process_groups(self):
-		"""
-		Initialize process groups for DP and PP. Timeout configurable via ELF_TIMEOUT env var.
-		"""
-		rank = dist.get_rank()
-		world_size = dist.get_world_size()
-
-		timeout = os.getenv("ELF_TIMEOUT", None)
-		if timeout is not None:
-			timeout = timedelta(seconds=int(timeout))
-
-		self.pp_group = None
-		self.dp_groups = []
-		for pp in range(self.dp):
-			members = [r for r in range(world_size) if r // self.pp == pp]
-			if rank == members[0]:
-				logger.debug(f"Creating PP group with members {members}")
-			pp_group = dist.new_group(members, timeout=timeout)
-			if pp == self.dp_rank:
-				self.pp_group = pp_group
-
-		if self.dp > 1:
-			for dp in range(self.pp):
-				members = [r for r in range(world_size) if r % self.pp == dp]
-				if rank == members[0]:
-					logger.debug(f"Creating DP group with members {members}")
-				self.dp_groups.append(dist.new_group(members, timeout=timeout))
-
-	def _init_p2p_process_groups(self, signatures):
-		"""
-		Initialize point-to-point process groups for efficient communication.
-		By default, torch distributed uses 1 cuda stream per pair of ranks.
-		Bidirectional communications are therefore sequentialized on that stream, even if they are independent.
-		We create separate groups for every type of communication (recv / send * fwd / bwd).
-
-		:param signatures: Dataflow signatures for each block
-		:type signatures: List[Signature]
-		:return: Dictionary mapping block_id to (recv_pgs, send_pgs) for each block this rank owns
-		:rtype: Dict[int, Tuple[Dict[int, ProcessGroup], Dict[int, ProcessGroup]]]
-		"""
-		rank = dist.get_rank()
-		device = (
-			torch.device(f"cuda:{torch.cuda.current_device()}") if torch.cuda.is_available() else None
-		)
-
-		block_p2p_groups = {}
-
-		# Get block IDs this rank owns
-		ids = self.placement.get_ids(rank)
-
-		# Gather all sources and targets for this rank's blocks
-		# pairs are BLOCKS, not RANKS
-		local_recv_pairs = []
-		local_send_pairs = []
-		for block_id in ids:
-			signature = signatures[block_id]
-			sources = [sig for sig in signature.get_all_sources() if sig is not None]
-			targets = [tgt for tgt in signature.get_all_targets() if tgt is not None]
-			local_recv_pairs.extend([(block_id, src) for src in sources])
-			local_send_pairs.extend([(block_id, dst) for dst in targets])
-
-		local_pairs = local_recv_pairs + local_send_pairs
-		all_pairs_list = [None] * self.pp
-		dist.all_gather_object(all_pairs_list, local_pairs, group=self.pp_group)
-
-		# Flatten and deduplicate
-		all_pairs = set()
-		for pairs in all_pairs_list:
-			for pair in pairs:
-				# Normalize pairs so (a, b) and (b, a) are treated the same
-				normalized = tuple(sorted(pair))
-				all_pairs.add(normalized)
-
-		# Sort for deterministic ordering across all ranks
-		all_pairs = sorted(list(all_pairs))
-
-		# Create all groups, but only save the ones each block needs
-		for block_id in ids:
-			signature = signatures[block_id]
-			sources = [sig for sig in signature.get_all_sources() if sig is not None]
-			targets = [tgt for tgt in signature.get_all_targets() if tgt is not None]
-
-			recv_pgs = {"fwd": {}, "bwd": {}}
-			send_pgs = {"fwd": {}, "bwd": {}}
-
-			for pair in all_pairs:
-				block_a, block_b = pair
-				rank_a, rank_b = (
-					self.placement[block_a],
-					self.placement[block_b],
-				)  # map to actual ranks only for PG creation
-				group_fwd = dist.new_group([rank_a, rank_b], device_id=device)
-				group_bwd = dist.new_group([rank_a, rank_b], device_id=device)
-
-				# Save group if this block needs it
-				if block_a in ids and block_b in sources:
-					recv_pgs["fwd"][block_b] = group_fwd
-					send_pgs["bwd"][block_b] = group_bwd
-				elif block_a in ids and block_b in targets:
-					send_pgs["fwd"][block_b] = group_fwd
-					recv_pgs["bwd"][block_b] = group_bwd
-				# Reverse direction
-				elif block_b in ids and block_a in sources:
-					recv_pgs["fwd"][block_a] = group_fwd
-					send_pgs["bwd"][block_a] = group_bwd
-				elif block_b in ids and block_a in targets:
-					send_pgs["fwd"][block_a] = group_fwd
-					recv_pgs["bwd"][block_a] = group_bwd
-
-			block_p2p_groups[block_id] = (recv_pgs, send_pgs)
-
-		return block_p2p_groups
 
 	def _shared_partition(self, model, sample):
 		"""

@@ -2,33 +2,121 @@
 Utility functions for decoupled backward passes, based on Zero-Bubble.
 """
 
+from contextlib import contextmanager
+
 import torch
 import torch.nn as nn
 
 
+__all__ = [
+	"LayerDW",
+	"recording",
+	"LinearDW",
+	"Conv1dDW",
+	"LinearDX",
+	"Conv1dDX",
+	"LayerDWTracer",
+	"replace_layer_with_layer_dw",
+	"replace_linear_with_linear_dw",
+	"partial_dx_recomputation",
+]
+
+
+_RECORDING = (True, True)  # inputs, gradients
+
+
+@contextmanager
+def recording(gradients=True, inputs=True):
+	"""
+	Gate what a backward passing through :class:`LayerDW` layers keeps for ``W``.
+
+	``W`` needs one input and one output gradient per use, and whatever another operation is going
+	to rebuild is not worth keeping now.
+
+	:param gradients: whether a backward run inside this context records anything at all
+	:type gradients: bool
+	:param inputs: whether it keeps the input beside each gradient it records
+	:type inputs: bool
+	"""
+	global _RECORDING
+	previous = _RECORDING
+	_RECORDING = (inputs, gradients)
+	try:
+		yield
+	finally:
+		_RECORDING = previous
+
+
+def _accumulate_grads(tensor, grads):
+	if tensor.grad is None:
+		tensor.grad = grads
+	else:
+		# we need to clone the gradient in case it has overlapping memory (https://discuss.pytorch.org/t/about-error-more-than-one-element-of-the-written-to-tensor-refers-to-a-single-memory-location/85526)
+		if torch._debug_has_internal_overlap(tensor.grad):
+			tensor.grad = tensor.grad.clone().detach()
+		with torch.no_grad():
+			tensor.grad.add_(grads)
+
+
+class _Use:
+	"""
+	One application of a :class:`LayerDW`, shared by the two nodes it puts in the graph.
+
+	The layer's own node sees the gradient that comes back and :class:`_KeepInput`, ahead of it,
+	the input. A backward reaches the first one first, so it opens the pair it records and leaves
+	it here for the second one to complete.
+	"""
+
+	__slots__ = ("pending",)
+
+	def __init__(self):
+		self.pending = None
+
+
+class _KeepInput(torch.autograd.Function):
+	"""
+	Save the input of one use of a :class:`LayerDW`, in a node of its own ahead of the layer.
+
+	A function saves its tensors only once its forward has returned, so a layer saving its own
+	input would already have computed its output by then. Saved here, the input is in the graph
+	before the layer runs, and a recomputation that only needed that input can stop before it.
+
+	The weight is passed so that the node exists, and its backward runs, even when the input
+	does not require grad. It is also what a partial backward differentiates against to reach it.
+	"""
+
+	@staticmethod
+	def forward(ctx, input, weight, layer, use):
+		ctx.use = use
+		ctx.save_for_backward(input)
+		layer.fill_input(input)  # no-op unless this forward is recomputing inputs W is waiting for
+		return input.view_as(input)
+
+	@staticmethod
+	def backward(ctx, grad):
+		pair, ctx.use.pending = ctx.use.pending, None
+		if pair is not None:
+			(input,) = ctx.saved_tensors
+			pair[0] = input.detach()
+		return grad, None, None, None
+
+
 class LinearDX(torch.autograd.Function):
 	@staticmethod
-	def forward(ctx, input, weight, bias, linear):
+	def forward(ctx, input, weight, bias, linear, use):
 		# We need to pass both weight/bias AND linear to backward, because
-		# We store the input in linear.last_input, with a side-effect,
-		# but if we don't have input tensors that require grad, autograd will not automatically mark the output as needing grad.
+		# linear is reached by a side-effect, and if we don't have input tensors that require grad,
+		# autograd will not automatically mark the output as needing grad.
 		ctx.linear = linear
-		linear._store_input(input)
-		ctx.save_for_backward(
-			input.detach()
-		)  # used in dL/dw, we mark it as saved here to force torch.utils.checkpoint to recompute it
+		ctx.use = use
 		return torch.nn.functional.linear(input, weight, bias)
 
 	@staticmethod
 	def backward(ctx, grad_output):
 		linear = ctx.linear
-		linear._accumulate_grad_output(grad_output)
+		linear.record(ctx.use, grad_output)
 
 		# Compute input gradient: ∂L/∂x = ∂L/∂y @ ∂y/∂x
-		# For y = x @ W^T (PyTorch convention):
-		#   - Real case: ∂L/∂x = ∂L/∂y @ W
-		#   - Complex case: ∂L/∂x = ∂L/∂y @ W̄ (Wirtinger calculus)
-		# See: https://pytorch.org/docs/stable/notes/autograd.html#complex-autograd-doc
 		weight = linear.weight.conj() if grad_output.is_complex() else linear.weight
 
 		if grad_output.dim() == 2:
@@ -37,7 +125,7 @@ class LinearDX(torch.autograd.Function):
 			grad_input = torch.matmul(grad_output, weight)
 
 		# del ctx.linear # don't delete in case of multiple backward calls
-		return grad_input, None, None, None
+		return grad_input, None, None, None, None
 
 
 class LayerDW:
@@ -56,7 +144,9 @@ class LayerDW:
 			super().__init__(*args, **kwargs)
 
 		# Initialize mixin-specific attributes
-		self.ctx = {"input": [], "grad_output": []}
+		self.pairs = []  # one entry per micro-batch
+		self.last_pairs = None  # what the last backward recorded, not yet assigned to a micro-batch
+		self.filling = None  # [micro-batch, next use] while a recomputed forward fills inputs back
 
 	@classmethod
 	def register_dx_function(cls, dx_class):
@@ -83,115 +173,140 @@ class LayerDW:
 		"""
 		Delete all saved tensors.
 		"""
-		self.ctx["input"].clear()
-		self.ctx["grad_output"].clear()
-		self.last_input = None
-		self.last_grad_output = None
+		self.pairs.clear()
+		self.last_pairs = None
+		self.filling = None
 
-	def is_empty(self, queue):
+	def is_empty(self, mb_id):
 		"""
-		Check if there are any saved tensors in the queue.
+		Check whether anything was recorded for a micro-batch. A module the pass did not use
+		records nothing, and has no parameter gradient to compute.
 
-		:param queue: queue to check among ["input", "grad_output"]
-		:type queue: str
-		:return: True if there are no saved tensors in the queue, False otherwise
+		:param mb_id: micro-batch index to check
+		:type mb_id: int
+		:return: True if nothing is kept for that micro-batch
 		:rtype: bool
 		"""
-		return all(x is None for x in self.ctx[queue])
+		return mb_id >= len(self.pairs) or self.pairs[mb_id] is None
 
 	def _state(self):
 		"""
-		Return the state of the queues as a string.
+		Return the number of uses recorded per micro-batch, as a string.
 		"""
-		ninputs = len([x for x in self.ctx["input"] if x is not None])
-		ngrads = len([x for x in self.ctx["grad_output"] if x is not None])
-		return f"({ninputs},{ngrads})"
+		return f"({[len(x) if x is not None else 0 for x in self.pairs]})"
 
-	def _store_input(self, input):
+	def record(self, use, grad_output):
 		"""
-		Store input for later use in backward_params.
-		Marks input as model input if it has no grad_fn (for checkpointing logic).
+		Keep one use of this layer: the input it was applied to, and the gradient that came back
+		for it. A layer applied several times in a pass contributes one term per use to its
+		parameter gradient, so the two halves have to stay together.
 
-		:param input: input tensor to store
-		:type input: torch.Tensor
-		"""
-		self.last_input = input.detach()
-		# Mark if this is the input of the model (no grad_fn)
-		# This prevents remat logic from deleting it since it won't be recomputed by torch.utils.checkpoint
-		setattr(self.last_input, "is_model_input", input.grad_fn is None)
+		The gradient is all the layer's own node has. The input is filled in by the node that
+		saved it, which the backward reaches next.
 
-	def _accumulate_grad_output(self, grad_output):
-		"""
-		Accumulate grad_output for later use in backward_params.
-		If module is reused multiple times in forward pass, this will be called multiple times
-		and we need to sum all the gradients, not overwrite them.
-
-		:param grad_output: gradient with respect to output
+		:param use: the use the gradient came back for
+		:type use: _Use
+		:param grad_output: gradient with respect to the corresponding output
 		:type grad_output: torch.Tensor
 		"""
-		if getattr(self, "last_grad_output", None) is None:
-			self.last_grad_output = grad_output
-		else:
-			self.last_grad_output = self.last_grad_output + grad_output
+		keep_input, keep_gradient = _RECORDING
+		if not keep_gradient:
+			return
 
-	def set(self, queue, idx, value):
-		"""
-		Set a value in the queue at a given index.
+		if self.last_pairs is None:
+			self.last_pairs = []
 
-		:param queue: queue to set the value in
-		:type queue: str
-		:param idx: index to set the value at
-		:type idx: int
-		:param value: value to set
-		:type value: torch.Tensor
-		"""
-		values = self.ctx[queue]
-		if len(values) <= idx:
-			values.extend([None] * (idx - len(values) + 1))
-		if values[idx] is not None:
-			raise ValueError(f"{queue} at index {idx} already set")
-		values[idx] = value
+		pair = [None, grad_output]
+		if keep_input:
+			use.pending = pair
+		self.last_pairs.append(pair)
 
-	def delete(self, queue, idx):
+	def needs_inputs(self, mb_id):
 		"""
-		Delete a value in the queue at a given index.
+		Whether a recomputed forward still has to give this micro-batch its inputs back.
 
-		:param queue: queue to delete the value from
-		:type queue: str
-		:param idx: index to delete the value at
-		:type idx: int
+		:param mb_id: micro-batch index to check
+		:type mb_id: int
+		:rtype: bool
 		"""
-		values = self.ctx[queue]
-		if idx >= len(values) or values[idx] is None:
-			raise ValueError(f"{queue} at index {idx} not set")
-		values[idx] = None
+		if self.is_empty(mb_id):
+			return False
 
-	def move_last_computed(self, queue, idx):
-		"""
-		Move the last computed value to the queue at a given index.
-		This should be called after the forward pass for every microbatch.
+		return any(input is None for input, _ in self.pairs[mb_id])
 
-		:param queue: queue to move the last computed value to
-		:type queue: str
-		:param idx: index to move the last computed value to
-		:type idx: int
+	def begin_filling(self, mb_id):
 		"""
-		last_value = getattr(self, f"last_{queue}", None)
-		if last_value is None:
-			# raise ValueError(f"Last {queue} not set")
-			return  # this can happen if a mpdule does not use some of its submodules
-		self.set(queue, idx, last_value)
-		setattr(self, f"last_{queue}", None)
+		Start putting back the inputs of a micro-batch, one per use, in the order a forward
+		produces them.
 
-	def offload_last(self, idx, to="cpu"):
+		:param mb_id: micro-batch index whose inputs are being recomputed
+		:type mb_id: int
 		"""
-		Offload the last computed value to a given device.
+		self.filling = [mb_id, 0]
+
+	def fill_input(self, input):
 		"""
-		grads = self.ctx["grad_output"][idx]
-		inputs = self.ctx["input"][idx]
-		with torch.no_grad():
-			self.ctx["grad_output"][idx] = grads.to(to, non_blocking=True)
-			self.ctx["input"][idx] = inputs.to(to, non_blocking=True)
+		Give one use its input back, the uses being filled in the order they are recomputed.
+
+		:param input: input of the use being recomputed
+		:type input: torch.Tensor
+		"""
+		if self.filling is None:
+			return
+
+		mb_id, index = self.filling
+		pairs = self.pairs[mb_id]
+		if index >= len(pairs):
+			raise RuntimeError(
+				f"the recomputed forward used this layer more than the {len(pairs)} time(s) the "
+				"original one did, so its uses can no longer be told apart"
+			)
+
+		pairs[index][0] = input.detach()
+		self.filling[1] = index + 1
+
+	def end_filling(self):
+		"""
+		Stop putting inputs back, and check that every use got one.
+
+		:raises RuntimeError: if the recomputed forward used this layer fewer times than the
+			original one did
+		"""
+		mb_id, index = self.filling
+		self.filling = None
+
+		expected = 0 if self.is_empty(mb_id) else len(self.pairs[mb_id])
+		if index != expected:
+			raise RuntimeError(
+				f"the recomputed forward used this layer {index} time(s) where the original one "
+				f"used it {expected} time(s), so its uses can no longer be told apart"
+			)
+
+	def commit(self, mb_id):
+		"""
+		Assign what the last backward recorded to a micro-batch.
+
+		A backward walks the uses of a layer in the reverse of the order the forward produced
+		them, so what it recorded is reversed here: the uses are kept in forward order, which is
+		the order a recomputed forward fills their inputs back in through :meth:`fill_input`.
+
+		Recording nothing is not an error: a module the pass did not use is simply left alone.
+
+		:param mb_id: micro-batch index the last backward belongs to
+		:type mb_id: int
+		:raises ValueError: if that micro-batch already holds something
+		"""
+		if self.last_pairs is None:
+			return
+
+		if len(self.pairs) <= mb_id:
+			self.pairs.extend([None] * (mb_id - len(self.pairs) + 1))
+		if self.pairs[mb_id] is not None:
+			raise ValueError(f"pairs at index {mb_id} already set")
+
+		self.last_pairs.reverse()
+		self.pairs[mb_id] = self.last_pairs
+		self.last_pairs = None
 
 
 # Note: inherit from LayerDW FIRST to make use of the mixin's initialization logic
@@ -210,50 +325,48 @@ class LinearDW(LayerDW, nn.Linear):
 		# LinearDW.forward -> LinearDX.forward -> LinearDX.backward -> LinearDW.backward
 
 	def forward(self, x, *args, **kwargs):
-		return LinearDX.apply(x, self.weight, self.bias, self, *args, **kwargs)
+		use = _Use()
+		x = _KeepInput.apply(x, self.weight, self, use)
+		return LinearDX.apply(x, self.weight, self.bias, self, use, *args, **kwargs)
 
 	def backward(self, mb_id):
-		grad_output = self.ctx["grad_output"][mb_id]
-		inputs = self.ctx["input"][mb_id]
+		pairs = self.pairs[mb_id]
+		assert pairs is not None, f"Nothing recorded for mb {mb_id}"
+		self.pairs[mb_id] = None
 
-		# Flatten to 2D if needed (avoid reshape if already 2D)
-		if grad_output.dim() > 2:
-			go = grad_output.reshape(-1, grad_output.size(-1))
-		else:
-			go = grad_output
+		for inputs, grad_output in pairs:
+			assert inputs is not None, (
+				f"Input dropped for mb {mb_id} and never recomputed, recompute the forward first"
+			)
 
-		if inputs.dim() > 2:
-			inp = inputs.reshape(-1, inputs.size(-1))
-		else:
-			inp = inputs
-
-		# Weight gradient: ∂L/∂W = ∂L/∂y^T @ x
-		# For y = x @ W^T (PyTorch convention):
-		#   - Real case: ∂L/∂W = (∂L/∂y)^T @ x
-		#   - Complex case: ∂L/∂W = (∂L/∂y)^T @ x̄ (Wirtinger calculus)
-		# This matches PyTorch's autograd for complex parameters
-		if go.is_complex():
-			grads_w = torch.mm(go.t(), inp.conj())
-		else:
-			grads_w = torch.mm(go.t(), inp)
-
-		# Accumulate gradients
-		if self.weight.grad is None:
-			self.weight.grad = grads_w
-		else:
-			self.weight.grad.add_(grads_w)
-
-		# dL/db
-		if self.bias is not None:
-			grads_b = go.sum(0)
-			if self.bias.grad is None:
-				self.bias.grad = grads_b
+			# Flatten to 2D if needed (avoid reshape if already 2D)
+			if grad_output.dim() > 2:
+				go = grad_output.reshape(-1, grad_output.size(-1))
 			else:
-				self.bias.grad.add_(grads_b)
+				go = grad_output
 
-		# Clear saved tensors
-		self.ctx["grad_output"][mb_id] = None
-		self.ctx["input"][mb_id] = None
+			if inputs.dim() > 2:
+				inp = inputs.reshape(-1, inputs.size(-1))
+			else:
+				inp = inputs
+
+			# Weight gradient: ∂L/∂W = ∂L/∂y^T @ x
+			# For y = x @ W^T (PyTorch convention):
+			#   - Real case: ∂L/∂W = (∂L/∂y)^T @ x
+			#   - Complex case: ∂L/∂W = (∂L/∂y)^T @ x̄ (Wirtinger calculus)
+			# This matches PyTorch's autograd for complex parameters
+			if go.is_complex():
+				grads_w = torch.mm(go.t(), inp.conj())
+			else:
+				grads_w = torch.mm(go.t(), inp)
+
+			# Accumulate gradients
+			_accumulate_grads(self.weight, grads_w)
+
+			# dL/db
+			if self.bias is not None:
+				grads_b = go.sum(0)
+				_accumulate_grads(self.bias, grads_b)
 
 
 LinearDW.register_dx_function(LinearDX)
@@ -261,10 +374,10 @@ LinearDW.register_dx_function(LinearDX)
 
 class Conv1dDX(torch.autograd.Function):
 	@staticmethod
-	def forward(ctx, input, weight, bias, conv1d):
+	def forward(ctx, input, weight, bias, conv1d, use):
 		ctx.conv1d = conv1d
-		conv1d._store_input(input)
-		ctx.save_for_backward(input.detach())
+		ctx.use = use
+		ctx.input_shape = input.shape
 
 		return torch.nn.functional.conv1d(
 			input,
@@ -279,11 +392,10 @@ class Conv1dDX(torch.autograd.Function):
 	@staticmethod
 	def backward(ctx, grad_output):
 		conv1d = ctx.conv1d
-		conv1d._accumulate_grad_output(grad_output)
+		input_shape = ctx.input_shape
+		conv1d.record(ctx.use, grad_output)
 
 		with torch.no_grad():
-			(input,) = ctx.saved_tensors
-
 			# Compute grad_input using transposed convolution
 			# This is the standard way to compute input gradients for conv
 			stride = conv1d.stride[0] if isinstance(conv1d.stride, tuple) else conv1d.stride
@@ -293,13 +405,13 @@ class Conv1dDX(torch.autograd.Function):
 
 			# Handle padding="same" by computing the actual padding used
 			if isinstance(padding, str) and padding == "same":
-				l_in = input.shape[2]
+				l_in = input_shape[2]
 				l_out = grad_output.shape[2]
 				padding_total = max(0, (l_out - 1) * stride + dilation * (kernel_size - 1) + 1 - l_in)
 				padding = padding_total // 2
 
 			# Compute output_padding to match input shape
-			output_padding = input.shape[2] - (
+			output_padding = input_shape[2] - (
 				(grad_output.shape[2] - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + 1
 			)
 
@@ -319,7 +431,7 @@ class Conv1dDX(torch.autograd.Function):
 				groups=conv1d.groups,
 			)
 
-		return grad_input, None, None, None
+		return grad_input, None, None, None, None
 
 
 class Conv1dDW(LayerDW, nn.Conv1d):
@@ -343,7 +455,9 @@ class Conv1dDW(LayerDW, nn.Conv1d):
 			self.bias = conv1d.bias
 
 	def forward(self, x, *args, **kwargs):
-		return Conv1dDX.apply(x, self.weight, self.bias, self, *args, **kwargs)
+		use = _Use()
+		x = _KeepInput.apply(x, self.weight, self, use)
+		return Conv1dDX.apply(x, self.weight, self.bias, self, use, *args, **kwargs)
 
 	def _backward_weight_complex(self, inputs, grad_output, stride, padding, dilation, kernel_size):
 		"""Compute weight gradient for complex tensors using Wirtinger calculus.
@@ -385,62 +499,55 @@ class Conv1dDW(LayerDW, nn.Conv1d):
 		return grads_w
 
 	def backward(self, mb_id):
-		assert len(self.ctx["grad_output"]) > mb_id, "No grad kept for backward"
-		assert len(self.ctx["input"]) > mb_id, "No input kept for backward"
-		grad_output = self.ctx["grad_output"][mb_id]
-		inputs = self.ctx["input"][mb_id]
-		assert grad_output is not None, f"Grad output not set for mb {mb_id}"
-		assert inputs is not None, f"Input not set for mb {mb_id}"
+		pairs = self.pairs[mb_id]
+		assert pairs is not None, f"Nothing recorded for mb {mb_id}"
+		self.pairs[mb_id] = None
 
-		with torch.no_grad():
-			stride = self.stride[0] if isinstance(self.stride, tuple) else self.stride
-			padding = self.padding[0] if isinstance(self.padding, tuple) else self.padding
-			dilation = self.dilation[0] if isinstance(self.dilation, tuple) else self.dilation
-			kernel_size = self.weight.shape[2]
+		for inputs, grad_output in pairs:
+			assert inputs is not None, (
+				f"Input dropped for mb {mb_id} and never recomputed, recompute the forward first"
+			)
 
-			# Handle padding="same" by computing the actual padding used
-			if isinstance(padding, str) and padding == "same":
-				l_in = inputs.shape[2]
-				l_out = grad_output.shape[2]
-				padding_total = max(0, (l_out - 1) * stride + dilation * (kernel_size - 1) + 1 - l_in)
-				padding = padding_total // 2
+			with torch.no_grad():
+				stride = self.stride[0] if isinstance(self.stride, tuple) else self.stride
+				padding = self.padding[0] if isinstance(self.padding, tuple) else self.padding
+				dilation = self.dilation[0] if isinstance(self.dilation, tuple) else self.dilation
+				kernel_size = self.weight.shape[2]
 
-			if inputs.is_complex():
-				grads_w = self._backward_weight_complex(
-					inputs, grad_output, stride, padding, dilation, kernel_size
-				)
-			else:
-				grads_w = torch.nn.grad.conv1d_weight(
-					inputs,
-					self.weight.shape,
-					grad_output,
-					stride=[stride],
-					padding=[padding],
-					dilation=[dilation],
-					groups=self.groups,
-				)
+				# Handle padding="same" by computing the actual padding used
+				if isinstance(padding, str) and padding == "same":
+					l_in = inputs.shape[2]
+					l_out = grad_output.shape[2]
+					padding_total = max(0, (l_out - 1) * stride + dilation * (kernel_size - 1) + 1 - l_in)
+					padding = padding_total // 2
 
-		if grads_w.device != self.weight.device:
-			grads_w = grads_w.to(self.weight.device, non_blocking=True)
+				if inputs.is_complex():
+					grads_w = self._backward_weight_complex(
+						inputs, grad_output, stride, padding, dilation, kernel_size
+					)
+				else:
+					grads_w = torch.nn.grad.conv1d_weight(
+						inputs,
+						self.weight.shape,
+						grad_output,
+						stride=[stride],
+						padding=[padding],
+						dilation=[dilation],
+						groups=self.groups,
+					)
 
-		if self.weight.grad is None:
-			self.weight.grad = grads_w
-		else:
-			self.weight.grad.add_(grads_w)  # accumulate without re-allocating
+			if grads_w.device != self.weight.device:
+				grads_w = grads_w.to(self.weight.device, non_blocking=True)
 
-		if self.bias is not None:
-			grads_b = grad_output.sum(dim=(0, 2))
+			_accumulate_grads(self.weight, grads_w)
 
-			if grads_b.device != self.bias.device:
-				grads_b = grads_b.to(self.bias.device, non_blocking=True)
+			if self.bias is not None:
+				grads_b = grad_output.sum(dim=(0, 2))
 
-			if self.bias.grad is None:
-				self.bias.grad = grads_b
-			else:
-				self.bias.grad.add_(grads_b)  # accumulate without re-allocating
+				if grads_b.device != self.bias.device:
+					grads_b = grads_b.to(self.bias.device, non_blocking=True)
 
-		self.ctx["grad_output"][mb_id] = None
-		self.ctx["input"][mb_id] = None
+				_accumulate_grads(self.bias, grads_b)
 
 
 Conv1dDW.register_dx_function(Conv1dDX)
@@ -528,12 +635,12 @@ class LayerDWTracer(torch.fx.Tracer):
 
 def _grad_fn_is_layer_dx(grad_fn):
 	"""
-	Check if the given grad_fn is a LayerDX-related node (LinearDX, Conv1dDX, etc.).
-	Uses the LayerDW registry to detect registered DX autograd functions.
+	Check if the given grad_fn is a node a LayerDW put in the graph: its DX function (LinearDX,
+	Conv1dDX, etc.), found through the LayerDW registry, or the node keeping its input.
 	"""
 	grad_fn_type = type(grad_fn)
 
-	for dx_class in LayerDW._dx_function_registry.values():
+	for dx_class in [_KeepInput, *LayerDW._dx_function_registry.values()]:
 		if grad_fn_type.__name__ == f"{dx_class.__name__}Backward":
 			return True
 
@@ -542,7 +649,7 @@ def _grad_fn_is_layer_dx(grad_fn):
 
 def _get_gradient_edges_needed_for_w(grad_fn):
 	"""
-	Get the set of gradient edges (corresponding to tensors) that we need to differentiate against in order to fill all "grad_output" fields of LayerDW modules.
+	Get the set of gradient edges (corresponding to tensors) that we need to differentiate against in order to fill all the pairs of LayerDW modules, gradients and inputs.
 
 	:param grad_fn: The grad_fn to start the search from. (Usually the loss.grad_fn)
 	:type grad_fn: torch.autograd.Function
@@ -595,10 +702,4 @@ def partial_dx_recomputation(outputs, grad_outputs=None, retain_graph=False):
 		return  # nothing to do
 
 	# allow_unused because grads wrt those nodes will be None, which PyTorch does not like
-	torch.autograd.grad(
-		outputs,
-		inputs=gradient_edges,
-		grad_outputs=grad_outputs,
-		allow_unused=True,
-		retain_graph=retain_graph,
-	)
+	outputs.backward(grad_outputs, inputs=gradient_edges, retain_graph=retain_graph)

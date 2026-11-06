@@ -98,7 +98,7 @@ directly:
 
 .. code-block:: python
 
-    from elf.partitioners import Signature
+    from elf import Signature
 
     # Example: 4 stages where stage 2 receives from both stage 0 and stage 1
     signatures = [
@@ -256,25 +256,29 @@ A schedule is a list of ``Operation`` objects that define what each device does 
 * ``LOSS_FORWARD``, ``LOSS_BACKWARD``: Loss computation
 * ``SEND``, ``RECV``: Communication operations (added automatically)
 * ``PREFETCH_ACTIVATIONS``: Prefetch from CPU (for offloading)
-* ``RECOMPUTE_FORWARD``, ``RECOMPUTE_BACKWARD_INPUTS``: For checkpointing
+* ``RECOMPUTE_FORWARD``: For checkpointing, rebuilds the activations of a forward between ``FORWARD`` and ``BACKWARD_INPUTS``
+* ``RECOMPUTE_FORWARD_FOR_PARAMS``, ``RECOMPUTE_BACKWARD_INPUTS``: For backward rematerialization, between ``BACKWARD_INPUTS`` and ``BACKWARD_PARAMS``
 
 Writing a Custom Scheduler
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A scheduler is a function that takes ``(placement, nmb)`` and returns a schedule:
+A scheduler is a function that takes ``(placement, nmb, profiles)`` and returns a schedule.
+``profiles`` holds one :class:`~elf.profiling.StageProfile` per stage, measured by the pipeline
+before the first step, or is ``None`` when profiling was disabled.
 
 .. code-block:: python
 
     from elf.scheduling import Operation, OperationType
     from elf.registry import SCHEDULERS
 
-    def my_custom_scheduler(placement, nmb):
+    def my_custom_scheduler(placement, nmb, profiles):
         """
         Custom scheduler that processes microbatches in a specific order.
 
         Args:
             placement: List[int] - device assignment for each stage
             nmb: int - number of microbatches
+            profiles: List[StageProfile] | None - per-stage timings and memory
 
         Returns:
             List[Operation] - the execution schedule
@@ -309,7 +313,18 @@ A scheduler is a function that takes ``(placement, nmb)`` and returns a schedule
     # Use custom scheduler
     pipe = Pipeline(model, sample, scheduler="my_custom_scheduler")
 
-All necessary are automatically added between the scheduling and the communication scheduling steps.
+All necessary communications are automatically added between the scheduling and the communication scheduling steps.
+
+Additionally, if your schedule relies on a specific configuration (e.g. ZB-V is only defined for 2-wave mirror stage assignment with 2p microbatches), you can provide a ``checker`` function as a guard.
+
+.. code-block:: python
+
+    from elf.registry import Scheduler
+
+    def checker(placement, nmb, profiles):
+        return nmb >= len(placement)
+
+    SCHEDULERS.register("my_specific_scheduler", Scheduler(my_custom_scheduler, checker), "This scheduler only works with more microbatches than stages.")
 
 
 Modifying Existing Schedulers
@@ -319,21 +334,23 @@ You can wrap existing schedulers to add custom behavior:
 
 .. code-block:: python
 
-    from elf.scheduling import OpOptions, OperationType
+    from elf.scheduling import OpOptions, OperationType, RematMode
 
-    def checkpointed_1f1b(placement, nmb):
+    def checkpointed_1f1b(placement, nmb, profiles):
         """1F1B with activation checkpointing"""
         # Get base schedule
         base_scheduler = SCHEDULERS["1f1b"]
-        schedule = base_scheduler(placement, nmb)
+        schedule = base_scheduler(placement, nmb, profiles)
 
         # Modify operations
         for op in schedule:
             if op.op == OperationType.FORWARD:
                 # Add checkpointing to all forward passes
                 def checkpoint_strategy(name, module):
-                    # Checkpoint specific modules
-                    return isinstance(module, (nn.GELU, nn.LayerNorm))
+                    # Recompute cheap pointwise modules, without keeping their inputs
+                    if isinstance(module, (nn.GELU, nn.LayerNorm)):
+                        return RematMode.DISCARD
+                    return None
 
                 op.options[OpOptions.REMAT_STRATEGY] = checkpoint_strategy
 
@@ -524,7 +541,7 @@ For complex setups, use ``PipelineConfig`` for cleaner code:
     config = PipelineConfig(
         scheduler="zbh2",
         placement=Placement.default("zbh2", pp=4),
-        partitioner="constrained",  # or False for manual
+        partitioner="balanced",  # or False for manual
         dp=2,  # Data parallelism degree
     )
 
@@ -564,7 +581,7 @@ ELF provides multiple partitioning algorithms:
     pipe = Pipeline(model, sample, partitioner="naive")
 
     # Constrained: 1 input, 1 output per block (for simple communication) + iterative refinement to improve the partition
-    pipe = Pipeline(model, sample, partitioner="constrained")
+    pipe = Pipeline(model, sample, partitioner="balanced")
 
     # METIS: Graph-based partitioning (requires gpmetis)
     pipe = Pipeline(model, sample, partitioner="metis")
@@ -577,7 +594,7 @@ ELF provides multiple partitioning algorithms:
 
 **Choosing a Partitioner:**
 
-* Start with ``"constrained"`` (default) - good balance
+* Start with ``"balanced"`` (default) - good balance
 * Use ``"metis"`` or ``"dagP"`` for complex skip connections
 * Use ``partitioner=False`` for full manual control
 
@@ -602,6 +619,15 @@ ELF can use different methods to extract the model graph:
 
 Using torch.export can yield better or worse performance than torch.fx, depending on the model. If both work, try both and compare the performance.
 If all tracing algorithms fail, we recommend to use manual partitioning.
+
+
+Communication Tuning
+--------------------
+
+P2P operations use NCCL kernels which require a few GPU SMs to run. This has 2 implications for the runtime ;
+
+1. Communications running in parallel of computations steal a few resources, even when waiting for their peer. The computation kernel are slightly slowed down, depending on the number of concurrent communication, and resources taken by each comm kernel. The latter can be tuned using the ``NCCL_MAX_CTAS`` environment variable ; setting it to 1 greatly reduces the slowdown, but increases individual communication times. Good communication schedulers (e.g. ``timed-overlap``) minimize the time spent overlapping comms and compute, so leaving the default value is fine.
+2. If no SM is available when launching a communication, it has to wait for one to become available. This notably happens when a send is enqueued after a compute kernel which uses all of the GPU's SMs, delaying the communication and thus the next rank. In a pipeline, it is frequent that a send and a computation become available at the same time, when the previous computation finishes. In that case we want to force the send to be enqueued before the computation, as is done on the host side. Since they run on different streams, it is not guaranteed by default ; one can enforce that by setting ``CUDA_DEVICE_MAX_CONNECTIONS`` to 1, forcing a single physical queue that serializes the queuing of kernels. In practice this showed to slightly improve throughput.
 
 
 Debugging and Introspection
@@ -643,7 +669,7 @@ Example: Complete Custom Setup
         Pipeline, Placement, replace_layer_with_layer_dw,
         sequential_signatures,
     )
-    from elf.scheduling import OpOptions, OperationType
+    from elf.scheduling import OpOptions, OperationType, RematMode
     from elf.registry import SCHEDULERS
 
     # Initialize distributed
@@ -674,15 +700,17 @@ Example: Complete Custom Setup
             param.reset_parameters()
 
     # 3. Custom scheduler with checkpointing
-    def my_scheduler(placement, nmb, signatures):
+    def my_scheduler(placement, nmb, profiles):
         base = SCHEDULERS["zbh2"]
-        schedule = base(placement, nmb, signatures)
+        schedule = base(placement, nmb, profiles)
 
         # Add selective checkpointing
         for op in schedule:
             if op.op == OperationType.FORWARD and op.mb_id % 2 == 0:
                 # Checkpoint even microbatches
-                op.options[OpOptions.REMAT_STRATEGY] = lambda n, m: n == ""
+                op.options[OpOptions.REMAT_STRATEGY] = lambda n, m: (
+                    RematMode.CHECKPOINT if n == "" else None
+                )
 
         return schedule
 

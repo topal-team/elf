@@ -4,14 +4,16 @@ Handmade partition methods
 
 import logging
 
+from elf.partitioners.profile import DONT_CUT_HERE
+
 logger = logging.getLogger(__name__)
 
 
 def split_graph(graph, times, memories, n):
 	"""
 	Naively splits a graph into roughly equal blocks in terms of time.
-	This algorithm does not take into account the memory used or transferred.
-	Unlike split_graph_constrained, the number of input and output tensors of each block is NOT guaranteed.
+	This algorithm does not take into account the memory used or transferred, nor the number of
+	tensors crossing block boundaries (see :func:`split_graph_balanced`).
 
 	:param graph: symbolic trace of the module to partition (see torch.fx)
 	:type graph: fx.GraphModule
@@ -57,13 +59,15 @@ def _evaluate_partition_balance(parts, times):
 	return balance
 
 
-def split_graph_constrained(graph, times, memories, n):
+def split_graph_balanced(graph, times, memories, n):
 	"""
-	Naively splits a graph into roughly equal blocks in terms of time.
-	This algorithm does not take into account the memory used or transferred.
-	Unlike split_graph, it is guaranteed that every block has 1 tensor as input and 1 tensor as output.
-	This algorithm tries different numbers of cuts (1-5), finds the best partition for each,
-	and returns the one with the best balance score (with a small penalty for more cuts).
+	Splits a graph into contiguous blocks, searching for the best balance in terms of time.
+	This algorithm does not take into account the memory used.
+	For each maximum number of cuts (tensors entering a block, from 1 to 10), the graph is split
+	greedily from the end, and the imbalance margin allowed when closing a block is tuned to
+	minimize ``max(load) / mean(load)``. The partition with the best score is returned, with a
+	penalty for each additional cut. The cut limit is a preference: a block is extended past its
+	time target until the limit is met, and the first block takes whatever remains.
 
 	:param graph: symbolic trace of the module to partition (see torch.fx)
 	:type graph: fx.GraphModule
@@ -79,17 +83,17 @@ def split_graph_constrained(graph, times, memories, n):
 	"""
 	best_parts = None
 	best_penalized_score = float("inf")
-	cut_penalty = 0.1
+	cut_penalty = 0.15  # arbitrary
 	max_cuts = 10
 
-	for max_cuts in range(1, max_cuts + 1):
+	for cuts in range(1, max_cuts + 1):
 		imbalance_ratio = 0
-		parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts)
+		parts = _split_graph_balanced_once(graph, times, memories, n, imbalance_ratio, cuts)
 		score = _evaluate_partition_balance(parts, times)
 
 		while imbalance_ratio < 1:
 			imbalance_ratio += 0.01
-			new_parts = split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts)
+			new_parts = _split_graph_balanced_once(graph, times, memories, n, imbalance_ratio, cuts)
 			new_score = _evaluate_partition_balance(new_parts, times)
 			if new_score > score:
 				break
@@ -97,16 +101,16 @@ def split_graph_constrained(graph, times, memories, n):
 			parts = new_parts
 			score = new_score
 
-		penalized_score = score + (max_cuts - 1) * cut_penalty
+		penalized_score = score + (cuts - 1) * cut_penalty
 		if penalized_score < best_penalized_score:
-			logger.debug(f"New best score: {penalized_score} with {max_cuts} cuts")
+			logger.debug(f"New best score: {penalized_score} with {cuts} cuts")
 			best_penalized_score = penalized_score
 			best_parts = parts
 
 	return best_parts
 
 
-def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max_cuts):
+def _split_graph_balanced_once(graph, times, memories, n, imbalance_ratio, max_cuts):
 	"""
 	Creates one partition of the graph, with a given imbalance ratio and maximum number of cuts.
 	"""
@@ -126,6 +130,7 @@ def split_graph_constrained_util(graph, times, memories, n, imbalance_ratio, max
 			current_part > 0
 			and (current_time >= target_time or target_time - current_time < imbalance_margin)
 			and len(needed_inputs) <= max_cuts
+			and all(memories[x] != DONT_CUT_HERE for x in needed_inputs)  # force no cut here
 		):
 			current_part -= 1
 			current_time = 0

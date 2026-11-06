@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import subprocess
 
-from .metis import read_metis, convert_fx
+from elf.partitioners.metis import read_metis, convert_fx
 
 
 def split_graph_dagP(graph, times, memories, n):

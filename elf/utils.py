@@ -1,20 +1,34 @@
 """
-Various useful classes / functions
+Various useful classes / functions.
+
+Everything here is independent of the rest of the library: it imports nothing from ``elf`` and
+knows nothing about pipelines.
 """
 
-import math
 import time
 import logging
 
+from contextlib import contextmanager
+
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 
-from torch.utils.flop_counter import register_flop_formula
-
-from typing import List
-
 logger = logging.getLogger(__name__)
+
+__all__ = [
+	"TensorMetadata",
+	"dtypes",
+	"Timer",
+	"TimerCPU",
+	"TimerGPU",
+	"NameMapping",
+	"prod",
+	"pretty_print_params",
+	"tensor_leaves",
+	"rng_state",
+	"restored_rng",
+]
+
 
 dtypes = [
 	torch.float16,
@@ -45,106 +59,6 @@ def pretty_print_params(n):
 		return f"{n / 1e6:.1f}M"
 	else:
 		return f"{int(n)}"
-
-
-class Placement(List[int]):
-	"""
-	Device placement pattern for pipeline stages.
-
-	A placement is a list where each element specifies which device (rank) hosts
-	that pipeline stage. Different schedulers require different placement patterns:
-
-	- Linear: [0, 1, 2, 3] - each stage on a different device
-	- Interleaved: [0, 1, 2, 3, 0, 1, 2, 3] - multiple stages per device
-	- V-schedule: [0, 1, 2, 3, 3, 2, 1, 0] - bidirectional pattern
-
-	Example:
-		>>> # Manual placement
-		>>> placement = Placement([0, 1, 2, 3])
-		>>>
-		>>> # Automatic placement for scheduler
-		>>> placement = Placement.default("zbh2", pp=4)  # [0, 1, 2, 3]
-		>>> placement = Placement.default("zbv", pp=4)    # [0, 1, 2, 3, 3, 2, 1, 0]
-	"""
-
-	def __init__(self, placement: List[int]):
-		super().__init__(placement)
-		assert not dist.is_initialized() or max(self) < dist.get_world_size(), (
-			"Placement is out of bounds"
-		)
-
-	def get_ids(self, rank: int) -> List[int]:
-		"""
-		Get the stage IDs assigned to a specific rank.
-
-		Args:
-			rank: Device rank to query
-
-		Returns:
-			List of stage indices on the specified rank
-
-		Example:
-			>>> placement = Placement([0, 1, 1, 2])
-			>>> placement.get_ids(1)  # Stages on rank 1
-			[1, 2]
-		"""
-		return [i for i in range(len(self)) if self[i] == rank]
-
-	@staticmethod
-	def default(scheduler, pp):
-		"""
-		Get the default placement pattern for a scheduler.
-
-		Different pipeline schedulers have different placement requirements:
-
-		- 1f1b, gpipe, zbh1, zbh2: Linear placement [0, 1, 2, ...]
-		- megatron: Interleaved placement [0, 1, 2, ..., 0, 1, 2, ...]
-		- hanayo, zbv: V-schedule [0, 1, 2, ..., 2, 1, 0]
-
-		Args:
-			scheduler: Scheduler name (str) or scheduler function
-			pp: Number of pipeline parallel devices
-
-		Returns:
-			Placement object with the appropriate pattern
-
-		Example:
-			>>> # For standard schedulers
-			>>> placement = Placement.default("1f1b", pp=4)  # [0, 1, 2, 3]
-			>>>
-			>>> # For interleaved schedules
-			>>> placement = Placement.default("megatron", pp=4)  # [0, 1, 2, 3, 0, 1, 2, 3]
-			>>>
-			>>> # For V-schedules
-			>>> placement = Placement.default("zbv", pp=4)  # [0, 1, 2, 3, 3, 2, 1, 0]
-		"""
-		if callable(scheduler):
-			logger.warning(
-				"Placement.default() expects a scheduler name, not the scheduler object itself. Using the default placement."
-			)
-			scheduler = ""
-
-		if scheduler == "hanayo" or scheduler == "zbv":
-			return Placement([i for i in range(pp)] + list(reversed([i for i in range(pp)])))
-		elif scheduler == "megatron":
-			return Placement([i for i in range(pp)] * 2)
-		else:
-			return Placement([i for i in range(pp)])
-
-	def head(self):
-		return self[0]
-
-	def tail(self):
-		return self[-1]
-
-	def add_offset(self, offset: int):
-		return Placement([i + offset for i in self])
-
-	def is_tail(self, rank: int):
-		return rank == self[-1]
-
-	def is_head(self, rank: int):
-		return rank == self[0]
 
 
 class TensorMetadata:
@@ -246,6 +160,17 @@ class NameMapping:
 		return "NameMapping"
 
 
+def prod(iterable):
+	if isinstance(iterable, (int, float)):
+		return iterable
+
+	acc = 1
+	for x in iterable:
+		acc *= x
+
+	return acc
+
+
 class Timer:
 	"""
 	Utility context to time the execution of some code, in seconds.
@@ -324,248 +249,160 @@ class TimerGPU:
 		return self.start_event.elapsed_time(self.end_event) / 1000
 
 
-def send_models(models, dst, group=None):
+# === Code taken from Rotor (https://gitlab.inria.fr/hiepacs/rotor)
+
+
+def tensor_leaves(args):
 	"""
-	Send a list of models using p2p comms
-	Send the model structure (nn.Module object, parameters metadata, etc) via pickled CPU comm, and the actual tensors via GPU comm.
+	Walk a possibly nested structure and yield every tensor it holds.
 
-	:param models: list of models to send
-	:type models: list[nn.Module]
-	:param dst: destination rank
-	:type dst: int
-	:param group: communication group
-	:type group: dist.ProcessGroup | None
+	Dictionaries are walked in insertion order, so that a structure and a copy of it rebuilt from
+	the same walk line up leaf for leaf.
+
+	:param args: tensor, or a nesting of tuples, lists and dicts of them
+	:return: the tensors, in order
+	:rtype: Iterator[torch.Tensor]
 	"""
-
-	# Helper to split a qualified name like "a.b.weight" -> ("a.b", "weight")
-	def _split_qualified_name(qname: str):
-		if "." in qname:
-			path, leaf = qname.rsplit(".", 1)
-			return path, leaf
-		return "", qname
-
-	assert dist.is_initialized(), "torch.distributed must be initialized before calling send_models"
-
-	# 1) Build tensor-free payloads and gather tensors to transfer via GPU p2p
-	payloads = []
-	per_model_params = []
-	per_model_buffers = []
-	saved_params = []
-	saved_buffers = []
-
-	for model in models:
-		# Collect parameter names and tensors
-		param_names = []
-		param_requires = []
-		param_tensors = []
-		model_saved_params = []
-
-		for name, p in model.named_parameters(recurse=True):
-			param_names.append(name)
-			param_requires.append(bool(p.requires_grad))
-			pt = p.data
-			if not pt.is_cuda:
-				pt = pt.to(device="cuda")
-			else:
-				pt = pt.to(device=torch.cuda.current_device())
-			param_tensors.append(pt.contiguous())
-
-			module_path, leaf = _split_qualified_name(name)
-			submod = model.get_submodule(module_path) if module_path != "" else model
-			# Save original parameter object so we can restore it after pickling
-			model_saved_params.append((submod, leaf, p))
-
-			# During pickling (triggered by send_object_list), some module types
-			# such as torch.fx.GraphModule may perform symbolic tracing and expect
-			# parameters to be non-None. However, we do not want to serialize the
-			# full GPU tensors on the CPU channel.
-			#
-			# To avoid GPU->CPU transfers while still satisfying these expectations,
-			# we temporarily replace the parameter with a meta placeholder; the real GPU tensor
-			# is sent separately below via p2p.
-			dummy_param = nn.Parameter(torch.empty_like(p, device="meta"), requires_grad=False)
-			submod._parameters[leaf] = dummy_param  # type: ignore
-
-		# Collect buffer names and tensors
-		buffer_names = []
-		buffer_tensors = []
-		model_saved_buffers = []
-
-		for name, b in model.named_buffers(recurse=True):
-			buffer_names.append(name)
-			bt = b
-			if not bt.is_cuda:
-				bt = bt.to(device="cuda")
-			else:
-				bt = bt.to(device=torch.cuda.current_device())
-			buffer_tensors.append(bt.contiguous())
-
-			module_path, leaf = _split_qualified_name(name)
-			submod = model.get_submodule(module_path) if module_path != "" else model
-			# Save original buffer so we can restore it after pickling
-			model_saved_buffers.append((submod, leaf, b))
-			# Same rationale as for parameters above: avoid serializing large
-			# GPU tensors while keeping non-None buffers for modules that rely
-			# on them during pickling.
-			dummy_buffer = nn.Parameter(torch.empty_like(b, device="meta"), requires_grad=False)
-			submod._buffers[leaf] = dummy_buffer
-
-		payloads.append((model, param_names, param_requires, buffer_names))
-		per_model_params.append(param_tensors)
-		per_model_buffers.append(buffer_tensors)
-		saved_params.append(model_saved_params)
-		saved_buffers.append(model_saved_buffers)
-
-	# 2) Send tensor-free module payloads via CPU object communication
-	dist.send_object_list(payloads, dst=dst, group=group)
-
-	# 3) Restore original params/buffers in local models
-	for model_saved_params in saved_params:
-		for submod, leaf, p in model_saved_params:
-			submod._parameters[leaf] = p
-	for model_saved_buffers in saved_buffers:
-		for submod, leaf, b in model_saved_buffers:
-			submod._buffers[leaf] = b
-
-	# 4) Send tensor metadata and data via GPU p2p
-	for model_params, model_buffers in zip(per_model_params, per_model_buffers):
-		for t in model_params:
-			meta = TensorMetadata(t).to_tensor()
-			dist.send(meta, dst=dst, group=group)
-			dist.send(t, dst=dst, group=group)
-		for t in model_buffers:
-			meta = TensorMetadata(t).to_tensor()
-			dist.send(meta, dst=dst, group=group)
-			dist.send(t, dst=dst, group=group)
+	if isinstance(args, torch.Tensor):
+		yield args
+	elif isinstance(args, (tuple, list)):
+		for arg in args:
+			yield from tensor_leaves(arg)
+	elif isinstance(args, dict):
+		for arg in args.values():
+			yield from tensor_leaves(arg)
 
 
-def recv_models(models, src, group=None):
+def rng_state(args):
 	"""
-	Receive a list of models using p2p comms. See :func:`send_models` for more details.
+	Snapshot the generators a forward is about to draw from.
 
-	:param models: list object with correct size, that will be populated with the received models
-	:type models: list[Any]
-	:param src: source rank
-	:type src: int
-	:param group: communication group
-	:type group: dist.ProcessGroup | None
+	:param args: arguments of that forward, used to find which devices are involved
+	:type args: tuple
+	:return: the cpu generator state, and the state of every cuda device the arguments live on
+	:rtype: tuple[torch.Tensor, dict[int, torch.Tensor]]
 	"""
-	assert dist.is_initialized(), "torch.distributed must be initialized before calling recv_models"
-
-	# Receive tensor-free module payloads
-	obj_list = [None for _ in range(len(models))]
-	dist.recv_object_list(obj_list, src=src, group=group)
-
-	# Receive tensors via GPU and attach to the received modules
-	for i, payload in enumerate(obj_list):
-		module, param_names, param_requires, buffer_names = payload
-
-		# Parameters
-		for name, req in zip(param_names, param_requires):
-			meta_tensor = torch.empty(TensorMetadata.MAX_SIZE, device=torch.cuda.current_device())
-			dist.recv(meta_tensor, src=src, group=group)
-			meta = TensorMetadata.from_tensor(meta_tensor)
-			tensor = torch.empty(tuple(meta.shape), dtype=meta.dtype, device=torch.cuda.current_device())
-			dist.recv(tensor, src=src, group=group)
-
-			if "." in name:
-				module_path, leaf = name.rsplit(".", 1)
-				submod = module.get_submodule(module_path)
-			else:
-				submod, leaf = module, name
-			param_obj = nn.Parameter(tensor, requires_grad=bool(req))
-			submod.register_parameter(leaf, param_obj)
-
-		# Buffers
-		for name in buffer_names:
-			meta_tensor = torch.empty(TensorMetadata.MAX_SIZE, device=torch.cuda.current_device())
-			dist.recv(meta_tensor, src=src, group=group)
-			meta = TensorMetadata.from_tensor(meta_tensor)
-			tensor = torch.empty(tuple(meta.shape), dtype=meta.dtype, device=torch.cuda.current_device())
-			dist.recv(tensor, src=src, group=group)
-
-			if "." in name:
-				module_path, leaf = name.rsplit(".", 1)
-				submod = module.get_submodule(module_path)
-			else:
-				submod, leaf = module, name
-			submod.register_buffer(leaf, tensor)
-
-		module.cuda()
-		models[i] = module
+	devices = {tensor.device.index for tensor in tensor_leaves(args) if tensor.is_cuda}
+	return torch.get_rng_state(), {device: torch.cuda.get_rng_state(device) for device in devices}
 
 
-def broadcast_models(models, src, group=None):
+@contextmanager
+def restored_rng(state):
 	"""
-	Broadcast a list of models using p2p comms.
+	Put the generators back where :func:`rng_state` found them, for the duration of a
+	recomputation, and leave them where they were for whatever runs next.
 
-	.. warning::
-		Efficient broadcasting the same way as :func:`send_models` and :func:`recv_models` is not supported yet. This function may take a lot of time if sending GPU models.
+	:param state: a state returned by :func:`rng_state`, or None to draw as usual
+	:type state: tuple or None
 	"""
-	dist.broadcast_object_list(models, src=src, group=group)
-	for model in models:
-		model.cuda()
+	if state is None:
+		yield
+		return
+
+	cpu, cuda = state
+	with torch.random.fork_rng(devices=list(cuda), enabled=True):
+		torch.set_rng_state(cpu)
+		for device, value in cuda.items():
+			torch.cuda.set_rng_state(value, device)
+		yield
 
 
-def prod(iterable):
-	if isinstance(iterable, (int, float)):
-		return iterable
-
-	acc = 1
-	for x in iterable:
-		acc *= x
-
-	return acc
+def ensure_tuple(x):
+	return (x,) if not isinstance(x, (tuple, list)) else x
 
 
-aten = torch.ops.aten
+def get_device(args):
+	"""
+	Returns the device of the first tensor found in a possibly nested structure
+	"""
+	if isinstance(args, torch.Tensor):
+		return args.device
+	elif hasattr(args, "__iter__"):
+		for arg in args:
+			device = get_device(arg)
+			if device:
+				return device
+
+	return None
 
 
-@register_flop_formula([aten.add, aten.mul, aten.sub, aten.div])
-def ewise_binary_flops(a_shape, b_shape, *args, out_shape=None, **kwargs) -> int:
-	return prod(a_shape)
+# Hide is used on the output of a forward, so that we do not have
+# to keep the output and still be able to do backward() on them.
+class HideFun(torch.autograd.Function):
+	@staticmethod
+	def forward(ctx, grad_store, *inputs):
+		ctx.grad_store = grad_store
+		return torch.zeros(1, device=get_device(inputs))
+
+	@staticmethod
+	def backward(ctx, _):
+		grad = ctx.grad_store[0]  # incoming gradient
+		ctx.grad_store.clear()  # clear the list without deleting it in case there are multiple backwards
+		return (None, *grad)  # None for grad_store
 
 
-@register_flop_formula([aten.abs])
-def ewise_unary_flops(a_shape, *args, out_shape=None, **kwargs) -> int:
-	return prod(a_shape)
+class Hide:
+	def __init__(self, t):
+		self.storage = []
+		self.v = HideFun.apply(self.storage, *ensure_tuple(t))
+
+	def backward(self, gradient=None, *args, **kwargs):
+		self.storage.append(ensure_tuple(gradient))
+		self.v.backward(*args, **kwargs)
+		# storage was cleared by HideFun.backward
+
+	@property
+	def grad_fn(self):
+		return self.v.grad_fn
 
 
-@register_flop_formula(aten.gelu)
-def gelu_flops(x_shape, *args, **kwargs) -> int:
-	# GELU with approximate='none' (default) uses: 0.5 * x * (1 + erf(x / sqrt(2)))
-	# Breaking down operations per element:
-	# - x / sqrt(2): div (1 FLOP)
-	# - erf(...): error function (~30 FLOPs for approximation)
-	# - 1 + erf(...): add (1 FLOP)
-	# - x * (...): mul (1 FLOP)
-	# - 0.5 * (...): mul (1 FLOP)
-	# Total: ~34 FLOPs per element
-	return 34 * prod(x_shape)
+# PreHide and SingleUse are used to be able to forget the input to a function
+# And still be able to recover the gradient. We provide grad_store where the
+# gradient will be captured during backward and stored so that we can recover it
+# If any reference is kept to the actual input, it is not by us.
+# real_tensor_store is a list so that autograd does not see it as Tensor
+class PreHideFun(torch.autograd.Function):
+	@staticmethod
+	def forward(ctx, real_tensor_store, grad_store, arg):
+		ctx.grad_store = grad_store
+		ctx.original_device = get_device(arg)
+		return real_tensor_store[0]
+
+	@staticmethod
+	def backward(ctx, grad):
+		ctx.grad_store.append(grad)
+		return None, None, torch.zeros(1, device=ctx.original_device)
 
 
-@register_flop_formula([aten.gelu_backward])
-def gelu_backward_flops(x_shape, *args, **kwargs) -> int:
-	return gelu_flops(x_shape)  # it's not significantly different from the forward pass
+class SingleUse:
+	def __init__(self, object):
+		self.content = object
+
+	def get(self):
+		result = self.content
+		del self.content
+		return result
 
 
-@register_flop_formula([aten._fft_c2c])
-def fft_flops_c2c(x_shape, dim, *args, **kwargs) -> int:
-	# Complex-to-complex FFT: 5 * N * log2(N) FLOPs per dimension
-	# where N is the size of the dimension being transformed
-	total_flops = 0
-	dims = dim if isinstance(dim, (list, tuple)) else [dim]
+class PreHide:
+	def __init__(self, t):
+		self.storage = []
+		self.requires_grad = t.requires_grad
+		self.source = torch.zeros(1, requires_grad=self.requires_grad, device=get_device(t))
+		self.v = SingleUse(PreHideFun.apply([t], self.storage, self.source))
 
-	for d in dims:
-		n = x_shape[d]
-		if n > 1:
-			total_flops += 5 * n * math.log2(n)
+	def get(self):
+		return self.v.get()
 
-	# Multiply by the number of elements in all other dimensions
-	other_dims_size = prod(x_shape) // prod(x_shape[d] for d in dims)
-	return int(total_flops * other_dims_size)
+	@property
+	def grad(self):
+		if self.storage:
+			return self.storage[0]
+		return None
 
 
-@register_flop_formula([aten._fft_r2c])
-def fft_flops_r2c(x_shape, dim, *args, **kwargs) -> int:
-	return fft_flops_c2c(x_shape, dim) // 2
+"""
+input = PreHide(input)
+result = func(input.get())
+hidden_result = Hide(result)
+"""

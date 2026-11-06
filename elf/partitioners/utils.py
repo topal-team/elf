@@ -2,148 +2,18 @@
 Utility functions for partitioning
 """
 
-import sys
+import re
 import shutil
 import subprocess
+
+from collections import deque
 
 import torch
 import torch.fx as fx
 
 from typing import TextIO, List
 
-__all__ = ["remove_inplace_leaves", "sequential_signatures", "Signature"]
-
-
-def remove_dupes(seq):
-	"""
-	Remove duplicates from a list while preserving order
-	"""
-	seen = set()
-	seen_add = seen.add
-	return [x for x in seq if not (x in seen or seen_add(x))]
-
-
-class Signature:
-	def __init__(self, inputs, outputs, sources, targets):
-		"""
-		A signature is a description of the forward function of a block in a partition, in terms of its inputs and outputs.
-		It also contains information about the source block (where does it come from) for each input, and the target blocks (who needs it) for each output.
-
-		:param inputs: input variables
-		:type inputs: List[str]
-		:param outputs: output variables
-		:type outputs: List[str]
-		:param sources: source block id for each input variable
-		:type sources: List[int]
-		:param targets: list of target block ids for each output variable
-		:type targets: List[List[int]]
-		"""
-		self.inputs = inputs
-		self.ninputs = len(inputs)
-		self.outputs = outputs
-		self.noutputs = len(outputs)
-
-		self.sources = sources
-		self.targets = targets
-
-		assert len(sources) == self.ninputs
-		assert len(targets) == self.noutputs
-
-	def get_all_sources(self):
-		"""
-		Set of all blocks that feed into this one
-		"""
-		return remove_dupes(self.sources)
-
-	def get_all_targets(self):
-		"""
-		Set of all blocks that need this one's output
-		"""
-		return remove_dupes(t for tgt in self.targets for t in tgt)
-
-	def __str__(self):
-		s = "Signature("
-		s += ", ".join([f"{i} ({t})" for i, t in zip(self.inputs, self.sources)])
-		s += ") -> ("
-		s += ", ".join([f"{o} ({t})" for o, t in zip(self.outputs, self.targets)])
-		s += ")"
-		return s
-
-	def __repr__(self):
-		return str(self)
-
-
-def signatures_from_sources_targets(sources, targets):
-	"""
-	Create signatures from sources and targets
-	"""
-	assert len(sources) == len(targets), "Sources and targets must have the same length"
-
-	signatures = []
-	for i in range(len(sources)):
-		inputs = sorted(list(sources[i].keys()))
-		outputs = sorted(list(targets[i].keys()))
-		signatures.append(
-			Signature(inputs, outputs, [sources[i][j] for j in inputs], [targets[i][j] for j in outputs])
-		)
-
-	return signatures
-
-
-def get_sources_targets_sequential(placement):
-	"""
-	Generates sources and targets for a fully sequential model (no skip connections), with one input and one output per stage.
-	This is intended to be used with the ``partitioner=False`` option.
-
-	.. note::
-		here's an example of what the returned sources and targets look like:
-
-		.. code-block:: python
-
-			>>> sources = {
-				0: { # stage 0's sources
-					"input": None # variable 'input' comes from None
-				},
-				1: {
-					"x": 0 # variable 'x' comes from stage 0
-				}, ...
-			}
-			>>> targets = {
-				0: { # stage 0's targets
-					"output": [1, 2] # variable 'output' goes to stages 1 and 2
-				},
-				1: {
-					"output": [2] # variable 'output' goes to stage 2
-				}, ...
-			}
-
-	:param placement: placement of the model blocks on gpus
-	:type placement: List[int]
-	:return: Sources and targets for each stage
-	:rtype: Tuple[Dict[int, Dict[str, int]], Dict[int, Dict[str, List[int]]]]
-	"""
-	sources = {}
-	targets = {}
-	for i in range(len(placement)):
-		# Everyone needs full signatures to generate schedule
-		sources[i] = {"input": i - 1 if i != 0 else None}
-		targets[i] = {"output": [i + 1 if i != len(placement) - 1 else None]}
-	return sources, targets
-
-
-def sequential_signatures(placement):
-	"""
-	Build signatures for a fully sequential pipeline (no skip connections),
-	with one input and one output per stage. This is intended to be used
-	with the ``partitioner=False`` option.
-
-	:param placement: placement of the model blocks on gpus
-	:type placement: List[int]
-	:return: signatures for each stage
-	:rtype: List[Signature]
-	"""
-	sources, targets = get_sources_targets_sequential(placement)
-	return signatures_from_sources_targets(sources, targets)
+__all__ = ["remove_inplace_leaves"]
 
 
 def remove_inplace_leaves(module):
@@ -200,6 +70,9 @@ def remove_inplace_leaves(module):
 	module.recompile()
 
 
+alias_regexp = re.compile(r"-> (?:\()?Tensor\([a-z]")
+
+
 def _returns_alias(target):
 	"""
 	Check if an operation returns an alias (view) of its input tensor.
@@ -220,12 +93,10 @@ def _returns_alias(target):
 			# -> Tensor(a!): returns a mutated alias
 			# Check if return type contains any alias annotation (a, b, c, etc.)
 			# Pattern: "-> Tensor(X" or "-> (Tensor(X" where X is a letter
-			import re
-
 			# Match patterns like "-> Tensor(a)" or "-> (Tensor(a"
 			# The alias annotation is a single letter in parentheses after Tensor
-			pattern = r"-> (?:\()?Tensor\([a-z]"
-			if re.search(pattern, schema_str):
+			match = alias_regexp.search(schema_str)
+			if match:
 				return True
 		except (AttributeError, TypeError):
 			pass
@@ -315,24 +186,21 @@ def prune_graph(graph):
 	:return: The pruned graph
 	:rtype: torch.fx.GraphModule
 	"""
-	original_recursion_limit = sys.getrecursionlimit()
-	sys.setrecursionlimit(
-		max(len(graph.graph.nodes) * 2, original_recursion_limit)
-	)  # avoid random stack overflows
 	reachable = set()
-
-	def mark_reachable(node):
-		"""Recursively mark a node and all its inputs as reachable"""
-		if node in reachable:
-			return
-		reachable.add(node)
-		for input_node in node.all_input_nodes:
-			mark_reachable(input_node)
+	queue = deque()
 
 	# Start from output nodes and mark all nodes that contribute to outputs
 	for node in graph.graph.nodes:
 		if node.op == "output":
-			mark_reachable(node)
+			queue.append(node)
+
+	while queue:
+		node = queue.popleft()
+		if node in reachable:  # already visited
+			continue
+		reachable.add(node)
+		for input_node in node.all_input_nodes:
+			queue.append(input_node)
 
 	# Remove unreachable nodes in reverse order to ensure users are erased before their dependencies
 	for node in reversed(list(graph.graph.nodes)):
@@ -341,7 +209,6 @@ def prune_graph(graph):
 
 	graph.recompile()
 
-	sys.setrecursionlimit(original_recursion_limit)
 	return graph
 
 

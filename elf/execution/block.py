@@ -5,14 +5,14 @@ Individual stage computation and communication management
 import torch
 import torch.distributed as dist
 
-from ..scheduling import OpOptions
-from ..utils import Timer, TensorMetadata, _is_mpi
-from ..zb_utils import LayerDW, partial_dx_recomputation
-from .remat import RematManager
+from elf.scheduling import OpOptions
+from elf.utils import PreHide, Timer, TensorMetadata, _is_mpi, Hide
+from elf.zb_utils import LayerDW, partial_dx_recomputation, recording
+from elf.execution.remat import Stage, unit_placement
 
 import logging
 
-logger = logging.getLogger("block")
+logger = logging.getLogger(__name__)
 
 
 class Variable:
@@ -52,7 +52,9 @@ class Variable:
 		if len(queue) <= mb_id:
 			raise Exception(f"Variable {self.name} - Data queue shorter than mb_id {mb_id}")
 		if queue[mb_id] is None:
-			raise Exception(f"Variable {self.name} - Trying to pop data at mb_id {mb_id}, but it's empty")
+			raise Exception(
+				f"Variable {self.name} - Trying to pop data at mb_id {mb_id}, but it's empty ({self._state()})"
+			)
 
 		data = queue[mb_id]
 		if delete:
@@ -137,37 +139,33 @@ class PipelineBlock:
 	Each block is one layer or group of contiguous layers placed on one device
 	"""
 
-	def __init__(
-		self, model, id_, placement, signature, pp_group, dp_group, recv_pgs=None, send_pgs=None
-	):
+	def __init__(self, model, id_, signature, topology):
 		"""
 		:param model: layer / group of layers that will perform the computation
 		:type model: nn.Module
 		:param id_: number of this block in the pipeline
 		:type id_: int
-		:param placement: mapping of each id on a device
-		:type placement: List[int]
 		:param signature: signature of the block
 		:type signature: Signature
-		:param recv_pgs: Process groups for receiving data, keyed by source rank
-		:type recv_pgs: Dict[int, ProcessGroup] or None
-		:param send_pgs: Process groups for sending data, keyed by destination rank
-		:type send_pgs: Dict[int, ProcessGroup] or None
+		:param topology: process topology of the pipeline this block belongs to. The block reads its
+			placement and all the process groups it communicates on from it.
+		:type topology: PipelineTopology
 		"""
 		super(PipelineBlock, self).__init__()
 		# Block infos
-		self.rank = placement[id_]  # global rank
-		self.placement = placement  # need it to resolve src/dst later on
+		self.topology = topology
+		self.placement = topology.placement  # need it to resolve src/dst later on
+		self.rank = self.placement[id_]  # global rank
 		self.model = model.cuda() if torch.cuda.is_available() else model
 
 		self.id = id_  # rank in the model
 		self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-		self.is_last = self.id == len(placement) - 1
+		self.is_last = self.id == len(self.placement) - 1
 		self.is_first = self.id == 0
 
 		# Process groups for collective communications
-		self.pp_group = pp_group
-		self.dp_group = dp_group
+		self.pp_group = topology.pp_group
+		self.dp_group = topology.dp_group(id_)
 
 		# Helpers to manage data queues and src/dst ranks
 		self.signature = signature
@@ -182,19 +180,17 @@ class PipelineBlock:
 			for name, dsts in zip(signature.outputs, signature.targets)
 		]
 
-		# Process groups for point-to-point communications
-		# By default, torch distributed uses 1 cuda stream per pair of ranks
-		# Bidirectional communications are therefore sequentialized on that stream, even if they are independent
-		# We use separate groups for the forward pass to avoid this, and keep the default (pipeline) group for the backward pass
-		self.recv_pgs = recv_pgs
-		self.send_pgs = send_pgs
+		# Process groups for point-to-point communications, one per peer and direction
+		self.recv_pgs, self.send_pgs = topology.p2p_groups(id_)
 
 		self.compute_time = []  # used to measure idle time
 
 		# Take care of rematerialization
-		self.remat_manager = RematManager(self)
+		self.stages = []  # one per micro-batch
 
 		self.send_ops = []  # need to be stored for MPI backend, see _wait_for_send_ops
+
+		self.all_reduce_work = None  # all reduce is enqueued asynchronously to make sure it runs on a separate stream, but needs to be synced at the end of the iteration
 
 		# NCCL automatically synchronizes send stream with compute stream
 		# With MPI however, we need to manually make sure that computations are finished before sending. These events are used for that.
@@ -204,15 +200,21 @@ class PipelineBlock:
 		self.fwd_compute_events = []
 		self.bwd_compute_events = []
 
+		# Find and cache all LayerDWs for ZB control
+		self._layers_dw = set()
+		for module in self.model.modules():
+			if isinstance(module, LayerDW):
+				self._layers_dw.add(module)
+
 	def __str__(self) -> str:
 		return f"Rank {self.rank} - Layer {self.id}"
 
 	def forward(self, mb_id, **options):
 		"""
-		Basic forward pass operation
+		Forward pass through this stage
 
 		Possible options:
-		- REMAT_STRATEGY: function(name, module) -> bool - Indicator function deciding if a module's forward pass should be recomputed during backward
+		- REMAT_STRATEGY: function(name, module) -> RematMode | None - How each module's activations are handled, None leaving the module alone
 		"""
 		# Gather all variables needed for forward
 		inputs = []
@@ -223,21 +225,21 @@ class PipelineBlock:
 			if x.is_floating_point() or x.is_complex():  # int tensors can't require grads
 				x.requires_grad_(True)
 
-			inputs.append(x)
+			inputs.append(PreHide(x))
 
-		# Get strategies from options
-		remat_strategy = options.get(OpOptions.REMAT_STRATEGY, lambda *_: False)
+		# Place the rematerialization units. A forward whose activations something rebuilds later
+		# keeps what that replay starts from, so the block does not have to hold its own inputs.
+		replayable = options.get(OpOptions.REPLAYABLE, False)
+		strategy = unit_placement(options.get(OpOptions.REMAT_STRATEGY), replayable=replayable)
+		stage = Stage(self.model, strategy, replayable=replayable)
+		if len(self.stages) < mb_id + 1:
+			self.stages.extend([None] * (mb_id - len(self.stages) + 1))
+		self.stages[mb_id] = stage
 
-		# Register hooks and perform rematerialization
-		with self.remat_manager.apply_selective_remat(remat_strategy, mb_id):
-			y = self._compute_forward(inputs, f"forward({self.id}:{mb_id})")
+		y = self._compute_forward(stage, inputs, f"forward({self.id}:{mb_id})")
 
-			if torch.cuda.is_available() and _is_mpi():
-				self.fwd_compute_events.append(torch.cuda.current_stream().record_event())
-
-			for module in self.model.modules():
-				if isinstance(module, LayerDW):
-					module.move_last_computed("input", mb_id)
+		if torch.cuda.is_available() and _is_mpi():
+			self.fwd_compute_events.append(torch.cuda.current_stream().record_event())
 
 		if any(not dst.metadata for var in self.output_variables for dst in var):
 			self._register_out_metadata(y)
@@ -248,11 +250,14 @@ class PipelineBlock:
 				output_dst.set(output_dst.to_send, mb_id, value.detach())
 
 		# Always save inputs
+		# Which are PreHide objects, so it does not cost memory
 		for input_var, value in zip(self.input_variables, inputs):
 			input_var.set(input_var.saved, mb_id, value)
 
-		for output_var, value in zip(self.output_variables, y):
-			output_var[0].set(output_var[0].saved, mb_id, value)  # save only to first, we only need one
+		hidden = Hide(y)  # single node for tuple of outputs
+		# save it in the first output variables, even if it contains all outputs
+		var = self.output_variables[0][0]
+		var.set(var.saved, mb_id, hidden)  # save only to first, we only need one
 
 		# If this is the last block, return the output
 		if self.is_last:
@@ -262,90 +267,82 @@ class PipelineBlock:
 				output.append(output_var[0].get(output_var[0].to_send, mb_id))
 			return output
 
-	def _compute_forward(self, inputs, timer_name="forward"):
+	def _compute_forward(self, stage, inputs, timer_name="forward"):
 		"""
 		Return the outputs of the forward pass of the model as a tuple
 
+		:param stage: rematerialization units to run the model under
+		:type stage: elf.execution.remat.Stage
 		:param inputs: inputs to the model
 		:type inputs: Tuple[Tensor, Any]
 		:return: output of the forward pass
 		:rtype: Tuple[Tensor, Any]
 		"""
-		with Timer(name=f"{timer_name}") as timer:
-			y = self.model(*inputs)
+		with Timer(
+			name=f"{timer_name}"
+		) as timer:  # can we avoid event creation when ELF_TIMINGS is not set?
+			inputs = tuple(x.get() for x in inputs)  # inputs are PreHide objects
+			y = stage.run(*inputs)
 			y = (y,) if not isinstance(y, tuple) else y
 
 		self.compute_time.append(timer)
 		return y
 
-	def _compute_backward_inputs(self, inputs, outputs, grads, timer_name="backward_inputs"):
+	def _compute_backward_inputs(
+		self, inputs, outputs, grads, timer_name="backward_inputs", retain_graph=False
+	):
 		"""
 		Return the grads of the inputs of the model as a tuple
+
+		:param retain_graph: keep the graph alive, for a schedule that walks it again before W
+		:type retain_graph: bool
 		"""
-		assert len(outputs) == len(grads), (
-			"Outputs and grads must have the same length (got %d, %d)" % (len(outputs), len(grads))
-		)
+		# assert len(outputs) == len(grads), (
+		# 	"Outputs and grads must have the same length (got %d, %d)" % (len(outputs), len(grads))
+		# )
 
 		with Timer(name=f"{timer_name}") as timer:
-			for i, (output, grad) in enumerate(zip(outputs, grads)):
-				assert output.shape == grad.shape, (
-					f"Output and grad shapes do not match: {output.shape} != {grad.shape}"
-				)
-				retain_graph = i != len(outputs) - 1  # save until the last backward
-				torch.autograd.backward(output, grad, retain_graph=retain_graph)
+			outputs.backward(grads, retain_graph=retain_graph)
 
 		grads = []
 		for input in inputs:
 			if input.requires_grad:
 				grads.append(input.grad.data)
-			# This could be a source of bugs, but it's usually just the input of the first block that doesn't require grads
-			# else:
-			# 	logger.warning(f"{self} - No gradient computed for var {input}")
 
 		self.compute_time.append(timer)
 		return grads
 
 	def recompute_forward(self, mb_id, **options):
 		"""
-		Recompute the forward pass of the model
-
-		Possible options:
-		- SAVE: bool - Whether to save the activations of the forward pass. If set to False, this allows us to compute under no_grad and therefore save some memory.
+		Rebuild the activations this stage is not holding, by replaying its forward.
+		This can be scheduled both between F and B, or between B and W. In any case, the graph is kept, and values are simply refilled.
 		"""
-		# Inputs should have been saved by a previous forward pass
-		inputs = []
-		for input_var in self.input_variables:
-			value = input_var.get(input_var.saved, mb_id)
-			inputs.append(value)
+		stage = self.stages[mb_id]
+		filling = [module for module in self._layers_dw if module.needs_inputs(mb_id)]
+		missing = [unit for unit in stage.units if unit.needs_filling()]
 
-		save = options.get(OpOptions.SAVE, False)
+		with Timer(name=f"recompute_forward({self.id}:{mb_id})") as timer:
+			if (
+				not filling and all(unit.can_refill() for unit in missing)
+			):  # every unit can already recompute on its own ; no need to do a full stage replay, as it might start additional computations
+				for unit in missing:
+					if unit.needs_filling():  # may have been filled by a previous one cascading
+						unit.recompute()
+			else:
+				for module in filling:
+					module.begin_filling(mb_id)
+				try:
+					stage.replay()
+				finally:
+					for module in filling:
+						module.end_filling()
 
-		# Execute forward pass with or without gradient tracking
-		if not save:
-			with torch.no_grad():
-				self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
-		else:
-			y = self._compute_forward(inputs, f"recompute_forward({self.id}:{mb_id})")
-
-			for input_var, value in zip(self.input_variables, inputs):
-				input_var.set(input_var.saved, mb_id, value)
-
-			for output_var, value in zip(self.output_variables, y):
-				output_var[0].set(output_var[0].saved, mb_id, value)
-
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
-				module.move_last_computed("input", mb_id)
+		self.compute_time.append(timer)
 
 	def recompute_backward_inputs(self, mb_id, **options):
 		"""
 		Recompute the backward pass for the inputs of the model
 		"""
-		inputs = []
-		for input_var in self.input_variables:
-			value = input_var.get(input_var.saved, mb_id)
-			inputs.append(value)
-
 		outputs = []
 		for output_var in self.output_variables:
 			value = output_var[0].get(output_var[0].saved, mb_id)
@@ -365,13 +362,11 @@ class PipelineBlock:
 				# Partial DX recomputation recomputes the minimal backward pass needed to compute W, instead of the full backward pass
 				# We can't use torch.grad with inputs=inputs, because if the inputs don't require grads (e.g., int tensors), then torch.grad will fail
 				partial_dx_recomputation(output, grad, retain_graph=retain_graph)
-				# torch.autograd.backward(output, grad, inputs=inputs, retain_graph=retain_graph)
 
 		self.compute_time.append(timer)
 
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
-				module.move_last_computed("grad_output", mb_id)
+		for module in self._layers_dw:
+			module.commit(mb_id)
 
 	def backward_params(self, mb_id, **options):
 		"""
@@ -382,22 +377,26 @@ class PipelineBlock:
 		:param **options: options to modify the backward behaviour
 		"""
 		with Timer(name=f"backward_params({self.id}:{mb_id})") as timer:
-			for module in self.model.modules():
-				if isinstance(module, LayerDW) and not module.is_empty(
-					"grad_output"
-				):  # skip modules that are not involved in the computation
+			for module in self._layers_dw:
+				if not module.is_empty(mb_id):  # skip modules that are not involved in the computation
 					module.backward(mb_id)
 
 		self.compute_time.append(timer)
 
-	def send_forward(self, mb_id, **options):
+		# nothing else will be asked of this micro-batch
+		if mb_id < len(self.stages):
+			self.stages[mb_id] = None
+
+	def send_forward(self, mb_id, dst, **options):
 		"""
 		Send one activation to the next layer in the model
 
+		:param mb_id: micro-batch index to send
+		:type mb_id: int
+		:param dst: block this activation is sent to, or None when it leaves the pipeline
+		:type dst: int or None
 		:param **options: options to modify the send behaviour
 		"""
-		dst = options.get("dst")
-
 		if torch.cuda.is_available() and _is_mpi():
 			# This is a sync point that is needed for MPI but not for NCCL
 			self.fwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
@@ -421,14 +420,16 @@ class PipelineBlock:
 				if _is_mpi():
 					self.send_ops.append(work)
 
-	def send_backward(self, mb_id, **options):
+	def send_backward(self, mb_id, dst, **options):
 		"""
 		Send one gradient tensor to the previous layer in the model
 
+		:param mb_id: micro-batch index to send
+		:type mb_id: int
+		:param dst: block this gradient is sent to, or None when it leaves the pipeline
+		:type dst: int or None
 		:param **options: options to modify the send behaviour
 		"""
-		dst = options.get("dst")
-
 		if torch.cuda.is_available() and _is_mpi():
 			self.bwd_compute_events[mb_id].synchronize()  # wait for computation to be finished
 
@@ -447,16 +448,18 @@ class PipelineBlock:
 			if _is_mpi():
 				self.send_ops.append(work)
 
-	def recv_forward(self, mb_id, mb_size, **options):
+	def recv_forward(self, mb_id, mb_size, src, **options):
 		"""
 		Receive and store one activation to forward
 
+		:param mb_id: micro-batch index to receive
+		:type mb_id: int
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
-		:param **options: options to modify the send behaviour
+		:param src: block this activation comes from, or None when it enters the pipeline
+		:type src: int or None
+		:param **options: options to modify the receive behaviour
 		"""
-		src = options.get("src")
-
 		if src is None or self.placement[src] == self.rank:
 			return
 
@@ -477,16 +480,18 @@ class PipelineBlock:
 
 			var.set(var.to_process, mb_id, (work, buffer.requires_grad_(True)))
 
-	def recv_backward(self, mb_id, mb_size, **options):
+	def recv_backward(self, mb_id, mb_size, src, **options):
 		"""
 		Receive and store one gradient to backward
 
+		:param mb_id: micro-batch index to receive
+		:type mb_id: int
 		:param mb_size: size of the micro batch to receive
 		:type mb_size: int
-		:param **options: options to modify the send behaviour
+		:param src: block this gradient comes from, or None when it leaves the pipeline
+		:type src: int or None
+		:param **options: options to modify the receive behaviour
 		"""
-		src = options.get("src")
-
 		if src is None or self.placement[src] == self.rank:
 			return
 
@@ -511,9 +516,16 @@ class PipelineBlock:
 		"""
 		if self.dp_group is None:
 			return
-		for _, p in sorted(self.model.named_parameters()):
-			if p.grad is not None:
-				dist.all_reduce(p.grad.data, group=self.dp_group, op=dist.ReduceOp.AVG, async_op=True)
+		grads = [p.grad for _, p in sorted(self.model.named_parameters()) if p.grad is not None]
+		self.all_reduce_work = dist.all_reduce_coalesced(
+			grads, op=dist.ReduceOp.AVG, group=self.dp_group, async_op=True
+		)
+
+	def sync_all_reduce(self):
+		if self.all_reduce_work is None:
+			return
+		self.all_reduce_work.wait()
+		self.all_reduce_work = None
 
 	def scale_grads(self, batch_size):
 		"""
@@ -522,9 +534,10 @@ class PipelineBlock:
 		:param batch_size: size of the full batch
 		:type batch_size: int
 		"""
-		for p in self.model.parameters():
-			if p.requires_grad and p.grad is not None:
-				p.grad.data /= batch_size
+		grads = [p.grad for p in self.model.parameters() if p.requires_grad and p.grad is not None]
+		if not grads:
+			return
+		torch._foreach_div_(grads, batch_size)  # torch.foreach.div_ only exists in torch >= 2.15
 
 	def _receive_metadata(self, src):
 		"""
@@ -533,19 +546,18 @@ class PipelineBlock:
 		:param src: rank of the previous block
 		:type src: int
 		"""
+		if src is None or self.placement[src] == self.rank:
+			return
 
 		for var in self.input_variables:
-			if src is None or self.placement[src] == self.rank:
+			if var.peer != src:
 				continue
-			else:
-				if var.peer != src:
-					continue
 
-				rank = self.placement[src]  # we resolve the actual rank now
-				logger.debug(f"{self} - Receiving metadata from {rank}")
-				metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
-				dist.recv(metadata, src=rank, group=self.recv_pgs["fwd"][src])
-				var.metadata = TensorMetadata.from_tensor(metadata)
+			rank = self.placement[src]  # we resolve the actual rank now
+			logger.debug(f"{self} - Receiving metadata from {rank}")
+			metadata = torch.empty(TensorMetadata.MAX_SIZE, device=self.device)
+			dist.recv(metadata, src=rank, group=self.recv_pgs["fwd"][src])
+			var.metadata = TensorMetadata.from_tensor(metadata)
 
 		logger.debug(f"{self} - Registered metadata {[var for var in self.input_variables]} from {src}")
 
@@ -595,32 +607,6 @@ class PipelineBlock:
 		self.fwd_compute_events.clear()
 		self.bwd_compute_events.clear()
 
-	def _offload_dw(self, to="cpu"):
-		"""
-		Offload the gradients and activations saved between B and W. The computation will be done on the new device.
-
-		:param to: device to offload to
-		:type to: str or torch.device
-		"""
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
-				module.offload_last(to)
-
-	def _destroy_process_groups(self):
-		if self.dp_group:
-			logger.debug(
-				f"Destroying DP group with members {dist.get_process_group_ranks(self.dp_group)}"
-			)
-			dist.destroy_process_group(self.dp_group)
-		for recv_pg in self.recv_pgs["fwd"].values():
-			dist.destroy_process_group(recv_pg)
-		for send_pg in self.send_pgs["fwd"].values():
-			dist.destroy_process_group(send_pg)
-		for recv_pg in self.recv_pgs["bwd"].values():
-			dist.destroy_process_group(recv_pg)
-		for send_pg in self.send_pgs["bwd"].values():
-			dist.destroy_process_group(send_pg)
-
 	def backward_inputs(self, mb_id, **options):
 		"""
 		Perform the backward pass for the inputs of the model
@@ -629,18 +615,27 @@ class PipelineBlock:
 		- RECOMPUTE_ACTIVATIONS: bool - Whether to recompute the activations of the model before W
 		- RECOMPUTE_GRADIENTS: bool - Whether to recompute the gradients of the activations before W
 		"""
+		# Get strategies from options
+		recompute_activations = options.get(OpOptions.RECOMPUTE_ACTIVATIONS, False)
+		recompute_gradients = options.get(OpOptions.RECOMPUTE_GRADIENTS, False)
+		assert recompute_activations or not recompute_gradients, (
+			"recomputing the gradients before W means walking the graph again, which needs the "
+			"activations they come from: RECOMPUTE_GRADIENTS implies RECOMPUTE_ACTIVATIONS"
+		)
+
 		# We need inputs to get their gradients later on
-		# TODO: we don't actually need their data! find a way to get gradients without them (maybe GradientEdge?)
 		inputs = []
 		for input_var in self.input_variables:
 			value = input_var.get(input_var.saved, mb_id)
 			inputs.append(value)
 
 		# We need outputs to start the backward
-		outputs = []
-		for output_var in self.output_variables:
-			value = output_var[0].get(output_var[0].saved, mb_id)
-			outputs.append(value)
+		# it should be a Hide object stored in the first variable+target
+		var = self.output_variables[0][0]
+		# RB starts from the same node, so the graph entry point has to survive this backward --
+		# but only when there is going to be one. Nothing else ever reads it, and holding it keeps
+		# the nodes of a graph whose activations this backward has already consumed.
+		outputs = var.get(var.saved, mb_id, delete=not recompute_gradients)
 
 		# Gather the incoming gradients
 		# If an output has multiple destinations, we sum up the gradients
@@ -655,39 +650,35 @@ class PipelineBlock:
 				grad_accumulator += grad
 			output_grads.append(grad_accumulator)
 
-		# Get strategies from options
-		recompute_activations = options.get(OpOptions.RECOMPUTE_ACTIVATIONS, False)
-		recompute_gradients = options.get(OpOptions.RECOMPUTE_GRADIENTS, False)
-
-		input_grads = self._compute_backward_inputs(
-			inputs, outputs, output_grads, f"backward_inputs({self.id}:{mb_id})"
-		)
+		# keep only what nothing else is going to rebuild: an RB supersedes every gradient this
+		# backward could record, and an RF gives the inputs back. Leaving the inputs out is what
+		# keeps this backward from holding the whole activation set until it ends. The graph is
+		# kept for that RB, and for nothing else.
+		with recording(gradients=not recompute_gradients, inputs=not recompute_activations):
+			input_grads = self._compute_backward_inputs(
+				inputs,
+				outputs,
+				output_grads,
+				f"backward_inputs({self.id}:{mb_id})",
+				retain_graph=recompute_gradients,
+			)
 
 		if torch.cuda.is_available() and _is_mpi():
 			self.bwd_compute_events.append(torch.cuda.current_stream().record_event())
 
-		for module in self.model.modules():
-			if isinstance(module, LayerDW):
-				module.move_last_computed("grad_output", mb_id)
-				# sometimes a module does not use some of its submodules -> input/grad_output are not saved
-				if recompute_gradients and not module.is_empty("grad_output"):
-					module.delete("grad_output", mb_id)
-
-				# If we used checkpointing, we need to move the input as well
-				if getattr(module, "last_input", None) is not None:
-					module.move_last_computed("input", mb_id)
-
-				if recompute_activations and not module.is_empty("input"):
-					module.delete("input", mb_id)
+		for module in self._layers_dw:
+			module.commit(mb_id)
 
 		# Register the gradients to send
 		for input_var, value in zip(self.input_variables, input_grads):
 			input_var.set(input_var.to_send, mb_id, value)
 
-		# We may need input to recompute F before W; we save them here and let RF delete them
+		# The activations are rebuilt by replaying the forward, so they can go now. The stage keeps
+		# what that replay needs; without a replay ahead of it, it keeps nothing.
 		if recompute_activations:
-			for input_var, value in zip(self.input_variables, inputs):
-				input_var.set(input_var.saved, mb_id, value)
+			self.stages[mb_id].drop()
+		else:
+			self.stages[mb_id].forget()
 
 		if recompute_gradients:
 			for output_var, value in zip(self.output_variables, output_grads):

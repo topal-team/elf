@@ -2,11 +2,26 @@
 Manipulate dependency graphs corresponding to schedules
 """
 
+from dataclasses import dataclass, field
 from enum import Enum, StrEnum, auto
 
 import logging
+from typing import Any
 
-logger = logging.getLogger("scheduling")
+logger = logging.getLogger(__name__)
+
+__all__ = [
+	"Operation",
+	"OperationType",
+	"OpOptions",
+	"RematMode",
+	"comm_types",
+	"compute_types",
+	"matching",
+	"get_peer_rank",
+	"schedule_to_str",
+	"check_schedule_validity",
+]
 
 
 class OperationType(Enum):
@@ -25,10 +40,10 @@ class OperationType(Enum):
 	LOSS_FORWARD = 7
 	LOSS_BACKWARD = 8
 	ALL_REDUCE_PARAM_GRADS = 9
-	RECOMPUTE_FORWARD = 10
+	RECOMPUTE_FORWARD = 10  # between F and B, for a forward that kept nothing
 	RECOMPUTE_BACKWARD_INPUTS = 11
-
 	PREFETCH_ACTIVATIONS = 12
+	RECOMPUTE_FORWARD_FOR_PARAMS = 13  # between B and W, for activations dropped after B
 
 	def __repr__(self) -> str:
 		return self.name.lower()
@@ -51,6 +66,7 @@ compute_types = {
 	OperationType.BACKWARD_INPUTS,
 	OperationType.BACKWARD_PARAMS,
 	OperationType.RECOMPUTE_FORWARD,
+	OperationType.RECOMPUTE_FORWARD_FOR_PARAMS,
 	OperationType.RECOMPUTE_BACKWARD_INPUTS,
 }
 
@@ -62,69 +78,78 @@ class OpOptions(StrEnum):  # will be used as a key in a dict, needs to be a stri
 	Attributes
 	----------
 	REMAT_STRATEGY : str
-		Remat strategy is a function that indicates if we recompute a module or not.
-		Signature: ``(name: str, module: nn.Module) -> bool``
-		It can be used for both forward and backward operations.
-		In the case of backward remat, the same function should be given to the BackwardInputs and RecomputeForward operations.
+		Remat strategy is a function that tells, for each module, how its activations are handled.
+		Signature: ``(name: str, module: nn.Module) -> RematMode | None``, where None leaves the
+		module alone.
 	RECOMPUTE_ACTIVATIONS : str
 		Recompute Backward-Forward (activations, between B and W).
 	RECOMPUTE_GRADIENTS : str
 		Recompute Backward-Backward (gradients, between B and W).
 	ACTIVATION_OFFLOAD : str
 		Offload activations to CPU.
-	SAVE : str
-		For recompute forward, it's a boolean to save the computation graph for a second backward or not.
-	OFFLOAD_DW : str
-		Offload weight gradients computation.
+	REPLAYABLE : str
+		Set on a forward whose activations a later operation rebuilds, so that it keeps what the
+		replay starts from. Filled in by :func:`mark_replayable_forwards`, not by the schedulers.
 	"""
 
 	REMAT_STRATEGY = auto()
 	RECOMPUTE_ACTIVATIONS = auto()
 	RECOMPUTE_GRADIENTS = auto()
 	ACTIVATION_OFFLOAD = auto()
-	SAVE = auto()
-	OFFLOAD_DW = auto()
+	REPLAYABLE = auto()
+
+	def __repr__(self) -> str:
+		return str(self)
 
 
+class RematMode(Enum):
+	"""
+	What a ``REMAT_STRATEGY`` asks of a module.
+
+	Attributes
+	----------
+	KEEP
+		Keep the activations until a schedule drops them. Only useful in a stage whose activations
+		are replayed between ``B`` and ``W``, where every module is covered by default.
+	CHECKPOINT
+		Recompute the activations during the backward, from inputs the module always keeps, as
+		:func:`torch.utils.checkpoint.checkpoint` does. What it returns is still rebuilt rather
+		than kept, unless another module keeps it as its own input.
+	DISCARD
+		Recompute the activations, and keep the inputs only if no recomputed module can rebuild
+		them. Reading the output of another recomputed module re-runs that module during the
+		backward, so this only pays when that module is cheap, a pointwise one say.
+	"""
+
+	KEEP = auto()
+	CHECKPOINT = auto()
+	DISCARD = auto()
+
+	def __repr__(self) -> str:
+		return f"RematMode.{self.name}"
+
+
+@dataclass(frozen=True)
 class Operation:
 	"""
 	Computation or communication unit. Operations are the elements contained in the schedule, and give all the informations needed for a block to execute it, except the data itself.
 	"""
 
-	def __init__(self, block_id, mb_id, op, rank, **options):
-		"""
-		:param block_id: number of the block that will execute this OP in the pipeline
-		:type block_id: int
-		:param mb_id: number of the micro batch that this op will be executed on
-		:type mb_id: int
-		:param op: type of operation
-		:type op: OperationType
-		:param rank: global rank of the block
-		:type rank: int
-		:param **options: options to modify the behaviour of the execution
-		"""
-		self.block_id = block_id
-		self.op = op  # type of the operation (see OperationType enum)
-		self.mb_id = mb_id  # micro batch id in the batch
-		self.rank = rank
-		self.options = options
+	block_id: int
+	mb_id: int | None  # some ops do not operate on a specific mb
+	op: OperationType
+	rank: int
+	peer: int | None = None  # src / dst of communications
+	options: dict[OpOptions, Any] = field(
+		default_factory=dict, compare=False
+	)  # options are not taken into account when comparing or hashing. That's fine because 2 ops with the same
+	# (op, mb_id, block_id, peer) never coexist in the same schedule, see check_schedule_validity
 
 	def __str__(self) -> str:
 		return f"[Block {self.block_id}, mb {self.mb_id}]:{repr(self.op)}({self.options})"
 
 	def __repr__(self) -> str:
 		return str(self)
-
-	def __eq__(self, __value: object) -> bool:
-		return (
-			__value.op == self.op
-			and __value.mb_id == self.mb_id
-			and __value.rank == self.rank
-			and __value.options == self.options
-		)
-
-	def __hash__(self) -> int:
-		return hash((self.block_id, self.mb_id, self.rank, self.op))
 
 
 matching_ops = {
@@ -139,25 +164,18 @@ def matching(op_type):
 	"""
 	The matching operation is the opposite communication, in the same direction.
 	For instance, a recv(forward) is matched with a send(forward), and a send(backward) with a recv(backward).
+	Returns None for any operation that is not a communication.
 	"""
-	return matching_ops[op_type]
-
-
-def get_peer(op):
-	"""
-	Get the peer block id of a communication
-	"""
-	return op.options.get("dst", op.options.get("src", None))
+	return matching_ops.get(op_type, None)
 
 
 def get_peer_rank(op, placement):
 	"""
 	Get the peer rank of a communication
 	"""
-	peer = get_peer(op)
-	if peer is None:
+	if op.peer is None:
 		return None
-	return placement[peer]
+	return placement[op.peer]
 
 
 def schedule_to_str(schedule, print_comms=False):
@@ -180,6 +198,7 @@ def schedule_to_str(schedule, print_comms=False):
 		OperationType.BACKWARD_PARAMS: "w",
 		OperationType.SEND_BACKWARD: "sb",
 		OperationType.RECOMPUTE_FORWARD: "R",
+		OperationType.RECOMPUTE_FORWARD_FOR_PARAMS: "Rw",
 		OperationType.RECOMPUTE_BACKWARD_INPUTS: "R*",
 		OperationType.ALL_REDUCE_PARAM_GRADS: "(AR)",
 		OperationType.PREFETCH_ACTIVATIONS: "P",
@@ -188,25 +207,11 @@ def schedule_to_str(schedule, print_comms=False):
 	def shorten(op):
 		letter = reprs[op.op]
 		if op.op == OperationType.FORWARD:
-			is_recomputed = not op.options.get(OpOptions.SAVE, True)
-			is_recomputed |= bool(op.options.get(OpOptions.REMAT_STRATEGY, False))
-			letter = "F" if is_recomputed else "f"
+			letter = "F" if op.options.get(OpOptions.REMAT_STRATEGY) else "f"
 		elif op.op == OperationType.BACKWARD_INPUTS:
-			match op.options.get(OpOptions.SAVE, "full"):
-				case "full":
-					letter = "b"
-				case "gradients":
-					letter = "b*"
-				case "none":
-					letter = "B"
+			letter = "B" if op.options.get(OpOptions.RECOMPUTE_ACTIVATIONS, False) else "b"
 		return letter
 
-	comm_types = {
-		OperationType.RECV_FORWARD,
-		OperationType.RECV_BACKWARD,
-		OperationType.SEND_FORWARD,
-		OperationType.SEND_BACKWARD,
-	}
 	ranks = sorted(set(op.rank for op in schedule))
 	lines = []
 	for rank in ranks:
@@ -220,13 +225,44 @@ def schedule_to_str(schedule, print_comms=False):
 				lambda s: s != "",
 				[
 					f"{shorten(op)}{op.block_id}-{op.mb_id if op.mb_id is not None else ''}"
-					+ (f"({get_peer(op)})" if op.op in comm_types else "")
+					+ (f"({op.peer})" if op.op in comm_types else "")
 					for op in rank_ops
 				],
 			)
 		)
 		lines.append(f"Rank {rank}: {ops_str}")
 	return "\n".join(lines)
+
+
+def mark_replayable_forwards(schedule):
+	"""
+	Tell each forward whether anything will rebuild the activations it produces.
+
+	Rebuilding them means replaying the forward, which only works if it kept what the replay starts
+	from. Whether that happens is decided by the schedule, not by the forward, so it has to be
+	carried back to it before the schedule runs.
+
+	The condition is that a recompute-forward exists for the same block and micro-batch, in either
+	of the places one is scheduled: ``RECOMPUTE_FORWARD`` between ``F`` and ``B`` for a stage that
+	recomputes itself, and ``RECOMPUTE_FORWARD_FOR_PARAMS`` between ``B`` and ``W`` for one whose
+	activations are dropped after its backward.
+
+	:param schedule: operations of the whole schedule, in order
+	:type schedule: List[Operation]
+	:return: the same operations, with ``REPLAYABLE`` set on the forwards concerned
+	:rtype: List[Operation]
+	"""
+	replayed = {
+		(op.block_id, op.mb_id)
+		for op in schedule
+		if op.op in (OperationType.RECOMPUTE_FORWARD, OperationType.RECOMPUTE_FORWARD_FOR_PARAMS)
+	}
+
+	for op in schedule:
+		if op.op is OperationType.FORWARD and (op.block_id, op.mb_id) in replayed:
+			op.options[OpOptions.REPLAYABLE] = True
+
+	return schedule
 
 
 def check_schedule_validity(schedule):
@@ -236,35 +272,52 @@ def check_schedule_validity(schedule):
 	.. warning::
 		Some of these checks may not pass for your custom, specific schedule. If this is the case, please report it to the developers.
 	"""
-	ranks = set(op.rank for op in schedule)
+	seen = set()
+	for op in schedule:
+		assert op not in seen, f"{op} appears twice in the schedule"
+		seen.add(op)
+
+	stages = set(op.block_id for op in schedule)
 	n_mb = len(set(op.mb_id for op in schedule if op.mb_id is not None))
 
-	def find(nodes, cond):
-		for i, node in enumerate(nodes):
-			if cond(node):
-				return i, node
-		return -1, None
+	op_indices = {}
+	for idx, op in enumerate(schedule):
+		if (op.block_id, op.mb_id, op.op) not in op_indices:
+			op_indices[op.block_id, op.mb_id, op.op] = idx
 
-	for rank in ranks:
-		rank_ops = [op for op in schedule if op.rank == rank]
+	for stage in stages:
+		rank_ops = [op for op in schedule if op.block_id == stage]
 		rank_mb_ids = set(op.mb_id for op in rank_ops if op.mb_id is not None)
 		assert len(rank_mb_ids) == n_mb, (
-			f"[Rank {rank}] has {len(rank_mb_ids)} microbatches, expected {n_mb}"
+			f"[Stage {stage}] has {len(rank_mb_ids)} microbatches, expected {n_mb}"
 		)
 
 		for mb_id in rank_mb_ids:
-			mb_ops = [op for op in rank_ops if op.mb_id == mb_id]
-			i, _ = find(mb_ops, lambda op: op.op == OperationType.FORWARD)
+			f = op_indices.get((stage, mb_id, OperationType.FORWARD), None)
 			# in case of no backward, we allow to have 0 forward without remat
-			j, _ = find(mb_ops, lambda op: op.op == OperationType.BACKWARD_INPUTS)
-			assert i != -1 or j == -1, f"[Rank {rank}] Forward should be present for microbatch {mb_id}"
-			assert i < j or j == -1, (
-				f"[Rank {rank}] Forward should be before backward inputs for microbatch {mb_id}"
-			)  # we allow "no backward"
-			k, _ = find(mb_ops, lambda op: op.op == OperationType.BACKWARD_PARAMS)
-			assert k != -1 or j == -1, (
-				f"[Rank {rank}] Backward params should be present for microbatch {mb_id} since backward inputs is present"
+			b = op_indices.get((stage, mb_id, OperationType.BACKWARD_INPUTS), None)
+			assert f is not None or b is None, (
+				f"[Stage {stage}] Forward should be present for microbatch {mb_id}"
 			)
-			assert j <= k, (
-				f"[Rank {rank}] Backward params should be after backward inputs for microbatch {mb_id}"
+			assert b is None or f < b, (
+				f"[Stage {stage}] Forward should be before backward inputs for microbatch {mb_id}"
+			)  # we allow "no backward"
+			w = op_indices.get((stage, mb_id, OperationType.BACKWARD_PARAMS), None)
+			assert w is not None or b is None, (
+				f"[Stage {stage}] Backward params should be present for microbatch {mb_id} since backward inputs is present"
+			)
+			assert w is None or b < w, (
+				f"[Stage {stage}] Backward params should be after backward inputs for microbatch {mb_id}"
+			)
+			rf = op_indices.get((stage, mb_id, OperationType.RECOMPUTE_FORWARD), None)
+			assert rf is None or (f is not None and b is not None and f < rf < b), (
+				f"[Stage {stage}] Recompute forward should be between forward and backward inputs for microbatch {mb_id}"
+			)
+			rfp = op_indices.get((stage, mb_id, OperationType.RECOMPUTE_FORWARD_FOR_PARAMS), None)
+			assert rfp is None or (b is not None and w is not None and b < rfp < w), (
+				f"[Stage {stage}] Recompute forward for params should be between backward inputs and backward params for microbatch {mb_id}"
+			)
+			rb = op_indices.get((stage, mb_id, OperationType.RECOMPUTE_BACKWARD_INPUTS), None)
+			assert rb is None or (rfp is not None and rfp < rb < w), (
+				f"[Stage {stage}] Recompute backward inputs should be between recompute forward for params and backward params for microbatch {mb_id}"
 			)

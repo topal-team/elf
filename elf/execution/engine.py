@@ -4,23 +4,20 @@ Execution manager
 
 import time
 import contextlib
-from collections import deque, OrderedDict
+from collections import OrderedDict
 
 import torch
 import torch.distributed as dist
 
 
-from ..scheduling import OperationType, OpOptions
-from ..utils import Timer
-from .offload import OffloadToCPU, PinnedHostTensorPool
+from elf.scheduling import OperationType, OpOptions
+from elf.utils import Timer
+from elf.execution.offload import OffloadToCPU, PinnedHostTensorPool
 
 import logging
 import os
 
-logger = logging.getLogger("engine")
-
-precise_timings = os.environ.get("ELF_TIMINGS", False)
-precise_memory = os.environ.get("ELF_MEMORY", False)
+logger = logging.getLogger(__name__)
 
 
 def _fake_p2p(data):
@@ -93,6 +90,12 @@ def preallocate_pool(pool: PinnedHostTensorPool):
 		pool.reserve(int(size) * 1024**3, dtype=dtypes[dtype])
 
 
+def _parse_envvar(var):
+	if var in ("0", "False") or not var:
+		return False
+	return True
+
+
 class Engine:
 	"""
 	Coordinates the execution of a schedule on a list of blocks at a device/rank level.
@@ -109,8 +112,21 @@ class Engine:
 		for b in self.blocks:
 			assert b.rank == self.rank, "All blocks in a stage should be on the same rank"
 
-		if precise_timings and self.rank == 0:
-			logger.info(f"{self.rank} - Using precise timings")
+		self.precise_timings = _parse_envvar(os.environ.get("ELF_TIMINGS", False))
+		self.precise_memory = _parse_envvar(os.environ.get("ELF_MEMORY", False))
+
+		if self.precise_timings and self.rank == 0:
+			logger.info("Using precise timings")
+
+		if (
+			self.rank == 0
+			and torch.cuda.is_available()
+			and os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS") != "1"
+		):
+			logger.info(
+				"CUDA_DEVICE_MAX_CONNECTIONS is not 1: p2p sends may wait for the compute kernel "
+				"launched after them. Setting it to 1 before CUDA is initialized is usually faster."
+			)
 
 		self.id_to_block = {b.id: b for b in self.blocks}
 		self.offload_stream = torch.cuda.Stream()
@@ -128,7 +144,7 @@ class Engine:
 		:type batch: List[Tensor]
 		:param target: groundtruth, only used on the last block of the pipeline
 		:type target: List[Tensor]
-		:param loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own make sure that summing the loss of every micro-batch independently is equivalent to the loss on the entire batch (e.g. no average across batches). The loss is averaged across the entire batch at the end.
+		:param loss_fn: loss function to use ; we recommend using the torch built-in function, but if you want to use your own make sure that summing the loss of every micro-batch independently is equivalent to the loss on the entire batch (e.g. no average across batches).
 		:type loss_fn: function (Tensor, Tensor) -> Tensor
 		:param schedule: list of operations. For more info, see schedule.
 		:type schedule: list[Operation]
@@ -176,12 +192,13 @@ class Engine:
 			for offloader in offloaders[id_]:
 				offloader.exclude(block.model.parameters())
 
-		result = []
-		losses = []
+		nmb = len(mb_sizes)
+		batch_size = sum(mb_sizes)
+		result = [None] * nmb
+		losses = [None] * nmb
+		grad_fns = [None] * nmb
 
-		grad_fns = deque()
-
-		if precise_timings:
+		if self.precise_timings:
 			dist.barrier()
 			torch.cuda.synchronize()
 			start = _time_start()
@@ -201,14 +218,14 @@ class Engine:
 			if profile:
 				torch.cuda.nvtx.range_push(f"{block}:{op}")
 
-			if precise_memory:
+			if self.precise_memory:
 				torch.cuda.reset_peak_memory_stats()
 
 			if warmup_time is None and op.op != OperationType.RECV_FORWARD:
 				# Warmup time is the time spent waiting for the first forward
 				# The first operation after that is the end of warmup
 				warmup_time = 0
-				if precise_timings:
+				if self.precise_timings:
 					torch.cuda.synchronize()
 					warmup_time = _time_end(start)
 
@@ -228,10 +245,10 @@ class Engine:
 					if y is not None:
 						for output in y:
 							if isinstance(output, torch.Tensor):
-								result.append(output.detach())
+								result[op.mb_id] = output.detach()
 							else:
 								logger.warning("Non-tensor output")
-								result.append(output)
+								result[op.mb_id] = output
 
 				case OperationType.BACKWARD_INPUTS:
 					block.backward_inputs(op.mb_id, **op.options)
@@ -243,20 +260,20 @@ class Engine:
 					block.backward_params(op.mb_id, **op.options)
 
 				case OperationType.SEND_FORWARD:
-					if op.options.get("dst") in self.id_to_block:
+					if op.peer in self.id_to_block:
 						# The destination block is on the same device ; we bypass p2p comms
-						dst_block = self.id_to_block.get(op.options.get("dst"))
+						dst_block = self.id_to_block.get(op.peer)
 						_transfer_forward(block, dst_block, op.mb_id)
 
-					block.send_forward(op.mb_id, **op.options)
+					block.send_forward(op.mb_id, op.peer, **op.options)
 
 				case OperationType.SEND_BACKWARD:
-					if op.options.get("dst") in self.id_to_block:
+					if op.peer in self.id_to_block:
 						# The destination block is on the same device ; we bypass p2p comms
-						dst_block = self.id_to_block.get(op.options.get("dst"))
+						dst_block = self.id_to_block.get(op.peer)
 						_transfer_backward(block, dst_block, op.mb_id)
 
-					block.send_backward(op.mb_id, **op.options)
+					block.send_backward(op.mb_id, op.peer, **op.options)
 
 				case OperationType.RECV_FORWARD:
 					if block.is_first:
@@ -264,19 +281,21 @@ class Engine:
 						for mb, var in zip(microbatch, block.input_variables):
 							var.set(var.to_process, op.mb_id, _fake_p2p(mb))
 
-					block.recv_forward(op.mb_id, mb_sizes[op.mb_id], **op.options)
+					block.recv_forward(op.mb_id, mb_sizes[op.mb_id], op.peer, **op.options)
 
 				case OperationType.RECV_BACKWARD:
-					block.recv_backward(op.mb_id, mb_sizes[op.mb_id], **op.options)
+					block.recv_backward(op.mb_id, mb_sizes[op.mb_id], op.peer, **op.options)
 
 				case OperationType.LOSS_FORWARD:
 					if block.is_last:
-						assert op.mb_id < len(result), (
-							f"Loss forward for mb {op.mb_id} but only {len(result)} results computed"
+						assert result[op.mb_id] is not None, (
+							f"Loss forward for mb {op.mb_id} that was not computed yet"
 						)
-						loss, grad_fn = compute_loss(block, result[op.mb_id], microtargets[op.mb_id], loss_fn)
-						losses.append(loss)
-						grad_fns.append(grad_fn)
+						loss, grad_fn = compute_loss(
+							block, result[op.mb_id], microtargets[op.mb_id], loss_fn, batch_size
+						)
+						losses[op.mb_id] = loss
+						grad_fns[op.mb_id] = grad_fn
 						logger.debug(f"Rank {self.rank} - Finished forward of {block}")
 					else:
 						logger.warning(f"Tried to compute loss on a non-last block {block}")
@@ -284,19 +303,26 @@ class Engine:
 
 				case OperationType.LOSS_BACKWARD:
 					if block.is_last:
-						assert op.mb_id < len(losses), (
-							f"Loss backward for mb {op.mb_id} but only {len(losses)} losses computed"
+						assert losses[op.mb_id] is not None, (
+							f"Loss backward for mb {op.mb_id} that was not computed yet"
 						)
-						grad_fn = grad_fns.popleft()
+						grad_fn = grad_fns[op.mb_id]
+						grad_fns[op.mb_id] = (
+							None  # delete grad_fn immediately because it holds a reference to the loss
+						)
 						with Timer(name=f"backward({block.id}:{op.mb_id})") as timer:
 							grads = grad_fn()
 						block.compute_time.append(timer)
+						del grad_fn
 
 						# Don't start offloading until we finished computing!
 						self.offload_stream.wait_stream(torch.cuda.current_stream())
 						with torch.cuda.stream(self.offload_stream):
 							with torch.no_grad():
-								result[op.mb_id] = result[op.mb_id].to("cpu", non_blocking=True)
+								offloaded = torch.empty_like(result[op.mb_id], device="cpu", pin_memory=True)
+								result[op.mb_id].record_stream(self.offload_stream)
+								offloaded.copy_(result[op.mb_id], non_blocking=True)
+								result[op.mb_id] = offloaded
 
 						for grad, var in zip(grads, block.output_variables):
 							for dst in var:  # should be only one destination
@@ -305,7 +331,7 @@ class Engine:
 						logger.warning(f"Tried to compute loss backward on a non-last block {block}")
 						continue
 
-				case OperationType.RECOMPUTE_FORWARD:
+				case OperationType.RECOMPUTE_FORWARD | OperationType.RECOMPUTE_FORWARD_FOR_PARAMS:
 					block.recompute_forward(op.mb_id, **op.options)
 
 				case OperationType.RECOMPUTE_BACKWARD_INPUTS:
@@ -321,23 +347,24 @@ class Engine:
 				case _:
 					raise Exception(f"Unknown operation : {op}")
 
-			if precise_memory:
+			if self.precise_memory:
 				torch.cuda.synchronize()
 
-			memories[str(op)] = torch.cuda.memory_allocated()
-			peak_memories[str(op)] = torch.cuda.max_memory_allocated()
+				# safe to assume that all different ops have different str representations
+				memories[str(op)] = torch.cuda.memory_allocated()
+				peak_memories[str(op)] = torch.cuda.max_memory_allocated()
 
 			if profile:
 				torch.cuda.nvtx.range_pop()
 
 		logger.debug(f"Rank {self.rank} - Finished execution")
 
-		if precise_timings:
+		if self.precise_timings:
 			torch.cuda.synchronize()
 
 		cooldown_start = time.time()
 
-		if precise_timings:
+		if self.precise_timings:
 			# dist.barrier()
 			torch.cuda.synchronize()
 
@@ -345,7 +372,7 @@ class Engine:
 
 		compute_time = 0
 		all_events = {}
-		if precise_timings:
+		if self.precise_timings:
 			for block in self.blocks:
 				compute_time += sum([f.time() for f in block.compute_time])
 				all_events.update({timer.name: timer.time() for timer in block.compute_time})
@@ -371,7 +398,7 @@ class Engine:
 		return result, losses, stats, detailed_stats
 
 
-def compute_loss(block, output, target, loss_fn):
+def compute_loss(block, output, target, loss_fn, batch_size):
 	"""
 	Computes the loss value and prepares a function to compute the gradients with respect to the block's outputs.
 
@@ -400,7 +427,7 @@ def compute_loss(block, output, target, loss_fn):
 
 	block.compute_time.append(timer)
 	loss = (
-		loss / (target.numel() // target.size(0))
+		loss / ((target.numel() // target.size(0)) * batch_size)
 	)  # see documentation for torch losses: loss is reduced by default, but we will divide by batch size at the end (we only have micro-batch size here)
 
 	def grad_fn():

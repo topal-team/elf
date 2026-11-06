@@ -1,5 +1,3 @@
-.. pipeline documentation master file
-
 ELF: Efficient deep Learning Framework
 ======================================
 
@@ -49,17 +47,17 @@ User Guide
 
    advanced_usage
 
+Environment Variables
+---------------------
+
+.. toctree::
+   :maxdepth: 1
+
+   envvars
 
 API Reference
 -------------
 
-Pipeline Object
-~~~~~~~~~~~~~~~
-
-.. autoclass:: elf.Pipeline
-   :members:
-   :undoc-members:
-   :show-inheritance:
 
 .. autosummary::
    :toctree: generated
@@ -67,6 +65,9 @@ Pipeline Object
    :recursive:
 
    elf
+
+
+
 
 Indices and tables
 ==================

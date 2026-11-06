@@ -2,22 +2,21 @@
 Automatic partition of a computation graph
 """
 
-from .tracing import (
+from elf.partitioners.tracing import (
 	try_extract_graph,
 	extract_graph_fx,
 	extract_graph_fx_safe,
 	extract_graph_export,
 	trace,
 )
-from .partition import PartitionResult, partition, split
-from .profile import profile_operations
-from .utils import Signature, sequential_signatures
+from elf.partitioners.partition import PartitionResult, partition, split
+from elf.partitioners.profile import profile_operations
 
-from .custom import split_graph, split_graph_constrained
-from .metis import split_graph_metis
-from .dagP import split_graph_dagP
+from elf.partitioners.custom import split_graph, split_graph_balanced
+from elf.partitioners.metis import split_graph_metis
+from elf.partitioners.dagP import split_graph_dagP
 
-from ..registry import PARTITIONERS, TRACERS
+from elf.registry import PARTITIONERS, TRACERS
 
 PARTITIONERS.register(
 	"naive",
@@ -25,9 +24,9 @@ PARTITIONERS.register(
 	"Naively partition into roughly equal blocks without taking memory into account.",
 )
 PARTITIONERS.register(
-	"constrained",
-	split_graph_constrained,
-	"Naively partition into roughly equal blocks, with a constraint of 1 input and 1 output per block.",
+	"balanced",
+	split_graph_balanced,
+	"Partition into contiguous blocks, searching for the best time balance with few tensors per cut.",
 )
 PARTITIONERS.register(
 	"metis", split_graph_metis, "Graph partitioning using METIS. Requires gpmetis to be installed."
@@ -46,12 +45,4 @@ TRACERS.register(
 TRACERS.register("export", extract_graph_export, "Extract graph using torch.export")
 
 
-__all__ = [
-	"PartitionResult",
-	"partition",
-	"trace",
-	"split",
-	"profile_operations",
-	"sequential_signatures",
-	"Signature",
-]
+__all__ = ["PartitionResult", "partition", "trace", "split", "profile_operations"]

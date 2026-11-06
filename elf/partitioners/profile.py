@@ -12,7 +12,7 @@ DONT_CUT_HERE = 2 << 24
 
 
 class Profiler(torch.fx.Interpreter):
-	def __init__(self, niter=10, *args, **kwargs):
+	def __init__(self, niter, *args, **kwargs):
 		self.times = {}
 		self.memories = {}
 		self.niter = niter
@@ -70,7 +70,7 @@ class Profiler(torch.fx.Interpreter):
 
 			# LayerDWs need to be reset
 			if isinstance(module, LayerDW):
-				module.last_input = None
+				module.clear()
 
 	def run_node(self, node):
 		# Move all inputs to the specified device
@@ -142,7 +142,16 @@ def profile_operations(graph_module, input_sample, niter=10):
 		# Values should be in the same order as the placeholders
 		input_sample = list(input_sample.values())
 
-	ninputs = len([n for n in graph_module.graph.nodes if n.op == "placeholder"])
+	input_nodes = [n for n in graph_module.graph.nodes if n.op == "placeholder"]
+	ninputs = len(input_nodes)
+	# Fill missing inputs with default values
+	while len(input_sample) < ninputs:
+		next_node = input_nodes[len(input_sample)]
+		assert next_node.args is not None, (
+			f"Required argument {next_node.name} was not provided a value"
+		)
+		input_sample.append(next_node.args)
+
 	assert ninputs == len(input_sample), f"Expected {ninputs} inputs, got {len(input_sample)}"
 
 	with torch.no_grad():
