@@ -1,6 +1,10 @@
 # ELF – Efficient Deep Learning Framework
 
-ELF is a research-oriented framework built on top of **PyTorch** that makes training very large neural networks on multi-GPU setups effortless. It automates everything that usually hurts when scaling a model beyond the memory of a single GPU: graph extraction, partitioning, device placement, scheduling, communication, and memory optimisation – all exposed through a single high-level API.
+> This branch contains the code and data of the experiments of *Optimized Forward-Backward
+> Rematerialization for Memory-Efficient Pipeline Parallel Training* (NeurIPS 2026). See
+> [PAPER.md](PAPER.md) to reproduce them.
+
+ELF is a research-oriented framework built on top of PyTorch that makes training very large neural networks on multi-GPU setups effortless. It automates everything that usually hurts when scaling a model beyond the memory of a single GPU: graph extraction, partitioning, device placement, scheduling, communication, and memory optimisation – all exposed through a single high-level API.
 
 ## Highlights
 

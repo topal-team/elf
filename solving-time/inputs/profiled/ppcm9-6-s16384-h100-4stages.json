@@ -1,0 +1,169 @@
+{
+    "model": {
+        "architecture": "full",
+        "hidden_dim": 5120,
+        "seq_len": 16384,
+        "n_blocks": 30,
+        "num_heads": 40,
+        "dropout": 0.1,
+        "ffn_dim": 20480,
+        "sdp_backend": "fatt3",
+        "input_dim": 16000,
+        "dtype": "bfloat16"
+    },
+    "nparams": 9601638400,
+    "stages": [
+        {
+            "T": [
+                211.98943837483725,
+                398.6697713216146,
+                89.31785481770834
+            ],
+            "M": [
+                19219.37890625,
+                17920.0,
+                0.0
+            ],
+            "Mpeak": [
+                19379.37841796875,
+                1360.00048828125,
+                50.0
+            ],
+            "Mparams": 4356.5234375,
+            "Mpeak_no_grad": 8800.125,
+            "Tcomm": 1.4929129606485367,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.12431742350258901,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 211.98943837483725,
+                    "mem_freed": 7839.875
+                }
+            ],
+            "Mfp": 7840.0,
+            "Mbp": 10080.0,
+            "Minput": 0.125,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                241.64881083170573,
+                454.71844278971355,
+                102.25237350463867
+            ],
+            "M": [
+                21942.00439453125,
+                20640.0,
+                0.0
+            ],
+            "Mpeak": [
+                22102.00390625,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 4800.3125,
+            "Mpeak_no_grad": 10080.0,
+            "Tcomm": 1.4929129606485367,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 241.64881083170573,
+                    "mem_freed": 8800.0
+                }
+            ],
+            "Mfp": 8960.0,
+            "Mbp": 11520.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                241.64881083170573,
+                454.71844278971355,
+                102.25237350463867
+            ],
+            "M": [
+                21942.00439453125,
+                20640.0,
+                0.0
+            ],
+            "Mpeak": [
+                22102.00390625,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 4800.3125,
+            "Mpeak_no_grad": 10080.0,
+            "Tcomm": 1.4929129606485367,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 241.64881083170573,
+                    "mem_freed": 8800.0
+                }
+            ],
+            "Mfp": 8960.0,
+            "Mbp": 11520.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                217.11254221598307,
+                403.4287892659505,
+                92.90284144083658
+            ],
+            "M": [
+                20719.25439453125,
+                18740.0,
+                0.0
+            ],
+            "Mpeak": [
+                21719.25439453125,
+                2000.0,
+                0.0
+            ],
+            "Mparams": 4356.5234375,
+            "Mpeak_no_grad": 8960.0,
+            "Tcomm": 1.4929129606485367,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.12253316243487689,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 217.11254221598307,
+                    "mem_freed": 7840.0
+                }
+            ],
+            "Mfp": 8000.0,
+            "Mbp": 10080.00048828125,
+            "Minput": 160.0,
+            "Moutput": 500.0
+        }
+    ]
+}

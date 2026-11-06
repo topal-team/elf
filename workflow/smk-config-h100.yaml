@@ -1,0 +1,17 @@
+RESULTS_DIR: "../results/ilps"
+RUNS_DIR: "runs"
+LOG_DIR: "../logs"
+
+# Any PuLP solver name, e.g. CPLEX_PY (used in the paper) or PULP_CBC_CMD (open-source, slower)
+SOLVER: "CPLEX_PY"
+
+SLURM:
+  # Common sbatch options for GPU jobs; adapt to your cluster
+  account: "<your-account>"
+  constraint: "h100"
+  gpus_per_node: 4
+  # Template for GPU flag. On some clusters use '--gpus-per-node={ngpus}'
+  gpus_flag: "--gpus={ngpus}"
+  # Commands run on the node before each job
+  setup: "export OMP_NUM_THREADS=4"
+  venv_activate: "source <path-to-venv>/bin/activate"

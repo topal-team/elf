@@ -1,0 +1,18 @@
+import os
+
+configfile: "smk-config-h100.yaml"
+
+ROOT = os.path.abspath(os.path.join(workflow.basedir, ".."))
+os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [ROOT, os.environ.get("PYTHONPATH")]))
+
+include: "rules/cpu.smk"
+include: "rules/gpu.smk"
+
+wildcard_constraints:
+	model=r"[a-zA-Z0-9_-]+",
+	sequence_length=r"\d+",
+	ngpus=r"\d+",
+	nstages=r"\d+",
+	gpu_type=r"[a-zA-Z0-9]+",
+	mem=r"\d+",
+	method=r"[a-zA-Z0-9_-]+"

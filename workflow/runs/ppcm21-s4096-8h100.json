@@ -1,0 +1,66 @@
+{
+    "model": {
+        "architecture": "full",
+        "hidden_dim": 6144,
+        "seq_len": 4096,
+        "n_blocks": 46,
+        "num_heads": 48,
+        "dropout": 0.1,
+        "ffn_dim": 24576,
+        "sdp_backend": "fatt3",
+        "input_dim": 16000,
+        "dtype": "bfloat16"
+    },
+    "ngpus": 8,
+    "nmb": 16,
+    "ntrials": 10,
+    "memgpu": 72000,
+    "methods": [
+        {
+            "name": "zbh2",
+            "waves": 1,
+            "methods": [
+                "NoRemat",
+                "Uni-F-Remat",
+                "Uni-FB-Remat",
+                "F-StageRemat",
+                "FB-StageRemat",
+                "F-Greedy",
+                "FB-Greedy"
+            ]
+        },
+        {
+            "name": "1f1b",
+            "waves": 1,
+            "methods": [
+                "NoRemat",
+                "Uni-F-Remat",
+                "F-StageRemat",
+                "F-Greedy"
+            ]
+        },
+        {
+            "name": "megatron",
+            "waves": 2,
+            "methods": [
+                "NoRemat",
+                "Uni-F-Remat",
+                "F-StageRemat",
+                "F-Greedy"
+            ]
+        },
+        {
+            "name": "zbv",
+            "waves": 2,
+            "methods": [
+                "NoRemat",
+                "Uni-F-Remat",
+                "Uni-FB-Remat",
+                "F-StageRemat",
+                "FB-StageRemat",
+                "F-Greedy",
+                "FB-Greedy"
+            ]
+        }
+    ]
+}

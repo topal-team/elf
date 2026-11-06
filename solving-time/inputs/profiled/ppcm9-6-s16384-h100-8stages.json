@@ -1,0 +1,321 @@
+{
+    "model": {
+        "architecture": "full",
+        "hidden_dim": 5120,
+        "seq_len": 16384,
+        "n_blocks": 30,
+        "num_heads": 40,
+        "dropout": 0.1,
+        "ffn_dim": 20480,
+        "sdp_backend": "fatt3",
+        "input_dim": 16000,
+        "dtype": "bfloat16"
+    },
+    "nparams": 9601638400,
+    "stages": [
+        {
+            "T": [
+                91.32086639404297,
+                171.34970703125,
+                37.97868410746256
+            ],
+            "M": [
+                8328.376953125,
+                7680.0,
+                0.0
+            ],
+            "Mpeak": [
+                8488.37646484375,
+                1360.00048828125,
+                50.0
+            ],
+            "Mparams": 1956.3671875,
+            "Mpeak_no_grad": 4320.125,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.7514704386393305,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 91.32086639404297,
+                    "mem_freed": 3359.875
+                }
+            ],
+            "Mfp": 3360.0,
+            "Mbp": 4320.0,
+            "Minput": 0.125,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                121.70427703857422,
+                227.5851801554362,
+                50.628684997558594
+            ],
+            "M": [
+                11051.00244140625,
+                10400.0,
+                0.0
+            ],
+            "Mpeak": [
+                11211.001953125,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 2400.15625,
+            "Mpeak_no_grad": 5600.0,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 121.70427703857422,
+                    "mem_freed": 4320.0
+                }
+            ],
+            "Mfp": 4480.0,
+            "Mbp": 5760.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                121.70427703857422,
+                227.5851801554362,
+                50.628684997558594
+            ],
+            "M": [
+                11051.00244140625,
+                10400.0,
+                0.0
+            ],
+            "Mpeak": [
+                11211.001953125,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 2400.15625,
+            "Mpeak_no_grad": 5600.0,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 121.70427703857422,
+                    "mem_freed": 4320.0
+                }
+            ],
+            "Mfp": 4480.0,
+            "Mbp": 5760.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                121.70427703857422,
+                227.5851801554362,
+                50.628684997558594
+            ],
+            "M": [
+                11051.00244140625,
+                10400.0,
+                0.0
+            ],
+            "Mpeak": [
+                11211.001953125,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 2400.15625,
+            "Mpeak_no_grad": 5600.0,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 121.70427703857422,
+                    "mem_freed": 4320.0
+                }
+            ],
+            "Mfp": 4480.0,
+            "Mbp": 5760.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                121.70427703857422,
+                227.5851801554362,
+                50.628684997558594
+            ],
+            "M": [
+                11051.00244140625,
+                10400.0,
+                0.0
+            ],
+            "Mpeak": [
+                11211.001953125,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 2400.15625,
+            "Mpeak_no_grad": 5600.0,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 121.70427703857422,
+                    "mem_freed": 4320.0
+                }
+            ],
+            "Mfp": 4480.0,
+            "Mbp": 5760.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                121.70427703857422,
+                227.5851801554362,
+                50.628684997558594
+            ],
+            "M": [
+                11051.00244140625,
+                10400.0,
+                0.0
+            ],
+            "Mpeak": [
+                11211.001953125,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 2400.15625,
+            "Mpeak_no_grad": 5600.0,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 121.70427703857422,
+                    "mem_freed": 4320.0
+                }
+            ],
+            "Mfp": 4480.0,
+            "Mbp": 5760.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                121.70427703857422,
+                227.5851801554362,
+                50.628684997558594
+            ],
+            "M": [
+                11051.00244140625,
+                10400.0,
+                0.0
+            ],
+            "Mpeak": [
+                11211.001953125,
+                1360.00048828125,
+                0.0
+            ],
+            "Mparams": 2400.15625,
+            "Mpeak_no_grad": 5600.0,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 121.70427703857422,
+                    "mem_freed": 4320.0
+                }
+            ],
+            "Mfp": 4480.0,
+            "Mbp": 5760.0,
+            "Minput": 160.0,
+            "Moutput": 160.0
+        },
+        {
+            "T": [
+                101.4489985148112,
+                179.43755187988282,
+                41.37114041646321
+            ],
+            "M": [
+                9828.25244140625,
+                8500.0,
+                0.0
+            ],
+            "Mpeak": [
+                10828.25244140625,
+                2000.0,
+                0.0
+            ],
+            "Mparams": 1956.3671875,
+            "Mpeak_no_grad": 4480.0,
+            "Tcomm": 1.4733543998003005,
+            "forward_remat_options": [
+                {
+                    "name": "selective_fwd",
+                    "overhead": 0.0,
+                    "mem_freed": 0.0
+                }
+            ],
+            "backward_remat_options": [
+                {
+                    "name": "activations_bwd",
+                    "overhead": 101.4489985148112,
+                    "mem_freed": 3360.0
+                }
+            ],
+            "Mfp": 3520.0,
+            "Mbp": 4320.00048828125,
+            "Minput": 160.0,
+            "Moutput": 500.0
+        }
+    ]
+}

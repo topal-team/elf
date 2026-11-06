@@ -1,0 +1,1533 @@
+{
+ "model": {
+  "architecture": "full",
+  "hidden_dim": 6144,
+  "seq_len": 4096,
+  "n_blocks": 46,
+  "num_heads": 48,
+  "dropout": 0.1,
+  "ffn_dim": 24576,
+  "sdp_backend": "fatt3",
+  "input_dim": 16000,
+  "dtype": "bfloat16"
+ },
+ "nparams": 21035040768,
+ "stages": [
+  {
+   "T": [
+    6.007282129923502,
+    9.253840001424154,
+    5.108642101287842
+   ],
+   "M": [
+    864.8447265625,
+    768.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.84423828125,
+    408.00048828125,
+    72.0
+   ],
+   "Mparams": 1051.546875,
+   "Mpeak_no_grad": 624.03125,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 5.503964805603028,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 5.503416538238525,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 6.007282129923502,
+     "mem_freed": 335.96875
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 0.03125,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    5.9762122631073,
+    8.403146553039551,
+    5.110232559839885
+   ],
+   "M": [
+    864.8134765625,
+    816.0,
+    0.0
+   ],
+   "Mpeak": [
+    912.81298828125,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 864.046875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.6434785207112625,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.643591594696044,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 5.9762122631073,
+     "mem_freed": 288.0
+    }
+   ],
+   "Mfp": 336.0,
+   "Mbp": 432.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    11.849874178568522,
+    16.86546255747477,
+    10.106571769714355
+   ],
+   "M": [
+    1681.62646484375,
+    1584.0,
+    0.0
+   ],
+   "Mpeak": [
+    1729.6259765625,
+    408.00048828125,
+    24.0
+   ],
+   "Mparams": 1728.09375,
+   "Mpeak_no_grad": 1008.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 8.49591865539551,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a0_f2",
+     "overhead": 8.50172888437907,
+     "mem_freed": 1176.84423828125
+    },
+    {
+     "name": "fwd_remat_a1_f2",
+     "overhead": 11.327719243367515,
+     "mem_freed": 1441.6259765625
+    },
+    {
+     "name": "fwd_remat_a2_f2",
+     "overhead": 11.27523937225342,
+     "mem_freed": 1441.6259765625
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 11.849874178568522,
+     "mem_freed": 624.0
+    }
+   ],
+   "Mfp": 672.0,
+   "Mbp": 864.0,
+   "Minput": 48.0,
+   "Moutput": 48.0
+  },
+  {
+   "T": [
+    7.301481628417969,
+    9.826443767547607,
+    6.393310944239299
+   ],
+   "M": [
+    1240.81396484375,
+    990.0,
+    0.0
+   ],
+   "Mpeak": [
+    1490.81396484375,
+    500.0,
+    24.0
+   ],
+   "Mparams": 1051.546875,
+   "Mpeak_no_grad": 624.0,
+   "Tcomm": 0.5654279999434948,
+   "forward_remat_options": [
+    {
+     "name": "fwd_remat_a0_f1",
+     "overhead": 5.600718911488851,
+     "mem_freed": 720.81298828125
+    },
+    {
+     "name": "fwd_remat_a1_f1",
+     "overhead": 5.601052729288737,
+     "mem_freed": 720.81298828125
+    }
+   ],
+   "backward_remat_options": [
+    {
+     "name": "activations_bwd",
+     "overhead": 7.301481628417969,
+     "mem_freed": 336.0
+    }
+   ],
+   "Mfp": 384.0,
+   "Mbp": 432.00048828125,
+   "Minput": 48.0,
+   "Moutput": 125.0
+  }
+ ]
+}
