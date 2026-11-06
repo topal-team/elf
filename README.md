@@ -112,6 +112,13 @@ placement = [0,1,2,3, 3,2,1,0]   # bidirectional pipeline for Hanayo / ZBV
 
 The full documentation can be generated with Sphinx. Go to `docs/` and run `make html`.
 
+## Paper experiments
+
+The code and data of the experiments of *Optimized Forward-Backward Rematerialization for
+Memory-Efficient Pipeline Parallel Training* (NeurIPS 2026) are in the
+[`neurips26-experiments`](https://github.com/topal-team/elf/tree/neurips26-experiments) branch. See
+`PAPER.md` in that branch to reproduce them.
+
 ## Citation
 
 If you use this project, please cite:
